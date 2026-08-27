@@ -9,6 +9,7 @@ use crate::models::{
     PartitionSuggestion, QrSession, QrStatus, Tag, TagCategory, TagInput, VideoItem,
 };
 use crate::source::SourceAdapter;
+use crate::source::browser::BrowserBookmarkClient;
 use crate::state::AppState;
 
 fn to_video_item(item: &crate::models::ExternalItem, local_id: i64) -> VideoItem {
@@ -449,4 +450,65 @@ pub async fn update_item_notes(
 #[tauri::command]
 pub fn open_url(url: String) -> Result<(), String> {
     webbrowser::open(&url).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn import_browser_bookmarks(
+    state: State<'_, AppState>,
+    html_content: String,
+    tag_specs: Vec<TagInput>,
+) -> Result<ImportResult, String> {
+    let items = BrowserBookmarkClient::parse_bookmarks_html(&html_content)
+        .map_err(|error| error.to_string())?;
+
+    let total = items.len() as i64;
+    let collection = CollectionInfo {
+        source: "browser".into(),
+        id: "browser-bookmarks".into(),
+        title: "浏览器书签".into(),
+        owner: None,
+        count: total,
+        url: None,
+    };
+
+    let run_id = db::create_import_run(&state.pool, &collection, total, false)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let mut imported = 0i64;
+    let mut skipped = 0i64;
+    let mut failed = 0i64;
+    let mut errors = Vec::new();
+
+    for item in &items {
+        let result = async {
+            let (item_id, inserted) = db::upsert_item(&state.pool, item).await?;
+            for tag_spec in &tag_specs {
+                let tag_id = db::get_or_create_tag(&state.pool, tag_spec).await?;
+                db::attach_tag(&state.pool, item_id, tag_id).await?;
+            }
+            db::rebuild_item_fts(&state.pool, item_id).await?;
+            db::link_import_item(&state.pool, run_id, item_id).await?;
+            Ok::<bool, AppError>(inserted)
+        }
+        .await;
+
+        match result {
+            Ok(true) => imported += 1,
+            Ok(false) => skipped += 1,
+            Err(error) => {
+                failed += 1;
+                if errors.len() < 20 {
+                    errors.push(error.to_string());
+                }
+            }
+        }
+    }
+
+    db::finish_import_run(&state.pool, run_id, imported, skipped, failed, &errors)
+        .await
+        .map_err(|error| error.to_string())?;
+    db::build_import_result(&state.pool, run_id)
+        .await
+        .map_err(|error| error.to_string())
 }

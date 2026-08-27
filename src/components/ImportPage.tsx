@@ -6,16 +6,19 @@ import {
   ChevronRight,
   ClipboardPaste,
   FolderDown,
+  Globe,
   Link,
   LoaderCircle,
   LogIn,
   RefreshCcw,
   Tag,
-  Undo2
+  Undo2,
+  Upload
 } from "lucide-react";
 import { api } from "../lib/api";
 import type {
   BilibiliProfile,
+  BrowserImportRequest,
   CollectionInfo,
   ImportPreview,
   ImportResult,
@@ -28,7 +31,7 @@ import type {
 } from "../types";
 import { TagPoolInput } from "./TagPoolInput";
 
-type ImportMode = "login" | "public";
+type ImportMode = "login" | "public" | "browser";
 type ImportStep = "source" | "tags" | "done";
 
 interface PerVideoTagState {
@@ -62,6 +65,9 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<ImportResult | null>(null);
+  const [browserHtmlContent, setBrowserHtmlContent] = useState("");
+  const [browserFileName, setBrowserFileName] = useState("");
+  const [browserItems, setBrowserItems] = useState<VideoItem[]>([]);
 
   const loadCollections = useCallback(async () => {
     setBusy(true);
@@ -155,10 +161,112 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
     }
   };
 
+  const parseBrowserHtmlLocally = (html: string): VideoItem[] => {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, "text/html");
+    const items: VideoItem[] = [];
+    let index = 0;
+
+    const walk = (node: Element, folderPath: string) => {
+      const children = Array.from(node.children);
+      for (const child of children) {
+        if (child.tagName === "DT") {
+          const h3 = child.querySelector(":scope > H3");
+          const a = child.querySelector(":scope > A");
+          if (h3) {
+            const folderName = h3.textContent?.trim() || "";
+            const dl = child.querySelector(":scope > DL");
+            if (dl) {
+              walk(dl, folderPath ? `${folderPath} / ${folderName}` : folderName);
+            }
+          } else if (a) {
+            const href = a.getAttribute("href") || "";
+            const title = a.textContent?.trim() || "";
+            const addDate = a.getAttribute("add_date");
+            const icon = a.getAttribute("icon");
+            const favoriteTime = addDate ? parseInt(addDate, 10) : undefined;
+            index += 1;
+            items.push({
+              id: -index,
+              source: "browser",
+              externalId: href,
+              sourceUrl: href,
+              title: title || href,
+              description: "",
+              coverUrl: icon || undefined,
+              authorName: folderPath || undefined,
+              partitionName: folderPath || undefined,
+              favoriteTime,
+              tags: [],
+              duration: undefined,
+              publishedAt: undefined,
+              authorId: undefined,
+              coverLocalPath: undefined,
+              notes: undefined
+            });
+          }
+        }
+        if (child.tagName === "DL") {
+          walk(child, folderPath);
+        }
+      }
+    };
+
+    const body = doc.querySelector("body");
+    if (body) {
+      const dl = body.querySelector("DL");
+      if (dl) {
+        walk(dl, "");
+      }
+    }
+    return items;
+  };
+
+  const handleBrowserFile = (file: File) => {
+    setBrowserFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = () => {
+      const html = reader.result as string;
+      setBrowserHtmlContent(html);
+      const items = parseBrowserHtmlLocally(html);
+      setBrowserItems(items);
+      setError("");
+    };
+    reader.onerror = () => {
+      setError("读取文件失败。");
+    };
+    reader.readAsText(file);
+  };
+
+  const handleBrowserDrop = (event: React.DragEvent) => {
+    event.preventDefault();
+    const file = event.dataTransfer.files[0];
+    if (file) {
+      handleBrowserFile(file);
+    }
+  };
+
+  const handleBrowserFileInput = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      handleBrowserFile(file);
+    }
+  };
+
   const currentCollection = useMemo(() => {
     if (mode === "public") return parsedCollection;
+    if (mode === "browser" && browserItems.length > 0) {
+      return {
+        source: "browser",
+        id: "browser-bookmarks",
+        title: browserFileName || "浏览器书签",
+        owner: undefined,
+        count: browserItems.length,
+        url: undefined
+      } as CollectionInfo;
+    }
     return collections.find((item) => item.id === selectedCollectionId) || null;
-  }, [mode, parsedCollection, collections, selectedCollectionId]);
+  }, [mode, parsedCollection, collections, selectedCollectionId, browserItems, browserFileName]);
 
   const startPreview = async () => {
     if (!currentCollection) {
@@ -167,6 +275,32 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
     }
     setBusy(true);
     setError("");
+
+    if (mode === "browser") {
+      const items = browserItems;
+      const states: Record<string, PerVideoTagState> = {};
+      items.forEach((item) => {
+        states[item.externalId] = {
+          partitionTag: item.partitionName || "",
+          partitionManuallyEdited: false,
+          otherTags: []
+        };
+      });
+      const previewData: ImportPreview = {
+        collection: currentCollection,
+        items,
+        partitionSuggestions: []
+      };
+      setPreview(previewData);
+      setPerVideoTags(states);
+      setFolderPartitionEnabled(false);
+      setFolderPartitionTag("");
+      setCurrentPage(1);
+      setStep("tags");
+      setBusy(false);
+      return;
+    }
+
     try {
       const input = {
         kind: mode === "login" ? ("favorites" as const) : ("public_url" as const),
@@ -251,6 +385,27 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
     setBusy(true);
     setError("");
     try {
+      if (mode === "browser") {
+        const tagSpecs: TagInput[] = [];
+        const request: BrowserImportRequest = {
+          htmlContent: browserHtmlContent,
+          tagSpecs
+        };
+        const next = await api.importBrowserBookmarks(request);
+        setResult(next);
+        setStep("done");
+        window.setTimeout(() => {
+          setStep("source");
+          setPreview(null);
+          setResult(null);
+          setPerVideoTags({});
+          setBrowserHtmlContent("");
+          setBrowserFileName("");
+          setBrowserItems([]);
+        }, 1200);
+        return;
+      }
+
       const assignments: ItemTagAssignment[] = preview.items.map((item) => ({
         externalId: item.externalId,
         tagSpecs: buildTagSpecs(item, perVideoTags[item.externalId])
@@ -315,6 +470,15 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
               <Link size={20} />
               <strong>公开收藏夹链接</strong>
               <span>不登录，仅复制公开收藏夹内容到本地。</span>
+            </button>
+            <button
+              type="button"
+              className={`import-mode-card ${mode === "browser" ? "is-active" : ""}`}
+              onClick={() => setMode("browser")}
+            >
+              <Globe size={20} />
+              <strong>浏览器书签</strong>
+              <span>从浏览器导出的书签 HTML 文件中导入链接。</span>
             </button>
           </div>
 
@@ -395,7 +559,7 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
                   </button>
                 )}
               </div>
-            ) : (
+            ) : mode === "public" ? (
               <div className="public-block">
                 <label className="field-label">公开收藏夹 URL</label>
                 <div className="input-with-button">
@@ -414,6 +578,30 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
                     <strong>{parsedCollection.title}</strong>
                     <span>{parsedCollection.owner || "公开用户"}</span>
                     <span>{parsedCollection.count} 条</span>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="browser-block">
+                <label className="field-label">浏览器书签文件</label>
+                <div
+                  className="browser-drop-zone"
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={handleBrowserDrop}
+                >
+                  <Upload size={24} />
+                  <p>拖拽书签 HTML 文件到此处，或点击选择文件。</p>
+                  <input
+                    type="file"
+                    accept=".html,.htm"
+                    onChange={handleBrowserFileInput}
+                    className="browser-file-input"
+                  />
+                </div>
+                {browserFileName && (
+                  <div className="parsed-card">
+                    <strong>{browserFileName}</strong>
+                    <span>{browserItems.length} 条</span>
                   </div>
                 )}
               </div>

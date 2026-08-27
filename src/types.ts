@@ -80,6 +80,11 @@ export interface ImportRequest {
   itemTagAssignments: ItemTagAssignment[];
 }
 
+export interface BrowserImportRequest {
+  htmlContent: string;
+  tagSpecs: TagInput[];
+}
+
 export interface ImportResult {
   runId: number;
   total: number;

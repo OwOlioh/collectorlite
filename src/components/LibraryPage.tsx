@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   FileText,
+  Globe,
   LayoutGrid,
   List,
   Pencil,
@@ -289,7 +290,9 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
               </div>
 
               <div className={`video-grid ${view === "list" ? "is-list" : ""}`}>
-                {items.map((item) => (
+                {items.map((item) => {
+                  const isBrowser = item.source === "browser";
+                  return (
                   <article className="video-card" key={item.id}>
                     <label
                       className={`video-select-checkbox ${
@@ -309,7 +312,11 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
                       onClick={() => api.openUrl(item.sourceUrl)}
                       title="在浏览器打开"
                     >
-                      {resolveCoverUrl(item.coverUrl, item.coverLocalPath) ? (
+                      {isBrowser ? (
+                        <div className="browser-cover-placeholder">
+                          <Globe size={28} />
+                        </div>
+                      ) : resolveCoverUrl(item.coverUrl, item.coverLocalPath) ? (
                         <img
                           src={resolveCoverUrl(item.coverUrl, item.coverLocalPath)}
                           alt=""
@@ -318,7 +325,7 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
                       ) : (
                         <div className="cover-placeholder">无封面</div>
                       )}
-                      <span className="duration">{formatDuration(item.duration)}</span>
+                      {!isBrowser && <span className="duration">{formatDuration(item.duration)}</span>}
                     </button>
                     <div className="video-card-body">
                       <button
@@ -329,8 +336,12 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
                         {item.title}
                       </button>
                       <div className="video-meta">
-                        <span>{item.authorName || "未知作者"}</span>
-                        {item.partitionName && <span>{item.partitionName}</span>}
+                        {isBrowser ? (
+                          item.partitionName && <span>{item.partitionName}</span>
+                        ) : (
+                          <span>{item.authorName || "未知作者"}</span>
+                        )}
+                        {!isBrowser && item.partitionName && <span>{item.partitionName}</span>}
                         <span>{formatDate(item.favoriteTime || item.publishedAt)}</span>
                       </div>
                       <div className="video-tag-line">
@@ -369,7 +380,8 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
                       </div>
                     </div>
                   </article>
-                ))}
+                  );
+                })}
               </div>
             </>
           )}

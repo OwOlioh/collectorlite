@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "com.local.bili-collector",
   "build": {
-    "beforeDevCommand": "npm.cmd run dev",
+    "beforeDevCommand": "",
     "devUrl": "http://127.0.0.1:1420",
     "beforeBuildCommand": "npm.cmd run build",
     "frontendDist": "../dist"

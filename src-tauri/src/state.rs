@@ -22,7 +22,7 @@ impl AppState {
             .path()
             .app_data_dir()
             .map_err(|error| AppError::Other(error.to_string()))?;
-        let db_path = data_dir.join("bili_collector.sqlite3");
+        let db_path = data_dir.join("bili_collector_v2.sqlite3");
         let pool = db::connect(&db_path).await?;
         let bili = BilibiliClient::new()?;
         let cookie_file = data_dir.join("bilibili_cookie.txt");

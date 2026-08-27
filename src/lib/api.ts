@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   BilibiliProfile,
+  BrowserImportRequest,
   CollectionInfo,
   ImportPreview,
   ImportRequest,
@@ -71,6 +72,11 @@ export const api = {
     call<VideoItem>("update_item_tags", { itemId, tagSpecs }),
   updateItemNotes: (itemId: number, notes: string) =>
     call<VideoItem>("update_item_notes", { itemId, notes }),
+  importBrowserBookmarks: (request: BrowserImportRequest) =>
+    call<ImportResult>("import_browser_bookmarks", {
+      htmlContent: request.htmlContent,
+      tagSpecs: request.tagSpecs
+    }),
   openUrl: (url: string) => call<null>("open_url", { url })
 };
 

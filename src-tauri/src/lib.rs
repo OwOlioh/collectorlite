@@ -11,9 +11,10 @@ use tauri::Manager;
 use commands::{
     assign_tag_category, bilibili_poll_qr_login, bilibili_profile, bilibili_start_qr_login,
     create_tag_category, delete_item, delete_items, delete_items_by_tag, delete_tag,
-    delete_tag_category, execute_import, list_bilibili_favorites, list_tag_categories, list_tags,
-    logout, merge_tags, open_url, parse_public_favorite_url, preview_import, rename_tag_category,
-    search_items, update_item_notes, update_item_tags, upsert_tag,
+    delete_tag_category, execute_import, import_browser_bookmarks, list_bilibili_favorites,
+    list_tag_categories, list_tags, logout, merge_tags, open_url,
+    parse_public_favorite_url, preview_import, rename_tag_category, search_items,
+    update_item_notes, update_item_tags, upsert_tag,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -49,6 +50,7 @@ pub fn run() {
             assign_tag_category,
             update_item_notes,
             update_item_tags,
+            import_browser_bookmarks,
             open_url
         ])
         .run(tauri::generate_context!())
