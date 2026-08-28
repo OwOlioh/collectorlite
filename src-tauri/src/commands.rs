@@ -456,7 +456,7 @@ pub fn open_url(url: String) -> Result<(), String> {
 pub async fn import_browser_bookmarks(
     state: State<'_, AppState>,
     html_content: String,
-    tag_specs: Vec<TagInput>,
+    _tag_specs: Vec<TagInput>,
 ) -> Result<ImportResult, String> {
     let items = BrowserBookmarkClient::parse_bookmarks_html(&html_content)
         .map_err(|error| error.to_string())?;
@@ -483,7 +483,7 @@ pub async fn import_browser_bookmarks(
     for item in &items {
         let result = async {
             let (item_id, inserted) = db::upsert_item(&state.pool, item).await?;
-            // Attach folder name tags from extra.folder_tags
+            // Attach folder name tags from extra.folder_tags (each item only gets its own folders)
             if let Some(folder_tags) = item.extra.get("folder_tags").and_then(|v| v.as_array()) {
                 for folder_name in folder_tags {
                     if let Some(name) = folder_name.as_str() {
@@ -501,11 +501,6 @@ pub async fn import_browser_bookmarks(
                         }
                     }
                 }
-            }
-            // Attach user-specified tags
-            for tag_spec in &tag_specs {
-                let tag_id = db::get_or_create_tag(&state.pool, tag_spec).await?;
-                db::attach_tag(&state.pool, item_id, tag_id).await?;
             }
             db::rebuild_item_fts(&state.pool, item_id).await?;
             db::link_import_item(&state.pool, run_id, item_id).await?;
