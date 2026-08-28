@@ -27,5 +27,3 @@ webbrowser = "1"
 scraper = "0.20"
 sha2 = "0.10"
 regex = "1"
-cookie = "0.18"
-rusqlite = { version = "0.31", features = ["bundled"] }
