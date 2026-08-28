@@ -516,7 +516,7 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
       <header className="page-header">
         <div>
           <h1>导入收藏内容</h1>
-          <p>从 B 站或浏览器导入收藏，配置标签整理。</p>
+          <p>从多个平台导入收藏内容，统一管理标签。</p>
         </div>
       </header>
 

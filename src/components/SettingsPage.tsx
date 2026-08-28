@@ -23,11 +23,11 @@ export function SettingsPage() {
         <div className="settings-card">
           <div className="settings-icon"><ShieldCheck size={20} /></div>
           <div>
-            <h2>B站账号</h2>
+            <h2>账号状态</h2>
             <p>
               {profile?.isLogin
-                ? `已登录：${profile.name}（MID ${profile.mid}）`
-                : "未登录。Cookie 仅保存在本机凭据管理器中。"}
+                ? `B站已登录：${profile.name}（MID ${profile.mid}）`
+                : "B站未登录。Cookie 仅保存在本机凭据管理器中。"}
             </p>
           </div>
           {profile?.isLogin && (
@@ -49,7 +49,7 @@ export function SettingsPage() {
           <div className="settings-icon"><Database size={20} /></div>
           <div>
             <h2>本地数据</h2>
-            <p>视频元数据、标签和导入记录存储在本机 SQLite 数据库中，不包含视频文件。</p>
+            <p>收藏元数据、标签和导入记录存储在本机 SQLite 数据库中，不包含视频或文件内容。</p>
           </div>
         </div>
       </div>
@@ -57,8 +57,8 @@ export function SettingsPage() {
       <div className="privacy-note">
         <h3>数据与隐私</h3>
         <p>
-          应用只请求必要的 B 站公开接口和登录态接口。公开收藏夹导入不会写入或删除 B 站内容；
-          清理原收藏夹需要登录态，并会在删除前二次确认。
+          应用只请求必要的平台公开接口和登录态接口。所有数据保存在本地，
+          不会上传到任何服务器。Cookie 通过系统凭据管理器加密存储。
         </p>
       </div>
     </section>
