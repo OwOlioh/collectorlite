@@ -483,6 +483,26 @@ pub async fn import_browser_bookmarks(
     for item in &items {
         let result = async {
             let (item_id, inserted) = db::upsert_item(&state.pool, item).await?;
+            // Attach folder name tags from extra.folder_tags
+            if let Some(folder_tags) = item.extra.get("folder_tags").and_then(|v| v.as_array()) {
+                for folder_name in folder_tags {
+                    if let Some(name) = folder_name.as_str() {
+                        if !name.is_empty() {
+                            let tag_input = TagInput {
+                                id: None,
+                                namespace: "auto".into(),
+                                name: name.to_string(),
+                                color: None,
+                                description: None,
+                                category_id: None,
+                            };
+                            let tag_id = db::get_or_create_tag(&state.pool, &tag_input).await?;
+                            db::attach_tag(&state.pool, item_id, tag_id).await?;
+                        }
+                    }
+                }
+            }
+            // Attach user-specified tags
             for tag_spec in &tag_specs {
                 let tag_id = db::get_or_create_tag(&state.pool, tag_spec).await?;
                 db::attach_tag(&state.pool, item_id, tag_id).await?;

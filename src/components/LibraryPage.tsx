@@ -337,12 +337,14 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
                       </button>
                       <div className="video-meta">
                         {isBrowser ? (
-                          item.partitionName && <span>{item.partitionName}</span>
+                          <span>{formatDate(item.favoriteTime || item.publishedAt)}</span>
                         ) : (
-                          <span>{item.authorName || "未知作者"}</span>
+                          <>
+                            <span>{item.authorName || "未知作者"}</span>
+                            {item.partitionName && <span>{item.partitionName}</span>}
+                            <span>{formatDate(item.favoriteTime || item.publishedAt)}</span>
+                          </>
                         )}
-                        {!isBrowser && item.partitionName && <span>{item.partitionName}</span>}
-                        <span>{formatDate(item.favoriteTime || item.publishedAt)}</span>
                       </div>
                       <div className="video-tag-line">
                         <div className="card-tags">

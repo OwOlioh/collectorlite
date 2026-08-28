@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use scraper::{Html, Selector};
 use sha2::{Digest, Sha256};
-use serde_json::Value;
 
 use crate::error::AppError;
 use crate::models::{CollectionInfo, ExternalItem};
@@ -51,7 +50,7 @@ impl BrowserBookmarkClient {
 
             let icon = element.value().attr("icon").map(|s| s.to_string());
 
-            let folder_path = Self::build_folder_path(&element);
+            let folder_names = Self::build_folder_names(&element);
 
             let mut hasher = Sha256::new();
             hasher.update(href.as_bytes());
@@ -62,16 +61,16 @@ impl BrowserBookmarkClient {
                 external_id: format!("bk_{}", hash),
                 source_url: href.to_string(),
                 title,
-                description: folder_path.clone(),
+                description: String::new(),
                 cover_url: icon,
                 cover_local_path: None,
                 author_name: None,
                 author_id: None,
-                partition_name: Some(folder_path),
+                partition_name: None,
                 published_at: add_date,
                 duration: None,
                 favorite_time: Some(add_date.unwrap_or(now)),
-                extra: Value::Null,
+                extra: serde_json::json!({ "folder_tags": folder_names }),
             };
 
             items.push(item);
@@ -80,7 +79,7 @@ impl BrowserBookmarkClient {
         Ok(items)
     }
 
-    fn build_folder_path(element: &scraper::ElementRef) -> String {
+    fn build_folder_names(element: &scraper::ElementRef) -> Vec<String> {
         let mut parts: Vec<String> = Vec::new();
 
         let mut current = element.parent();
@@ -121,7 +120,7 @@ impl BrowserBookmarkClient {
         }
 
         parts.reverse();
-        parts.join(" / ")
+        parts
     }
 }
 
@@ -189,12 +188,25 @@ mod tests {
         let rust_item = items.iter().find(|i| i.title == "Rust 官网").unwrap();
         assert_eq!(rust_item.source, "browser");
         assert_eq!(rust_item.source_url, "https://www.rust-lang.org");
-        assert_eq!(rust_item.description, "技术");
-        assert_eq!(rust_item.partition_name.as_deref(), Some("技术"));
+        assert_eq!(rust_item.description, "");
+        assert_eq!(rust_item.partition_name, None);
         assert!(rust_item.external_id.starts_with("bk_"));
+        let tags: Vec<String> = rust_item.extra["folder_tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(tags, vec!["技术"]);
 
         let github_item = items.iter().find(|i| i.title == "GitHub").unwrap();
-        assert_eq!(github_item.description, "工具");
+        let github_tags: Vec<String> = github_item.extra["folder_tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(github_tags, vec!["工具"]);
     }
 
     #[test]
@@ -231,6 +243,12 @@ mod tests {
 
         let items = BrowserBookmarkClient::parse_bookmarks_html(html).unwrap();
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].description, "编程 / 前端");
+        let tags: Vec<String> = items[0].extra["folder_tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(tags, vec!["编程", "前端"]);
     }
 }
