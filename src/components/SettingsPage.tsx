@@ -23,7 +23,7 @@ export function SettingsPage() {
         <div className="settings-card">
           <div className="settings-icon"><ShieldCheck size={20} /></div>
           <div>
-            <h2>B 站账号</h2>
+            <h2>B站账号</h2>
             <p>
               {profile?.isLogin
                 ? `已登录：${profile.name}（MID ${profile.mid}）`

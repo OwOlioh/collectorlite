@@ -5,7 +5,6 @@ import {
   LayoutGrid,
   List,
   Pencil,
-  Play,
   Search,
   Tags,
   Trash2
@@ -43,6 +42,14 @@ function formatDuration(seconds?: number) {
 function formatDate(timestamp?: number) {
   if (!timestamp) return "未知";
   return new Date(timestamp * 1000).toLocaleDateString("zh-CN");
+}
+
+function BilibiliIcon({ size = 15 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
+      <path d="M17.813 3.5H6.187A3.187 3.187 0 0 0 3 6.687v8.626A3.187 3.187 0 0 0 6.187 18.5h1.889l-1.062 2.125h1.555l1.062-2.125h4.738l1.062 2.125h1.555l-1.062-2.125h1.889A3.187 3.187 0 0 0 21 15.313V6.687A3.187 3.187 0 0 0 17.813 3.5zm-9.338 8.594a.703.703 0 0 1 0 1.406H7.172a.703.703 0 0 1 0-1.406h1.303zm1.406 0h1.406a.703.703 0 0 1 0 1.406H9.881a.703.703 0 0 1 0-1.406zm2.813 0h1.406a.703.703 0 0 1 0 1.406h-1.406a.703.703 0 0 1 0-1.406zm2.813 0h1.303a.703.703 0 0 1 0 1.406H15.507a.703.703 0 0 1 0-1.406z" />
+    </svg>
+  );
 }
 
 export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
@@ -88,7 +95,7 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
   };
 
   const deleteVideo = async (item: VideoItem) => {
-    if (!window.confirm(`删除本地视频“${item.title}”吗？该操作不会影响 B 站原收藏夹。`)) {
+    if (!window.confirm(`删除本地收藏"${item.title}"吗？该操作不会影响原始来源。`)) {
       return;
     }
     await api.deleteItem(item.id);
@@ -149,7 +156,7 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
     <section className="page library-page">
       <header className="page-header">
         <div>
-          <h1>视频库</h1>
+          <h1>收藏库</h1>
           <p>检索收藏内容，或维护标签体系。</p>
         </div>
         <div className="page-header-right">
@@ -167,7 +174,7 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
               }
               title="B站视频"
             >
-              <Play size={15} />
+              <BilibiliIcon size={15} />
             </button>
             <button
               type="button"
@@ -295,11 +302,11 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
           </div>
 
           {loading ? (
-            <div className="empty-state">正在读取视频库...</div>
+            <div className="empty-state">正在读取收藏库...</div>
           ) : items.length === 0 ? (
             <div className="empty-state">
               <h2>没有匹配的视频</h2>
-              <p>调整检索条件，或到导入页添加 B 站收藏。</p>
+              <p>调整检索条件，或到导入页添加收藏。</p>
             </div>
           ) : (
             <>

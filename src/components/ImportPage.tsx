@@ -461,8 +461,8 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
     <section className="page import-page">
       <header className="page-header">
         <div>
-          <h1>导入 B 站收藏</h1>
-          <p>先配置标签池，再逐条整理视频标签。</p>
+          <h1>导入收藏内容</h1>
+          <p>从 B 站或浏览器导入收藏，配置标签整理。</p>
         </div>
       </header>
 

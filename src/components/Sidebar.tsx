@@ -12,7 +12,7 @@ interface SidebarProps {
 }
 
 const navItems: Array<{ id: AppView; label: string; icon: typeof Library }> = [
-  { id: "library", label: "视频库", icon: Library },
+  { id: "library", label: "收藏库", icon: Library },
   { id: "import", label: "导入", icon: Download },
   { id: "settings", label: "设置", icon: Settings }
 ];
@@ -25,8 +25,8 @@ export function Sidebar({ active, onChange }: SidebarProps) {
           <Bookmark size={18} />
         </div>
         <div>
-          <div className="brand-name">B 站收藏管理器</div>
-          <div className="brand-sub">本地标签化收藏库</div>
+          <div className="brand-name">收藏管理器</div>
+          <div className="brand-sub">本地标签化收藏</div>
         </div>
       </div>
 
