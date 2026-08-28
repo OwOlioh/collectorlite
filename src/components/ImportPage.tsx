@@ -204,8 +204,8 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
               title: title || href,
               description: "",
               coverUrl: icon || undefined,
-              authorName: folderPath || undefined,
-              partitionName: folderPath || undefined,
+              authorName: undefined,
+              partitionName: undefined,
               favoriteTime,
               tags: [],
               duration: undefined,
@@ -291,7 +291,7 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
       const states: Record<string, PerVideoTagState> = {};
       items.forEach((item) => {
         states[item.externalId] = {
-          partitionTag: item.partitionName || "",
+          partitionTag: "",
           partitionManuallyEdited: false,
           otherTags: []
         };
