@@ -161,13 +161,22 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
     }
   };
 
-  const parseBrowserHtmlLocally = (html: string): VideoItem[] => {
+  const parseBrowserHtmlLocally = async (html: string): Promise<VideoItem[]> => {
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, "text/html");
     const items: VideoItem[] = [];
     let index = 0;
 
-    const walk = (node: Element, folderPath: string) => {
+    // Hash function matching backend: SHA256 first 16 hex chars
+    const hashUrl = async (url: string): Promise<string> => {
+      const encoder = new TextEncoder();
+      const data = encoder.encode(url);
+      const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      return "bk_" + hashArray.slice(0, 8).map(b => b.toString(16).padStart(2, "0")).join("");
+    };
+
+    const walk = async (node: Element, folderPath: string) => {
       const children = Array.from(node.children);
       for (const child of children) {
         if (child.tagName === "DT") {
@@ -177,7 +186,7 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
             const folderName = h3.textContent?.trim() || "";
             const dl = child.querySelector(":scope > DL");
             if (dl) {
-              walk(dl, folderPath ? `${folderPath} / ${folderName}` : folderName);
+              await walk(dl, folderPath ? `${folderPath} / ${folderName}` : folderName);
             }
           } else if (a) {
             const href = a.getAttribute("href") || "";
@@ -185,11 +194,12 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
             const addDate = a.getAttribute("add_date");
             const icon = a.getAttribute("icon");
             const favoriteTime = addDate ? parseInt(addDate, 10) : undefined;
+            const externalId = await hashUrl(href);
             index += 1;
             items.push({
               id: -index,
               source: "browser",
-              externalId: href,
+              externalId,
               sourceUrl: href,
               title: title || href,
               description: "",
@@ -207,7 +217,7 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
           }
         }
         if (child.tagName === "DL") {
-          walk(child, folderPath);
+          await walk(child, folderPath);
         }
       }
     };
@@ -216,7 +226,7 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
     if (body) {
       const dl = body.querySelector("DL");
       if (dl) {
-        walk(dl, "");
+        await walk(dl, "");
       }
     }
     return items;
@@ -225,10 +235,10 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
   const handleBrowserFile = (file: File) => {
     setBrowserFileName(file.name);
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
       const html = reader.result as string;
       setBrowserHtmlContent(html);
-      const items = parseBrowserHtmlLocally(html);
+      const items = await parseBrowserHtmlLocally(html);
       setBrowserItems(items);
       setError("");
     };
