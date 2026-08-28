@@ -18,9 +18,7 @@ impl BrowserBookmarkClient {
     fn resolve_favicon_url(page_url: &str) -> Option<String> {
         let parsed = Url::parse(page_url).ok()?;
         let domain = parsed.host_str()?;
-        Some(format!(
-            "https://www.google.com/s2/favicons?domain={domain}&sz=32"
-        ))
+        Some(format!("https://favicon.im/{domain}"))
     }
 
     pub fn parse_bookmarks_html(html: &str) -> Result<Vec<ExternalItem>, AppError> {
