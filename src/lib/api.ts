@@ -82,8 +82,8 @@ export const api = {
   // Zhihu
   zhihuSetCookie: (cookie: string) =>
     call<null>("zhihu_set_cookie", { cookie }),
-  zhihuBrowserLogin: () =>
-    call<BilibiliProfile>("zhihu_browser_login"),
+  zhihuBrowserLogin: (cookie: string) =>
+    call<BilibiliProfile>("zhihu_browser_login", { cookie }),
   zhihuLogout: () => call<null>("zhihu_logout"),
   zhihuProfile: () => call<BilibiliProfile>("zhihu_profile"),
   listZhihuCollections: () =>

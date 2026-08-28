@@ -725,72 +725,16 @@ async fn resolve_zhihu_collection(
 
 #[tauri::command]
 pub async fn zhihu_browser_login(
-    app: tauri::AppHandle,
     state: State<'_, AppState>,
+    cookie: String,
 ) -> Result<BilibiliProfile, String> {
-    use tauri::Listener;
-    use tauri::WebviewUrl;
-    use tauri::WebviewWindowBuilder;
-
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(1);
-
-    let webview = WebviewWindowBuilder::new(
-        &app,
-        "zhihu-login",
-        WebviewUrl::External("https://www.zhihu.com/signin".parse().unwrap()),
-    )
-    .title("知乎登录")
-    .inner_size(800.0, 700.0)
-    .center()
-    .build()
-    .map_err(|e| e.to_string())?;
-
-    let webview_clone = webview.clone();
-    webview.listen("zhihu-cookie", move |event| {
-        if let Some(cookie) = event.payload().strip_prefix("\"").and_then(|s| s.strip_suffix("\"")) {
-            let _ = tx.blocking_send(cookie.to_string());
-        } else if let Some(cookie) = event.payload().strip_prefix("'").and_then(|s| s.strip_suffix("'")) {
-            let _ = tx.blocking_send(cookie.to_string());
-        } else {
-            let _ = tx.blocking_send(event.payload().to_string());
-        }
-    });
-
-    // Polling: inject script to check cookies and emit event
-    let poll_handle = tokio::spawn(async move {
-        loop {
-            let cookie_script = r#"
-                if (document.cookie && document.cookie.includes('z_c0')) {
-                    window.__TAURI_INTERNALS__ && window.__TAURI__ && window.__TAURI__.emit('zhihu-cookie', document.cookie);
-                }
-            "#;
-            let _ = webview_clone.eval(cookie_script);
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        }
-    });
-
-    // Wait for cookie with timeout
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        rx.recv(),
-    )
-    .await;
-
-    poll_handle.abort();
-    let _ = webview.close();
-
-    match result {
-        Ok(Some(cookie)) => {
-            state.zhihu.set_cookie(Some(cookie.clone()));
-            let _ = state.save_zhihu_cookie(Some(cookie));
-            let url_token = state.zhihu.get_url_token().await.map_err(|e| e.to_string())?;
-            Ok(BilibiliProfile {
-                is_login: true,
-                name: Some(url_token),
-                face: None,
-                mid: None,
-            })
-        }
-        _ => Err("登录超时，请关闭窗口后重试".into()),
-    }
+    state.zhihu.set_cookie(Some(cookie.clone()));
+    let _ = state.save_zhihu_cookie(Some(cookie));
+    let url_token = state.zhihu.get_url_token().await.map_err(|e| e.to_string())?;
+    Ok(BilibiliProfile {
+        is_login: true,
+        name: Some(url_token),
+        face: None,
+        mid: None,
+    })
 }
