@@ -75,7 +75,8 @@ export const api = {
   importBrowserBookmarks: (request: BrowserImportRequest) =>
     call<ImportResult>("import_browser_bookmarks", {
       htmlContent: request.htmlContent,
-      tagSpecs: request.tagSpecs
+      tagSpecs: request.tagSpecs,
+      itemTagAssignments: request.itemTagAssignments
     }),
   openUrl: (url: string) => call<null>("open_url", { url })
 };

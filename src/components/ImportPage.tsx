@@ -386,9 +386,18 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
     setError("");
     try {
       if (mode === "browser") {
+        // Build per-item tag assignments from preview state
+        const itemTagAssignments: ItemTagAssignment[] = (preview?.items || []).map((item) => {
+          const state = perVideoTags[item.externalId];
+          return {
+            externalId: item.externalId,
+            tagSpecs: state ? buildTagSpecs(item, state) : []
+          };
+        });
         const request: BrowserImportRequest = {
           htmlContent: browserHtmlContent,
-          tagSpecs: []
+          tagSpecs: [],
+          itemTagAssignments
         };
         const next = await api.importBrowserBookmarks(request);
         setResult(next);

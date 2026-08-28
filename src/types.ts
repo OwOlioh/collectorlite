@@ -83,6 +83,7 @@ export interface ImportRequest {
 export interface BrowserImportRequest {
   htmlContent: string;
   tagSpecs: TagInput[];
+  itemTagAssignments: ItemTagAssignment[];
 }
 
 export interface ImportResult {

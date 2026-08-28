@@ -6,7 +6,8 @@ use crate::db;
 use crate::error::AppError;
 use crate::models::{
     BilibiliProfile, CollectionInfo, ImportPreview, ImportRequest, ImportResult, ItemFilters,
-    PartitionSuggestion, QrSession, QrStatus, Tag, TagCategory, TagInput, VideoItem,
+    ItemTagAssignment, PartitionSuggestion, QrSession, QrStatus, Tag, TagCategory, TagInput,
+    VideoItem,
 };
 use crate::source::SourceAdapter;
 use crate::source::browser::BrowserBookmarkClient;
@@ -456,7 +457,8 @@ pub fn open_url(url: String) -> Result<(), String> {
 pub async fn import_browser_bookmarks(
     state: State<'_, AppState>,
     html_content: String,
-    _tag_specs: Vec<TagInput>,
+    tag_specs: Vec<TagInput>,
+    item_tag_assignments: Vec<ItemTagAssignment>,
 ) -> Result<ImportResult, String> {
     let items = BrowserBookmarkClient::parse_bookmarks_html(&html_content)
         .map_err(|error| error.to_string())?;
@@ -470,6 +472,12 @@ pub async fn import_browser_bookmarks(
         count: total,
         url: None,
     };
+
+    // Build a lookup from external_id to user-specified tag specs
+    let assignments: std::collections::HashMap<&str, &[TagInput]> = item_tag_assignments
+        .iter()
+        .map(|a| (a.external_id.as_str(), a.tag_specs.as_slice()))
+        .collect();
 
     let run_id = db::create_import_run(&state.pool, &collection, total, false)
         .await
@@ -501,6 +509,18 @@ pub async fn import_browser_bookmarks(
                         }
                     }
                 }
+            }
+            // Attach user-specified tags for this specific item
+            if let Some(user_tags) = assignments.get(item.external_id.as_str()) {
+                for tag_spec in *user_tags {
+                    let tag_id = db::get_or_create_tag(&state.pool, tag_spec).await?;
+                    db::attach_tag(&state.pool, item_id, tag_id).await?;
+                }
+            }
+            // Also apply global tag_specs (shared across all items)
+            for tag_spec in &tag_specs {
+                let tag_id = db::get_or_create_tag(&state.pool, tag_spec).await?;
+                db::attach_tag(&state.pool, item_id, tag_id).await?;
             }
             db::rebuild_item_fts(&state.pool, item_id).await?;
             db::link_import_item(&state.pool, run_id, item_id).await?;
