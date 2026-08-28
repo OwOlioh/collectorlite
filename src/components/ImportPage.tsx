@@ -705,8 +705,17 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
                   ) : (
                     <div style={{display: "grid", gap: "8px"}}>
                       <p style={{margin: 0, color: "var(--muted)", fontSize: "13px"}}>
-                        在浏览器中登录知乎后，复制 cookie 粘贴到下方：
+                        点击下方按钮在浏览器中打开知乎，登录后按 F12 打开开发者工具，
+                        在 Application → Cookies 中复制完整的 cookie 字符串粘贴到下方。
                       </p>
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        style={{ justifySelf: "start" }}
+                        onClick={() => api.openUrl("https://www.zhihu.com/signin")}
+                      >
+                        打开知乎登录
+                      </button>
                       <input
                         style={{minHeight: "36px", padding: "0 10px", border: "1px solid var(--border)", borderRadius: "7px"}}
                         placeholder="粘贴知乎 cookie 字符串"

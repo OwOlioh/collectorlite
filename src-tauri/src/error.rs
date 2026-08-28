@@ -24,7 +24,7 @@ impl fmt::Display for AppError {
             AppError::Json(error) => write!(f, "数据解析错误: {error}"),
             AppError::InvalidInput(message) => write!(f, "{message}"),
             AppError::NotFound(message) => write!(f, "{message}"),
-            AppError::AuthRequired => write!(f, "请先登录 B 站"),
+            AppError::AuthRequired => write!(f, "需要登录后才能获取内容，请先登录"),
             AppError::RiskControl(message) => write!(f, "{message}"),
             AppError::Credential(message) => write!(f, "{message}"),
             AppError::Io(error) => write!(f, "文件错误: {error}"),
