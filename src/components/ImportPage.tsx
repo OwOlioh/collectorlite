@@ -705,9 +705,9 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
                   ) : (
                     <div style={{display: "grid", gap: "8px"}}>
                       <p style={{margin: 0, color: "var(--muted)", fontSize: "13px"}}>
-                        点击下方按钮在浏览器中打开知乎并登录。登录后在知乎页面按 F12，
-                        在 Console 中输入 <code>copy(document.cookie)</code> 并回车，
-                        然后回到此处粘贴。
+                        点击下方按钮在浏览器中打开知乎并登录。登录后按 F12 →
+                        Application → Cookies → zhihu.com →
+                        复制 <strong>z_c0</strong> 的值粘贴到下方。
                       </p>
                       <button
                         type="button"
@@ -719,7 +719,7 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
                       </button>
                       <input
                         style={{minHeight: "36px", padding: "0 10px", border: "1px solid var(--border)", borderRadius: "7px"}}
-                        placeholder="粘贴 cookie（z_c0=xxx; d_c0=xxx）"
+                        placeholder="粘贴 z_c0 的值"
                         onKeyDown={async (e) => {
                           if (e.key === "Enter") {
                             const cookie = (e.target as HTMLInputElement).value.trim();
