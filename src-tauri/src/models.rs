@@ -148,6 +148,8 @@ pub struct ItemFilters {
     pub tag_ids: Vec<i64>,
     pub tag_mode: String,
     pub sort: String,
+    #[serde(default)]
+    pub sources: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

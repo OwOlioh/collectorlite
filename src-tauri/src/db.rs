@@ -699,6 +699,15 @@ pub async fn search_items(
         }
     }
 
+    if !filters.sources.is_empty() {
+        query.push(" AND i.source IN (");
+        let mut separated = query.separated(", ");
+        for source in &filters.sources {
+            separated.push_bind(source);
+        }
+        query.push(")");
+    }
+
     if let Some(raw_query) = filters.query.as_deref().map(str::trim) {
         if !raw_query.is_empty() {
             let pattern = format!("%{raw_query}%");

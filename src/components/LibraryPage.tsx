@@ -5,6 +5,7 @@ import {
   LayoutGrid,
   List,
   Pencil,
+  Play,
   Search,
   Tags,
   Trash2
@@ -28,7 +29,8 @@ const initialFilters: ItemFilters = {
   query: "",
   tagIds: [],
   tagMode: "and",
-  sort: "favorite_desc"
+  sort: "favorite_desc",
+  sources: []
 };
 
 function formatDuration(seconds?: number) {
@@ -150,23 +152,57 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
           <h1>视频库</h1>
           <p>检索收藏内容，或维护标签体系。</p>
         </div>
-        <div className="view-toggle" role="group" aria-label="视图切换">
-          <button
-            type="button"
-            className={view === "grid" ? "is-active" : ""}
-            onClick={() => setView("grid")}
-            title="网格视图"
-          >
-            <LayoutGrid size={17} />
-          </button>
-          <button
-            type="button"
-            className={view === "list" ? "is-active" : ""}
-            onClick={() => setView("list")}
-            title="列表视图"
-          >
-            <List size={17} />
-          </button>
+        <div className="page-header-right">
+          <div className="source-filter" role="group" aria-label="来源筛选">
+            <button
+              type="button"
+              className={filters.sources.includes("bilibili") ? "is-active" : ""}
+              onClick={() =>
+                setFilters((current) => ({
+                  ...current,
+                  sources: current.sources.includes("bilibili")
+                    ? current.sources.filter((s) => s !== "bilibili")
+                    : [...current.sources, "bilibili"]
+                }))
+              }
+              title="B站视频"
+            >
+              <Play size={15} />
+            </button>
+            <button
+              type="button"
+              className={filters.sources.includes("browser") ? "is-active" : ""}
+              onClick={() =>
+                setFilters((current) => ({
+                  ...current,
+                  sources: current.sources.includes("browser")
+                    ? current.sources.filter((s) => s !== "browser")
+                    : [...current.sources, "browser"]
+                }))
+              }
+              title="浏览器书签"
+            >
+              <Globe size={15} />
+            </button>
+          </div>
+          <div className="view-toggle" role="group" aria-label="视图切换">
+            <button
+              type="button"
+              className={view === "grid" ? "is-active" : ""}
+              onClick={() => setView("grid")}
+              title="网格视图"
+            >
+              <LayoutGrid size={17} />
+            </button>
+            <button
+              type="button"
+              className={view === "list" ? "is-active" : ""}
+              onClick={() => setView("list")}
+              title="列表视图"
+            >
+              <List size={17} />
+            </button>
+          </div>
         </div>
       </header>
 

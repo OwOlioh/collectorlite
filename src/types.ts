@@ -119,6 +119,7 @@ export interface ItemFilters {
   tagIds: number[];
   tagMode: "and" | "or";
   sort: "favorite_desc" | "published_desc" | "duration_desc" | "title_asc" | "imported_desc";
+  sources: string[];
 }
 
 export type AppView = "library" | "import" | "settings";
