@@ -78,7 +78,20 @@ export const api = {
       tagSpecs: request.tagSpecs,
       itemTagAssignments: request.itemTagAssignments
     }),
-  openUrl: (url: string) => call<null>("open_url", { url })
+  openUrl: (url: string) => call<null>("open_url", { url }),
+  // Zhihu
+  zhihuSetCookie: (cookie: string) =>
+    call<null>("zhihu_set_cookie", { cookie }),
+  zhihuLogout: () => call<null>("zhihu_logout"),
+  zhihuProfile: () => call<BilibiliProfile>("zhihu_profile"),
+  listZhihuCollections: () =>
+    call<CollectionInfo[]>("list_zhihu_collections"),
+  parseZhihuCollectionUrl: (url: string) =>
+    call<CollectionInfo>("parse_zhihu_collection_url", { url }),
+  previewZhihuImport: (request: ImportRequest) =>
+    call<ImportPreview>("preview_zhihu_import", { input: request }),
+  executeZhihuImport: (request: ImportRequest) =>
+    call<ImportResult>("execute_zhihu_import", { input: request }),
 };
 
 let mockTags: Tag[] = [

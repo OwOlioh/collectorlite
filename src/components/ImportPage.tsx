@@ -31,7 +31,7 @@ import type {
 } from "../types";
 import { TagPoolInput } from "./TagPoolInput";
 
-type ImportMode = "login" | "public" | "browser";
+type ImportMode = "login" | "public" | "browser" | "zhihu" | "zhihu_public";
 type ImportStep = "source" | "tags" | "done";
 
 interface PerVideoTagState {
@@ -154,6 +154,34 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
     setError("");
     try {
       setParsedCollection(await api.parsePublicFavoriteUrl(publicUrl.trim()));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const parseZhihu = async () => {
+    if (!publicUrl.trim()) {
+      setError("请先粘贴知乎收藏夹链接。");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      setParsedCollection(await api.parseZhihuCollectionUrl(publicUrl.trim()));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const loadZhihuCollections = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      setCollections(await api.listZhihuCollections());
     } catch (err) {
       setError(String(err));
     } finally {
@@ -312,14 +340,15 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
     }
 
     try {
+      const isZhihu = mode === "zhihu" || mode === "zhihu_public";
       const input = {
-        kind: mode === "login" ? ("favorites" as const) : ("public_url" as const),
-        mediaId: mode === "login" ? currentCollection.id : undefined,
-        url: mode === "public" ? publicUrl.trim() : undefined,
+        kind: (mode === "login" || mode === "zhihu") ? ("favorites" as const) : ("public_url" as const),
+        mediaId: (mode === "login" || mode === "zhihu") ? currentCollection.id : undefined,
+        url: (mode === "public" || mode === "zhihu_public") ? publicUrl.trim() : undefined,
         tagSpecs: [],
         itemTagAssignments: []
       };
-      const next = await api.previewImport(input);
+      const next = isZhihu ? await api.previewZhihuImport(input) : await api.previewImport(input);
       const states: Record<string, PerVideoTagState> = {};
       next.items.forEach((item) => {
         states[item.externalId] = {
@@ -428,14 +457,15 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
         externalId: item.externalId,
         tagSpecs: buildTagSpecs(item, perVideoTags[item.externalId])
       }));
+      const isZhihu = mode === "zhihu" || mode === "zhihu_public";
       const input = {
-        kind: mode === "login" ? ("favorites" as const) : ("public_url" as const),
-        mediaId: mode === "login" ? currentCollection.id : undefined,
-        url: mode === "public" ? publicUrl.trim() : undefined,
+        kind: (mode === "login" || mode === "zhihu") ? ("favorites" as const) : ("public_url" as const),
+        mediaId: (mode === "login" || mode === "zhihu") ? currentCollection.id : undefined,
+        url: (mode === "public" || mode === "zhihu_public") ? publicUrl.trim() : undefined,
         tagSpecs: [],
         itemTagAssignments: assignments
       };
-      const next = await api.executeImport(input);
+      const next = isZhihu ? await api.executeZhihuImport(input) : await api.executeImport(input);
       setResult(next);
       setStep("done");
       window.setTimeout(() => {
@@ -497,6 +527,24 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
               <Globe size={20} />
               <strong>浏览器书签</strong>
               <span>从浏览器导出的书签 HTML 文件中导入链接。</span>
+            </button>
+            <button
+              type="button"
+              className={`import-mode-card ${mode === "zhihu" ? "is-active" : ""}`}
+              onClick={() => setMode("zhihu")}
+            >
+              <LogIn size={20} />
+              <strong>登录知乎</strong>
+              <span>读取自己的知乎收藏夹，并导入到本地。</span>
+            </button>
+            <button
+              type="button"
+              className={`import-mode-card ${mode === "zhihu_public" ? "is-active" : ""}`}
+              onClick={() => setMode("zhihu_public")}
+            >
+              <Link size={20} />
+              <strong>知乎公开收藏夹</strong>
+              <span>不登录，输入知乎收藏夹链接导入内容。</span>
             </button>
           </div>
 
@@ -579,7 +627,7 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
               </div>
             ) : mode === "public" ? (
               <div className="public-block">
-                <label className="field-label">公开收藏夹 URL</label>
+                <label className="field-label">B站公开收藏夹 URL</label>
                 <div className="input-with-button">
                   <input
                     value={publicUrl}
@@ -597,6 +645,100 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
                     <span>{parsedCollection.owner || "公开用户"}</span>
                     <span>{parsedCollection.count} 条</span>
                   </div>
+                )}
+              </div>
+            ) : mode === "zhihu_public" ? (
+              <div className="public-block">
+                <label className="field-label">知乎收藏夹 URL</label>
+                <div className="input-with-button">
+                  <input
+                    value={publicUrl}
+                    onChange={(event) => setPublicUrl(event.target.value)}
+                    placeholder="https://www.zhihu.com/collection/123456"
+                  />
+                  <button className="secondary-button" type="button" onClick={parseZhihu} disabled={busy}>
+                    <ClipboardPaste size={16} />
+                    解析
+                  </button>
+                </div>
+                {parsedCollection && (
+                  <div className="parsed-card">
+                    <strong>{parsedCollection.title}</strong>
+                    <span>{parsedCollection.owner || "公开用户"}</span>
+                    <span>{parsedCollection.count} 条</span>
+                  </div>
+                )}
+              </div>
+            ) : mode === "zhihu" ? (
+              <div className="login-block">
+                <div className="account-line">
+                  {profile?.isLogin ? (
+                    <>
+                      <span className="avatar">
+                        {profile.name?.slice(0, 1) || "知"}
+                      </span>
+                      <span>
+                        <strong>{profile.name}</strong>
+                      </span>
+                      <button
+                        className="ghost-button"
+                        type="button"
+                        onClick={() => {
+                          void api.zhihuLogout();
+                          setProfile(null);
+                        }}
+                      >
+                        退出
+                      </button>
+                    </>
+                  ) : (
+                    <div style={{display: "grid", gap: "8px"}}>
+                      <p style={{margin: 0, color: "var(--muted)", fontSize: "13px"}}>
+                        在浏览器中登录知乎后，复制 cookie 粘贴到下方：
+                      </p>
+                      <input
+                        style={{minHeight: "36px", padding: "0 10px", border: "1px solid var(--border)", borderRadius: "7px"}}
+                        placeholder="粘贴知乎 cookie 字符串"
+                        onKeyDown={async (e) => {
+                          if (e.key === "Enter") {
+                            const cookie = (e.target as HTMLInputElement).value.trim();
+                            if (cookie) {
+                              setLoginBusy(true);
+                              try {
+                                await api.zhihuSetCookie(cookie);
+                                const p = await api.zhihuProfile();
+                                setProfile(p);
+                              } catch (err) {
+                                setError(String(err));
+                              } finally {
+                                setLoginBusy(false);
+                              }
+                            }
+                          }
+                        }}
+                      />
+                    </div>
+                  )}
+                </div>
+                <label className="field-label">选择收藏夹</label>
+                <select
+                  className="select-control full"
+                  value={selectedCollectionId}
+                  onChange={(event) => setSelectedCollectionId(event.target.value)}
+                  disabled={!profile?.isLogin || collections.length === 0}
+                >
+                  <option value="">请选择收藏夹</option>
+                  {collections.map((collection) => (
+                    <option key={collection.id} value={collection.id}>
+                      {collection.title}（{collection.count}）
+                    </option>
+                  ))}
+                </select>
+                {profile?.isLogin && (
+                  <button className="ghost-button" type="button" onClick={loadZhihuCollections}>
+                    <RefreshCcw size={15} />
+                    刷新收藏夹
+                  </button>
                 )}
               </div>
             ) : (

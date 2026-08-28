@@ -191,6 +191,21 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
             >
               <Globe size={15} />
             </button>
+            <button
+              type="button"
+              className={filters.sources.includes("zhihu") ? "is-active" : ""}
+              onClick={() =>
+                setFilters((current) => ({
+                  ...current,
+                  sources: current.sources.includes("zhihu")
+                    ? current.sources.filter((s) => s !== "zhihu")
+                    : [...current.sources, "zhihu"]
+                }))
+              }
+              title="知乎收藏"
+            >
+              <span style={{fontSize: "13px", fontWeight: 700}}>知</span>
+            </button>
           </div>
           <div className="view-toggle" role="group" aria-label="视图切换">
             <button

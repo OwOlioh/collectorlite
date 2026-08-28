@@ -547,3 +547,176 @@ pub async fn import_browser_bookmarks(
         .await
         .map_err(|error| error.to_string())
 }
+
+// ── Zhihu commands ──
+
+#[tauri::command]
+pub async fn zhihu_set_cookie(
+    state: State<'_, AppState>,
+    cookie: String,
+) -> Result<(), String> {
+    state.zhihu.set_cookie(Some(cookie.clone()));
+    state
+        .save_zhihu_cookie(Some(cookie))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn zhihu_logout(state: State<'_, AppState>) -> Result<(), String> {
+    state.zhihu.set_cookie(None);
+    state
+        .save_zhihu_cookie(None)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn zhihu_profile(state: State<'_, AppState>) -> Result<BilibiliProfile, String> {
+    let cookie = state.zhihu.get_cookie();
+    if cookie.is_none() {
+        return Ok(BilibiliProfile {
+            is_login: false,
+            name: None,
+            face: None,
+            mid: None,
+        });
+    }
+    let url_token = state.zhihu.get_url_token().await.map_err(|e| e.to_string())?;
+    Ok(BilibiliProfile {
+        is_login: true,
+        name: Some(url_token),
+        face: None,
+        mid: None,
+    })
+}
+
+#[tauri::command]
+pub async fn list_zhihu_collections(
+    state: State<'_, AppState>,
+) -> Result<Vec<CollectionInfo>, String> {
+    state.zhihu.list_collections().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn parse_zhihu_collection_url(
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<CollectionInfo, String> {
+    state.zhihu.resolve_collection(&url).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn preview_zhihu_import(
+    state: State<'_, AppState>,
+    input: ImportRequest,
+) -> Result<ImportPreview, String> {
+    let collection = resolve_zhihu_collection(&state, &input)
+        .await
+        .map_err(|e| e.to_string())?;
+    let items = state
+        .zhihu
+        .fetch_collection(&collection)
+        .await
+        .map_err(|e| e.to_string())?;
+    let items: Vec<VideoItem> = items.iter().enumerate().map(|(i, item)| to_video_item(item, -(i as i64 + 1))).collect();
+    let partition_suggestions: Vec<PartitionSuggestion> = items
+        .iter()
+        .filter_map(|item| item.partition_name.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .map(|name| PartitionSuggestion { name, count: 0, selected: false })
+        .collect();
+    Ok(ImportPreview {
+        collection,
+        items,
+        partition_suggestions,
+    })
+}
+
+#[tauri::command]
+pub async fn execute_zhihu_import(
+    state: State<'_, AppState>,
+    input: ImportRequest,
+) -> Result<ImportResult, String> {
+    let collection = resolve_zhihu_collection(&state, &input)
+        .await
+        .map_err(|e| e.to_string())?;
+    let items = state
+        .zhihu
+        .fetch_collection(&collection)
+        .await
+        .map_err(|e| e.to_string())?;
+    let enriched = state
+        .zhihu
+        .enrich_items(&items)
+        .await
+        .map_err(|e| e.to_string())?;
+    let assignments = input
+        .item_tag_assignments
+        .iter()
+        .map(|a| (a.external_id.as_str(), &a.tag_specs))
+        .collect::<HashMap<_, _>>();
+    let total = enriched.len() as i64;
+    let run_id = db::create_import_run(&state.pool, &collection, total, false)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut imported = 0i64;
+    let mut skipped = 0i64;
+    let mut failed = 0i64;
+    let mut errors = Vec::new();
+    for item in &enriched {
+        let result = async {
+            let (item_id, inserted) = db::upsert_item(&state.pool, item).await?;
+            let tag_specs = assignments
+                .get(item.external_id.as_str())
+                .copied()
+                .unwrap_or(&input.tag_specs);
+            for tag_spec in tag_specs {
+                let tag_id = db::get_or_create_tag(&state.pool, tag_spec).await?;
+                db::attach_tag(&state.pool, item_id, tag_id).await?;
+            }
+            db::rebuild_item_fts(&state.pool, item_id).await?;
+            db::link_import_item(&state.pool, run_id, item_id).await?;
+            Ok::<bool, AppError>(inserted)
+        }
+        .await;
+        match result {
+            Ok(true) => imported += 1,
+            Ok(false) => skipped += 1,
+            Err(error) => {
+                failed += 1;
+                if errors.len() < 20 {
+                    errors.push(error.to_string());
+                }
+            }
+        }
+    }
+    db::finish_import_run(&state.pool, run_id, imported, skipped, failed, &errors)
+        .await
+        .map_err(|e| e.to_string())?;
+    db::build_import_result(&state.pool, run_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn resolve_zhihu_collection(
+    state: &AppState,
+    input: &ImportRequest,
+) -> Result<CollectionInfo, AppError> {
+    match input.kind {
+        crate::models::ImportKind::Favorites => {
+            let media_id = input
+                .media_id
+                .as_deref()
+                .ok_or_else(|| AppError::InvalidInput("请选择收藏夹".into()))?;
+            state.zhihu.resolve_collection(media_id).await
+        }
+        crate::models::ImportKind::PublicUrl => {
+            let url = input
+                .url
+                .as_deref()
+                .ok_or_else(|| AppError::InvalidInput("请提供收藏夹链接".into()))?;
+            state.zhihu.resolve_collection(url).await
+        }
+    }
+}
