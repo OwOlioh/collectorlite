@@ -107,20 +107,20 @@ impl ZhihuClient {
             "answer" => {
                 let question = &content["question"];
                 let q_title = question["title"].as_str().unwrap_or("");
-                let q_id = question["id"].as_i64().map(|id| id.to_string()).unwrap_or_default();
-                let answer_id = content["id"].as_i64().map(|id| id.to_string()).unwrap_or_default();
+                let q_id = json_value_to_string(&question["id"]);
+                let answer_id = json_value_to_string(&content["id"]);
                 let u = format!("https://www.zhihu.com/question/{}/answer/{}", q_id, answer_id);
                 (q_title.to_string(), u)
             }
             "article" => {
                 let a_title = content["title"].as_str().unwrap_or("");
-                let a_id = content["id"].as_i64().map(|id| id.to_string()).unwrap_or_default();
+                let a_id = json_value_to_string(&content["id"]);
                 let u = format!("https://zhuanlan.zhihu.com/p/{}", a_id);
                 (a_title.to_string(), u)
             }
             "pin" => {
                 let pin_title = content["excerpt_title"].as_str().unwrap_or("想法");
-                let pin_id = content["id"].as_i64().map(|id| id.to_string()).unwrap_or_default();
+                let pin_id = json_value_to_string(&content["id"]);
                 let u = format!("https://www.zhihu.com/pin/{}", pin_id);
                 (pin_title.to_string(), u)
             }
@@ -146,10 +146,8 @@ impl ZhihuClient {
 
         let collected_time = item["collected_time"].as_i64().or(created_time);
 
-        // Use the collection item's own ID as external_id (unique per item in collection)
-        let item_id = item["id"].as_i64().map(|id| id.to_string()).unwrap_or_else(|| url.clone());
+        let item_id = json_value_to_string(&item["id"]);
 
-        // Extract cover image if available
         let cover_url = content["image_url"]
             .as_str()
             .or_else(|| content["thumbnail"].as_str())
@@ -175,6 +173,15 @@ impl ZhihuClient {
                 "item_type": item_type,
             }),
         })
+    }
+}
+
+/// Convert a JSON value to string, handling both string and number types
+fn json_value_to_string(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        _ => String::new(),
     }
 }
 
