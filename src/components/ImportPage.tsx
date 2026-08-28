@@ -98,9 +98,22 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
     }
   }, [loadCollections]);
 
+  const refreshZhihuProfile = useCallback(async () => {
+    try {
+      const next = await api.zhihuProfile();
+      setZhihuProfile(next);
+      if (next.isLogin) {
+        setZhihuCollections(await api.listZhihuCollections());
+      }
+    } catch (err) {
+      setError(String(err));
+    }
+  }, []);
+
   useEffect(() => {
     void refreshProfile();
-  }, [refreshProfile]);
+    void refreshZhihuProfile();
+  }, [refreshProfile, refreshZhihuProfile]);
 
   useEffect(() => {
     if (!qr) return;
