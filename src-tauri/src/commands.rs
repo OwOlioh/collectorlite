@@ -580,10 +580,11 @@ pub async fn zhihu_profile(state: State<'_, AppState>) -> Result<BilibiliProfile
             mid: None,
         });
     }
-    let url_token = state.zhihu.get_url_token().await.map_err(|e| e.to_string())?;
+    // Try API, but return logged-in even if API fails (cookie might still work for collections)
+    let name = state.zhihu.get_url_token().await.ok();
     Ok(BilibiliProfile {
         is_login: true,
-        name: Some(url_token),
+        name,
         face: None,
         mid: None,
     })
@@ -730,10 +731,10 @@ pub async fn zhihu_browser_login(
 ) -> Result<BilibiliProfile, String> {
     state.zhihu.set_cookie(Some(cookie.clone()));
     let _ = state.save_zhihu_cookie(Some(cookie));
-    let url_token = state.zhihu.get_url_token().await.map_err(|e| e.to_string())?;
+    let name = state.zhihu.get_url_token().await.ok();
     Ok(BilibiliProfile {
         is_login: true,
-        name: Some(url_token),
+        name,
         face: None,
         mid: None,
     })

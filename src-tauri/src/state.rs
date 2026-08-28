@@ -42,6 +42,7 @@ impl AppState {
             .ok()
             .flatten()
             .or_else(|| load_zhihu_cookie().ok().flatten());
+        eprintln!("[state] zhihu cookie loaded: {}", zhihu_persisted.is_some());
         if let Some(cookie) = zhihu_persisted {
             zhihu.set_cookie(Some(cookie));
         }

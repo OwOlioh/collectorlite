@@ -42,6 +42,18 @@ impl ZhihuClient {
         let mut headers = HeaderMap::new();
         headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_STR));
         headers.insert(REFERER, HeaderValue::from_static("https://www.zhihu.com/"));
+        headers.insert(
+            "accept",
+            HeaderValue::from_static("application/json, text/plain, */*"),
+        );
+        headers.insert(
+            "accept-language",
+            HeaderValue::from_static("zh-CN,zh;q=0.9,en;q=0.8"),
+        );
+        headers.insert(
+            "x-requested-with",
+            HeaderValue::from_static("fetch"),
+        );
         if let Some(cookie_str) = cookie {
             if let Ok(val) = HeaderValue::from_str(cookie_str) {
                 headers.insert(COOKIE, val);
@@ -66,6 +78,7 @@ impl ZhihuClient {
 
     async fn fetch_json(&self, url: &str) -> Result<Value, AppError> {
         let cookie = self.get_cookie();
+        eprintln!("[zhihu] fetch_json url={}, has_cookie={}", url, cookie.is_some());
         let headers = Self::build_headers(cookie.as_deref());
         let resp = self
             .client
@@ -79,6 +92,7 @@ impl ZhihuClient {
             if status == 401 {
                 return Err(AppError::AuthRequired);
             }
+            eprintln!("[zhihu] HTTP {} for {}", status, url);
             return Err(AppError::Other(format!(
                 "知乎 API 请求失败: HTTP {}",
                 status
@@ -146,7 +160,11 @@ impl ZhihuClient {
 
         let collected_time = item["collected_time"].as_i64().or(created_time);
 
-        let item_id = json_value_to_string(&item["id"]);
+        let item_id = json_value_to_string(&content["id"]);
+        if item_id.is_empty() {
+            eprintln!("[zhihu] WARNING: empty content id, using url as fallback");
+        }
+        let item_id = if item_id.is_empty() { url.clone() } else { item_id };
 
         let cover_url = content["image_url"]
             .as_str()
