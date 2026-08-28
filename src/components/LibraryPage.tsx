@@ -356,9 +356,15 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
                       title="在浏览器打开"
                     >
                       {isBrowser ? (
-                        <div className="browser-cover-placeholder">
-                          <Globe size={28} />
-                        </div>
+                        item.coverUrl ? (
+                          <div className="browser-cover-placeholder">
+                            <img src={item.coverUrl} alt="" className="browser-favicon" />
+                          </div>
+                        ) : (
+                          <div className="browser-cover-placeholder">
+                            <Globe size={28} />
+                          </div>
+                        )
                       ) : resolveCoverUrl(item.coverUrl, item.coverLocalPath) ? (
                         <img
                           src={resolveCoverUrl(item.coverUrl, item.coverLocalPath)}

@@ -1859,6 +1859,12 @@ textarea {
   color: var(--muted);
 }
 
+.browser-favicon {
+  max-width: 48px;
+  max-height: 48px;
+  object-fit: contain;
+}
+
 .modal-backdrop {
   position: fixed;
   z-index: 20;
