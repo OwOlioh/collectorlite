@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use scraper::{Html, Selector};
 use sha2::{Digest, Sha256};
+use url::Url;
 
 use crate::error::AppError;
 use crate::models::{CollectionInfo, ExternalItem};
@@ -12,6 +13,14 @@ impl BrowserBookmarkClient {
     #[allow(dead_code)]
     pub fn new() -> Self {
         Self
+    }
+
+    fn resolve_favicon_url(page_url: &str) -> Option<String> {
+        let parsed = Url::parse(page_url).ok()?;
+        let domain = parsed.host_str()?;
+        Some(format!(
+            "https://www.google.com/s2/favicons?domain={domain}&sz=32"
+        ))
     }
 
     pub fn parse_bookmarks_html(html: &str) -> Result<Vec<ExternalItem>, AppError> {
@@ -48,7 +57,7 @@ impl BrowserBookmarkClient {
                 .attr("add_date")
                 .and_then(|s| s.parse::<i64>().ok());
 
-            let icon = element.value().attr("icon").map(|s| s.to_string());
+            let icon = Self::resolve_favicon_url(href);
 
             let folder_names = Self::build_folder_names(&element);
 

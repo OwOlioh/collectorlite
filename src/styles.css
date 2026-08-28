@@ -1860,8 +1860,8 @@ textarea {
 }
 
 .browser-favicon {
-  max-width: 48px;
-  max-height: 48px;
+  width: 16px;
+  height: 16px;
   object-fit: contain;
 }
 
