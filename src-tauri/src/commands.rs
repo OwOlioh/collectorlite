@@ -720,3 +720,202 @@ async fn resolve_zhihu_collection(
         }
     }
 }
+
+// ── Zhihu browser login ──
+
+#[tauri::command]
+pub async fn zhihu_browser_login(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<BilibiliProfile, String> {
+    use tauri::WebviewUrl;
+    use tauri::WebviewWindowBuilder;
+
+    let webview = WebviewWindowBuilder::new(
+        &app,
+        "zhihu-login",
+        WebviewUrl::External("https://www.zhihu.com/signin".parse().unwrap()),
+    )
+    .title("知乎登录")
+    .inner_size(800.0, 700.0)
+    .center()
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    // Poll for cookies until found or timeout
+    let cookie = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        async {
+            loop {
+                if let Some(cookie) = read_zhihu_cookie_from_webview().await {
+                    return cookie;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        },
+    )
+    .await;
+
+    // Close the login window
+    let _ = webview.close();
+
+    match cookie {
+        Ok(cookie) => {
+            state.zhihu.set_cookie(Some(cookie.clone()));
+            let _ = state.save_zhihu_cookie(Some(cookie));
+            let url_token = state.zhihu.get_url_token().await.map_err(|e| e.to_string())?;
+            Ok(BilibiliProfile {
+                is_login: true,
+                name: Some(url_token),
+                face: None,
+                mid: None,
+            })
+        }
+        Err(_) => Err("登录超时，请关闭窗口后重试".into()),
+    }
+}
+
+async fn read_zhihu_cookie_from_webview() -> Option<String> {
+    use std::path::PathBuf;
+
+    // WebView2 cookie database location
+    let local = std::env::var("LOCALAPPDATA").ok()?;
+    let cookie_path = PathBuf::from(local)
+        .join("com.local.bili-collector")
+        .join("EBWebView")
+        .join("Default")
+        .join("Cookies");
+
+    if !cookie_path.exists() {
+        return None;
+    }
+
+    // Try to read cookies from WebView2 SQLite database
+    let cookies = read_webview_cookies(&cookie_path).ok()?;
+    let zhihu_cookies: Vec<String> = cookies
+        .iter()
+        .filter(|(host, _, _)| host.contains("zhihu.com"))
+        .map(|(_, name, value)| format!("{}={}", name, value))
+        .collect();
+
+    if zhihu_cookies.is_empty() {
+        return None;
+    }
+
+    Some(zhihu_cookies.join("; "))
+}
+
+fn read_webview_cookies(path: &std::path::Path) -> Result<Vec<(String, String, String)>, String> {
+    // WebView2 stores cookies in an encrypted SQLite database on Windows.
+    // We can try to read it directly - the encryption is mainly for sensitive data,
+    // and cookies are often stored in plaintext.
+    let conn = rusqlite::Connection::open(path).map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare("SELECT host_key, name, encrypted_value FROM cookies")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        let (host, name, encrypted) = row.map_err(|e| e.to_string())?;
+        // Try to decrypt with DPAPI (Windows Data Protection API)
+        if let Ok(value) = decrypt_webview_value(&encrypted) {
+            results.push((host, name, value));
+        }
+    }
+    Ok(results)
+}
+
+fn decrypt_webview_value(encrypted: &[u8]) -> Result<String, String> {
+    // WebView2 on Windows uses DPAPI to encrypt cookie values
+    // The encrypted data starts with "v10" or "v11" prefix
+    if encrypted.len() < 3 {
+        return Err("too short".into());
+    }
+    let prefix = &encrypted[..3];
+    if prefix != b"v10" && prefix != b"v11" {
+        // Try raw UTF-8 as fallback
+        return String::from_utf8(encrypted.to_vec()).map_err(|e| e.to_string());
+    }
+    // DPAPI decryption
+    let data = &encrypted[3..];
+    let decrypted = windows_dpapi_decrypt(data)?;
+    String::from_utf8(decrypted).map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_dpapi_decrypt(data: &[u8]) -> Result<Vec<u8>, String> {
+    use std::ffi::c_void;
+    use std::ptr;
+
+    #[link(name = "crypt32")]
+    extern "system" {
+        fn CryptUnprotectData(
+            pDataIn: *const DataBlob,
+            ppszDataDescr: *mut *const u16,
+            pOptionalEntropy: *const DataBlob,
+            pvReserved: *const c_void,
+            pPromptStruct: *const c_void,
+            dwFlags: u32,
+            pDataOut: *mut DataBlob,
+        ) -> i32;
+    }
+
+    #[repr(C)]
+    struct DataBlob {
+        cbData: u32,
+        pbData: *mut u8,
+    }
+
+    let input = DataBlob {
+        cbData: data.len() as u32,
+        pbData: data.as_ptr() as *mut u8,
+    };
+
+    let mut output = DataBlob {
+        cbData: 0,
+        pbData: ptr::null_mut(),
+    };
+
+    let result = unsafe {
+        CryptUnprotectData(
+            &input,
+            ptr::null_mut(),
+            ptr::null(),
+            ptr::null(),
+            ptr::null(),
+            0,
+            &mut output,
+        )
+    };
+
+    if result == 0 {
+        return Err("DPAPI decryption failed".into());
+    }
+
+    let decrypted = unsafe {
+        let slice = std::slice::from_raw_parts(output.pbData, output.cbData as usize);
+        let vec = slice.to_vec();
+        // Free the memory
+        extern "system" {
+            fn LocalFree(hMem: *mut c_void) -> *mut c_void;
+        }
+        LocalFree(output.pbData as *mut c_void);
+        vec
+    };
+
+    Ok(decrypted)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_dpapi_decrypt(_data: &[u8]) -> Result<Vec<u8>, String> {
+    Err("DPAPI only available on Windows".into())
+}

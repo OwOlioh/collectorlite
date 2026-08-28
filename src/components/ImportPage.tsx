@@ -705,39 +705,32 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
                   ) : (
                     <div style={{display: "grid", gap: "8px"}}>
                       <p style={{margin: 0, color: "var(--muted)", fontSize: "13px"}}>
-                        点击下方按钮在浏览器中打开知乎并登录。登录后按 F12 打开开发者工具，
-                        在 Application → Cookies → 选中 zhihu.com → 复制所有 cookie 的
-                        name=value 对（用分号隔开），例如：z_c0=xxx; d_c0=xxx
+                        点击下方按钮，在弹窗中登录知乎。登录后窗口会自动关闭。
                       </p>
                       <button
                         type="button"
-                        className="secondary-button"
+                        className="primary-button"
                         style={{ justifySelf: "start" }}
-                        onClick={() => api.openUrl("https://www.zhihu.com/signin")}
-                      >
-                        打开知乎登录
-                      </button>
-                      <input
-                        style={{minHeight: "36px", padding: "0 10px", border: "1px solid var(--border)", borderRadius: "7px"}}
-                        placeholder="例如: z_c0=xxx; d_c0=xxx"
-                        onKeyDown={async (e) => {
-                          if (e.key === "Enter") {
-                            const cookie = (e.target as HTMLInputElement).value.trim();
-                            if (cookie) {
-                              setLoginBusy(true);
-                              try {
-                                await api.zhihuSetCookie(cookie);
-                                const p = await api.zhihuProfile();
-                                setZhihuProfile(p);
-                              } catch (err) {
-                                setError(String(err));
-                              } finally {
-                                setLoginBusy(false);
-                              }
+                        onClick={async () => {
+                          setLoginBusy(true);
+                          setError("");
+                          try {
+                            const p = await api.zhihuBrowserLogin();
+                            setZhihuProfile(p);
+                            if (p.isLogin) {
+                              setZhihuCollections(await api.listZhihuCollections());
                             }
+                          } catch (err) {
+                            setError(String(err));
+                          } finally {
+                            setLoginBusy(false);
                           }
                         }}
-                      />
+                        disabled={loginBusy}
+                      >
+                        {loginBusy ? <LoaderCircle className="spin" size={17} /> : <LogIn size={17} />}
+                        浏览器登录知乎
+                      </button>
                     </div>
                   )}
                 </div>

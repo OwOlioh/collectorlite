@@ -15,8 +15,8 @@ use commands::{
     list_bilibili_favorites, list_tag_categories, list_tags, list_zhihu_collections, logout,
     merge_tags, open_url, parse_public_favorite_url, parse_zhihu_collection_url,
     preview_import, preview_zhihu_import, rename_tag_category, search_items,
-    update_item_notes, update_item_tags, upsert_tag, zhihu_logout, zhihu_profile,
-    zhihu_set_cookie,
+    update_item_notes, update_item_tags, upsert_tag, zhihu_browser_login, zhihu_logout,
+    zhihu_profile, zhihu_set_cookie,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -56,6 +56,7 @@ pub fn run() {
             open_url,
             // Zhihu
             zhihu_set_cookie,
+            zhihu_browser_login,
             zhihu_logout,
             zhihu_profile,
             list_zhihu_collections,
