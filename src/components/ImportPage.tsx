@@ -543,8 +543,8 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
               onClick={() => setMode("zhihu")}
             >
               <LogIn size={20} />
-              <strong>登录知乎</strong>
-              <span>读取自己的知乎收藏夹，并导入到本地。</span>
+              <strong>知乎收藏夹</strong>
+              <span>登录知乎后，选择或粘贴收藏夹链接导入内容。</span>
             </button>
             <button
               type="button"
@@ -553,7 +553,7 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
             >
               <Link size={20} />
               <strong>知乎公开收藏夹</strong>
-              <span>不登录，输入知乎收藏夹链接导入内容。</span>
+              <span>登录知乎后，输入收藏夹链接导入内容（知乎 API 需要登录态）。</span>
             </button>
           </div>
 
@@ -705,8 +705,9 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
                   ) : (
                     <div style={{display: "grid", gap: "8px"}}>
                       <p style={{margin: 0, color: "var(--muted)", fontSize: "13px"}}>
-                        点击下方按钮在浏览器中打开知乎，登录后按 F12 打开开发者工具，
-                        在 Application → Cookies 中复制完整的 cookie 字符串粘贴到下方。
+                        点击下方按钮在浏览器中打开知乎并登录。登录后按 F12 打开开发者工具，
+                        在 Application → Cookies → 选中 zhihu.com → 复制所有 cookie 的
+                        name=value 对（用分号隔开），例如：z_c0=xxx; d_c0=xxx
                       </p>
                       <button
                         type="button"
@@ -718,7 +719,7 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
                       </button>
                       <input
                         style={{minHeight: "36px", padding: "0 10px", border: "1px solid var(--border)", borderRadius: "7px"}}
-                        placeholder="粘贴知乎 cookie 字符串"
+                        placeholder="例如: z_c0=xxx; d_c0=xxx"
                         onKeyDown={async (e) => {
                           if (e.key === "Enter") {
                             const cookie = (e.target as HTMLInputElement).value.trim();
