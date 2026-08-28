@@ -75,9 +75,13 @@ impl ZhihuClient {
             .await
             .map_err(|e| AppError::Http(e))?;
         if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            if status == 401 {
+                return Err(AppError::AuthRequired);
+            }
             return Err(AppError::Other(format!(
                 "知乎 API 请求失败: HTTP {}",
-                resp.status()
+                status
             )));
         }
         let text = resp.text().await.map_err(|e| AppError::Http(e))?;
