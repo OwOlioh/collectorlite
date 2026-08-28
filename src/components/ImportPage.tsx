@@ -707,7 +707,8 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
                       <p style={{margin: 0, color: "var(--muted)", fontSize: "13px"}}>
                         点击下方按钮在浏览器中打开知乎并登录。登录后按 F12 →
                         Application → Cookies → zhihu.com →
-                        复制 <strong>z_c0</strong> 的值粘贴到下方。
+                        分别复制 <strong>z_c0</strong> 和 <strong>d_c0</strong> 的值，
+                        用分号拼接粘贴到下方，格式：<code>z_c0=xxx; d_c0=xxx</code>
                       </p>
                       <button
                         type="button"
@@ -719,7 +720,7 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
                       </button>
                       <input
                         style={{minHeight: "36px", padding: "0 10px", border: "1px solid var(--border)", borderRadius: "7px"}}
-                        placeholder="粘贴 z_c0 的值"
+                        placeholder="z_c0=xxx; d_c0=xxx"
                         onKeyDown={async (e) => {
                           if (e.key === "Enter") {
                             const cookie = (e.target as HTMLInputElement).value.trim();

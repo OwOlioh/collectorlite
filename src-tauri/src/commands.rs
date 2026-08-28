@@ -728,14 +728,8 @@ pub async fn zhihu_browser_login(
     state: State<'_, AppState>,
     cookie: String,
 ) -> Result<BilibiliProfile, String> {
-    // Accept both full cookie string and just z_c0 value
-    let cookie_str = if cookie.contains('=') {
-        cookie
-    } else {
-        format!("z_c0={}", cookie)
-    };
-    state.zhihu.set_cookie(Some(cookie_str.clone()));
-    let _ = state.save_zhihu_cookie(Some(cookie_str));
+    state.zhihu.set_cookie(Some(cookie.clone()));
+    let _ = state.save_zhihu_cookie(Some(cookie));
     let url_token = state.zhihu.get_url_token().await.map_err(|e| e.to_string())?;
     Ok(BilibiliProfile {
         is_login: true,
