@@ -784,6 +784,7 @@ async fn read_zhihu_cookie_from_webview() -> Option<String> {
         .join("com.local.bili-collector")
         .join("EBWebView")
         .join("Default")
+        .join("Network")
         .join("Cookies");
 
     if !cookie_path.exists() {
@@ -809,7 +810,11 @@ fn read_webview_cookies(path: &std::path::Path) -> Result<Vec<(String, String, S
     // WebView2 stores cookies in an encrypted SQLite database on Windows.
     // We can try to read it directly - the encryption is mainly for sensitive data,
     // and cookies are often stored in plaintext.
-    let conn = rusqlite::Connection::open(path).map_err(|e| e.to_string())?;
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare("SELECT host_key, name, encrypted_value FROM cookies")
         .map_err(|e| e.to_string())?;
@@ -869,6 +874,7 @@ fn windows_dpapi_decrypt(data: &[u8]) -> Result<Vec<u8>, String> {
         ) -> i32;
     }
 
+    #[allow(non_snake_case)]
     #[repr(C)]
     struct DataBlob {
         cbData: u32,
