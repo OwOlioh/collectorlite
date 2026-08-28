@@ -146,15 +146,24 @@ impl ZhihuClient {
 
         let collected_time = item["collected_time"].as_i64().or(created_time);
 
-        let external_id = url.clone();
+        // Use the collection item's own ID as external_id (unique per item in collection)
+        let item_id = item["id"].as_i64().map(|id| id.to_string()).unwrap_or_else(|| url.clone());
+
+        // Extract cover image if available
+        let cover_url = content["image_url"]
+            .as_str()
+            .or_else(|| content["thumbnail"].as_str())
+            .or_else(|| content["cover"].as_str())
+            .or_else(|| content["title_image"].as_str())
+            .map(|s| s.to_string());
 
         Some(ExternalItem {
             source: "zhihu".into(),
-            external_id,
+            external_id: item_id,
             source_url: url,
             title,
             description: String::new(),
-            cover_url: None,
+            cover_url,
             cover_local_path: None,
             author_name,
             author_id,

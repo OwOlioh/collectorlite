@@ -667,10 +667,10 @@ pub async fn execute_zhihu_import(
     for item in &enriched {
         let result = async {
             let (item_id, inserted) = db::upsert_item(&state.pool, item).await?;
-            let tag_specs = assignments
+            let tag_specs: &[TagInput] = assignments
                 .get(item.external_id.as_str())
-                .copied()
-                .unwrap_or(&input.tag_specs);
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
             for tag_spec in tag_specs {
                 let tag_id = db::get_or_create_tag(&state.pool, tag_spec).await?;
                 db::attach_tag(&state.pool, item_id, tag_id).await?;
