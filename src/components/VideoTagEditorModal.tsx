@@ -41,6 +41,7 @@ export function VideoTagEditorModal({
         categoryId: tag.categoryId
       }));
       await api.updateItemTags(item.id, tagSpecs);
+      onTagsChanged();
       onSaved();
       onClose();
     } catch (err) {

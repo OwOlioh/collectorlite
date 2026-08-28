@@ -386,7 +386,36 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
     setError("");
     try {
       if (mode === "browser") {
+        // Build tag specs from per-video tag assignments
         const tagSpecs: TagInput[] = [];
+        const seenTagIds = new Set<number>();
+        if (preview) {
+          preview.items.forEach((item) => {
+            const state = perVideoTags[item.externalId];
+            if (state) {
+              // Add partition tag
+              if (state.partitionTag.trim()) {
+                const key = state.partitionTag.trim().toLowerCase();
+                if (!seenTagIds.has(key as unknown as number)) {
+                  seenTagIds.add(key as unknown as number);
+                  tagSpecs.push({ namespace: "auto", name: state.partitionTag.trim() });
+                }
+              }
+              // Add other tags
+              state.otherTags.forEach((tag) => {
+                if (!seenTagIds.has(tag.id)) {
+                  seenTagIds.add(tag.id);
+                  tagSpecs.push({
+                    id: tag.id,
+                    namespace: tag.namespace,
+                    name: tag.name,
+                    color: tag.color
+                  });
+                }
+              });
+            }
+          });
+        }
         const request: BrowserImportRequest = {
           htmlContent: browserHtmlContent,
           tagSpecs
