@@ -94,6 +94,15 @@ export const api = {
     call<ImportPreview>("preview_zhihu_import", { input: request }),
   executeZhihuImport: (request: ImportRequest) =>
     call<ImportResult>("execute_zhihu_import", { input: request }),
+  // CSDN
+  listCsdnCollections: (username: string) =>
+    call<CollectionInfo[]>("list_csdn_collections", { username }),
+  parseCsdnCollectionUrl: (url: string) =>
+    call<CollectionInfo>("parse_csdn_collection_url", { url }),
+  previewCsdnImport: (request: ImportRequest) =>
+    call<ImportPreview>("preview_csdn_import", { input: request }),
+  executeCsdnImport: (request: ImportRequest) =>
+    call<ImportResult>("execute_csdn_import", { input: request }),
 };
 
 let mockTags: Tag[] = [
@@ -356,6 +365,88 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
       }
       return category ? ({ ...category } as T) : (null as T);
     }
+    case "list_csdn_collections":
+      return [
+        {
+          source: "csdn",
+          id: "4050350",
+          title: "默认收藏夹",
+          owner: "LOVEmy134611",
+          count: 1023,
+          url: undefined
+        }
+      ] as T;
+    case "parse_csdn_collection_url": {
+      const url = String(args?.url ?? "");
+      return {
+        source: "csdn",
+        id: "12345",
+        title: url ? "CSDN 收藏夹" : "CSDN 收藏夹",
+        owner: "testuser",
+        count: 10,
+        url
+      } as T;
+    }
+    case "preview_csdn_import":
+      return {
+        collection: {
+          source: "csdn",
+          id: "4050350",
+          title: "默认收藏夹",
+          owner: "LOVEmy134611",
+          count: 2,
+          url: undefined
+        },
+        items: [
+          {
+            id: -1,
+            source: "csdn",
+            externalId: "164078212",
+            sourceUrl: "https://blog.csdn.net/2401_83830408/article/details/164078212",
+            title: "RAG 实战教程（四）：GraphRAG 查询实战",
+            description: "",
+            notes: undefined,
+            coverUrl: undefined,
+            coverLocalPath: undefined,
+            authorName: "IvanCodes",
+            authorId: "2401_83830408",
+            partitionName: undefined,
+            publishedAt: 1787801938,
+            duration: undefined,
+            favoriteTime: 1787801938,
+            tags: []
+          },
+          {
+            id: -2,
+            source: "csdn",
+            externalId: "164052452",
+            sourceUrl: "https://blog.csdn.net/2301_76297596/article/details/164052452",
+            title: "把音乐播放器放进 NAS：极空间部署 R3PLAYX",
+            description: "",
+            notes: undefined,
+            coverUrl: undefined,
+            coverLocalPath: undefined,
+            authorName: "星辰邢哥",
+            authorId: "2301_76297596",
+            partitionName: undefined,
+            publishedAt: 1787798756,
+            duration: undefined,
+            favoriteTime: 1787798756,
+            tags: []
+          }
+        ],
+        partitionSuggestions: []
+      } as T;
+    case "execute_csdn_import":
+      return {
+        runId: 1,
+        total: 2,
+        imported: 2,
+        skipped: 0,
+        failed: 0,
+        cleanupStatus: undefined,
+        errors: []
+      } as T;
     default:
       return null as T;
   }

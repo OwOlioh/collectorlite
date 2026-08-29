@@ -9,8 +9,8 @@ use crate::models::{
     ItemTagAssignment, PartitionSuggestion, QrSession, QrStatus, Tag, TagCategory, TagInput,
     VideoItem,
 };
-use crate::source::SourceAdapter;
 use crate::source::browser::BrowserBookmarkClient;
+use crate::source::SourceAdapter;
 use crate::state::AppState;
 
 fn to_video_item(item: &crate::models::ExternalItem, local_id: i64) -> VideoItem {
@@ -69,6 +69,27 @@ async fn cache_item_covers(
         let mut next = item.clone();
         if let Some(url) = item.cover_url.as_deref().filter(|value| !value.is_empty()) {
             if let Ok((bytes, extension)) = state.bili.download_cover(url).await {
+                if let Ok(path) =
+                    save_cover_file(state, &item.source, &item.external_id, &bytes, &extension)
+                {
+                    next.cover_local_path = Some(path);
+                }
+            }
+        }
+        cached.push(next);
+    }
+    cached
+}
+
+async fn cache_csdn_covers(
+    state: &AppState,
+    items: &[crate::models::ExternalItem],
+) -> Vec<crate::models::ExternalItem> {
+    let mut cached = Vec::with_capacity(items.len());
+    for item in items {
+        let mut next = item.clone();
+        if let Some(url) = item.cover_url.as_deref().filter(|value| !value.is_empty()) {
+            if let Ok((bytes, extension)) = state.csdn.download_cover(url).await {
                 if let Ok(path) =
                     save_cover_file(state, &item.source, &item.external_id, &bytes, &extension)
                 {
@@ -551,10 +572,7 @@ pub async fn import_browser_bookmarks(
 // ── Zhihu commands ──
 
 #[tauri::command]
-pub async fn zhihu_set_cookie(
-    state: State<'_, AppState>,
-    cookie: String,
-) -> Result<(), String> {
+pub async fn zhihu_set_cookie(state: State<'_, AppState>, cookie: String) -> Result<(), String> {
     state.zhihu.set_cookie(Some(cookie.clone()));
     state
         .save_zhihu_cookie(Some(cookie))
@@ -564,9 +582,7 @@ pub async fn zhihu_set_cookie(
 #[tauri::command]
 pub async fn zhihu_logout(state: State<'_, AppState>) -> Result<(), String> {
     state.zhihu.set_cookie(None);
-    state
-        .save_zhihu_cookie(None)
-        .map_err(|e| e.to_string())
+    state.save_zhihu_cookie(None).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -594,7 +610,11 @@ pub async fn zhihu_profile(state: State<'_, AppState>) -> Result<BilibiliProfile
 pub async fn list_zhihu_collections(
     state: State<'_, AppState>,
 ) -> Result<Vec<CollectionInfo>, String> {
-    state.zhihu.list_collections().await.map_err(|e| e.to_string())
+    state
+        .zhihu
+        .list_collections()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -602,7 +622,11 @@ pub async fn parse_zhihu_collection_url(
     state: State<'_, AppState>,
     url: String,
 ) -> Result<CollectionInfo, String> {
-    state.zhihu.resolve_collection(&url).await.map_err(|e| e.to_string())
+    state
+        .zhihu
+        .resolve_collection(&url)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -618,13 +642,21 @@ pub async fn preview_zhihu_import(
         .fetch_collection(&collection)
         .await
         .map_err(|e| e.to_string())?;
-    let items: Vec<VideoItem> = items.iter().enumerate().map(|(i, item)| to_video_item(item, -(i as i64 + 1))).collect();
+    let items: Vec<VideoItem> = items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| to_video_item(item, -(i as i64 + 1)))
+        .collect();
     let partition_suggestions: Vec<PartitionSuggestion> = items
         .iter()
         .filter_map(|item| item.partition_name.clone())
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
-        .map(|name| PartitionSuggestion { name, count: 0, selected: false })
+        .map(|name| PartitionSuggestion {
+            name,
+            count: 0,
+            selected: false,
+        })
         .collect();
     Ok(ImportPreview {
         collection,
@@ -738,4 +770,158 @@ pub async fn zhihu_browser_login(
         face: None,
         mid: None,
     })
+}
+
+// ── CSDN commands ──
+
+#[tauri::command]
+pub async fn list_csdn_collections(
+    state: State<'_, AppState>,
+    username: String,
+) -> Result<Vec<CollectionInfo>, String> {
+    state
+        .csdn
+        .list_collections_for_user(&username)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn parse_csdn_collection_url(
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<CollectionInfo, String> {
+    state
+        .csdn
+        .resolve_collection(&url)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn preview_csdn_import(
+    state: State<'_, AppState>,
+    input: ImportRequest,
+) -> Result<ImportPreview, String> {
+    let collection = resolve_csdn_collection(&state, &input)
+        .await
+        .map_err(|e| e.to_string())?;
+    let items = state
+        .csdn
+        .fetch_collection(&collection)
+        .await
+        .map_err(|e| e.to_string())?;
+    let items: Vec<VideoItem> = items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| to_video_item(item, -(i as i64 + 1)))
+        .collect();
+    Ok(ImportPreview {
+        collection,
+        items,
+        partition_suggestions: vec![],
+    })
+}
+
+#[tauri::command]
+pub async fn execute_csdn_import(
+    state: State<'_, AppState>,
+    input: ImportRequest,
+) -> Result<ImportResult, String> {
+    let collection = resolve_csdn_collection(&state, &input)
+        .await
+        .map_err(|e| e.to_string())?;
+    let items = state
+        .csdn
+        .fetch_collection(&collection)
+        .await
+        .map_err(|e| e.to_string())?;
+    let enriched = state
+        .csdn
+        .enrich_items(&items)
+        .await
+        .map_err(|e| e.to_string())?;
+    // Download cover images to local storage
+    let enriched = cache_csdn_covers(&state, &enriched).await;
+    let assignments = input
+        .item_tag_assignments
+        .iter()
+        .map(|a| (a.external_id.as_str(), &a.tag_specs))
+        .collect::<HashMap<_, _>>();
+    let total = enriched.len() as i64;
+    let run_id = db::create_import_run(&state.pool, &collection, total, false)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut imported = 0i64;
+    let mut skipped = 0i64;
+    let mut failed = 0i64;
+    let mut errors = Vec::new();
+    for item in &enriched {
+        let result = async {
+            let (item_id, inserted) = db::upsert_item(&state.pool, item).await?;
+            let tag_specs: &[TagInput] = assignments
+                .get(item.external_id.as_str())
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            for tag_spec in tag_specs {
+                let tag_id = db::get_or_create_tag(&state.pool, tag_spec).await?;
+                db::attach_tag(&state.pool, item_id, tag_id).await?;
+            }
+            db::rebuild_item_fts(&state.pool, item_id).await?;
+            db::link_import_item(&state.pool, run_id, item_id).await?;
+            Ok::<bool, AppError>(inserted)
+        }
+        .await;
+        match result {
+            Ok(true) => imported += 1,
+            Ok(false) => skipped += 1,
+            Err(error) => {
+                failed += 1;
+                if errors.len() < 20 {
+                    errors.push(error.to_string());
+                }
+            }
+        }
+    }
+    db::finish_import_run(&state.pool, run_id, imported, skipped, failed, &errors)
+        .await
+        .map_err(|e| e.to_string())?;
+    db::build_import_result(&state.pool, run_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn resolve_csdn_collection(
+    state: &AppState,
+    input: &ImportRequest,
+) -> Result<CollectionInfo, AppError> {
+    match input.kind {
+        crate::models::ImportKind::Favorites => {
+            let media_id = input
+                .media_id
+                .as_deref()
+                .ok_or_else(|| AppError::InvalidInput("请选择收藏夹".into()))?;
+            let username = input
+                .url
+                .as_deref()
+                .ok_or_else(|| AppError::InvalidInput("请提供 CSDN 用户名".into()))?;
+            // For CSDN favorites mode, media_id is the folder ID and url is the username
+            Ok(CollectionInfo {
+                source: "csdn".into(),
+                id: media_id.to_string(),
+                title: String::new(),
+                owner: Some(username.to_string()),
+                count: 0,
+                url: None,
+            })
+        }
+        crate::models::ImportKind::PublicUrl => {
+            let url = input
+                .url
+                .as_deref()
+                .ok_or_else(|| AppError::InvalidInput("请提供收藏夹链接".into()))?;
+            state.csdn.resolve_collection(url).await
+        }
+    }
 }

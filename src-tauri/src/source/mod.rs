@@ -16,4 +16,5 @@ pub trait SourceAdapter: Send + Sync {
 
 pub mod bilibili;
 pub mod browser;
+pub mod csdn;
 pub mod zhihu;

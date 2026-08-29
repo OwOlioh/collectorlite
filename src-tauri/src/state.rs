@@ -6,6 +6,7 @@ use tauri::Manager;
 use crate::db;
 use crate::error::AppError;
 use crate::source::bilibili::BilibiliClient;
+use crate::source::csdn::CsdnClient;
 use crate::source::zhihu::ZhihuClient;
 
 const KEYRING_SERVICE: &str = "bili-collector";
@@ -15,6 +16,7 @@ const KEYRING_ZHIHU_USER: &str = "zhihu-cookie";
 pub struct AppState {
     pub pool: SqlitePool,
     pub bili: BilibiliClient,
+    pub csdn: CsdnClient,
     pub zhihu: ZhihuClient,
     pub data_dir: PathBuf,
 }
@@ -28,6 +30,7 @@ impl AppState {
         let db_path = data_dir.join("bili_collector_v2.sqlite3");
         let pool = db::connect(&db_path).await?;
         let bili = BilibiliClient::new()?;
+        let csdn = CsdnClient::new()?;
         let zhihu = ZhihuClient::new()?;
         let cookie_file = data_dir.join("bilibili_cookie.txt");
         let zhihu_cookie_file = data_dir.join("zhihu_cookie.txt");
@@ -49,6 +52,7 @@ impl AppState {
         Ok(Self {
             pool,
             bili,
+            csdn,
             zhihu,
             data_dir,
         })

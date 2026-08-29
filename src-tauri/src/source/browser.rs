@@ -33,10 +33,7 @@ impl BrowserBookmarkClient {
 
         for element in document.select(&selector) {
             let href = element.value().attr("href").unwrap_or("");
-            if href.is_empty()
-                || href.starts_with("javascript:")
-                || href.starts_with("place:")
-            {
+            if href.is_empty() || href.starts_with("javascript:") || href.starts_with("place:") {
                 continue;
             }
 

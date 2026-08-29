@@ -5,6 +5,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ClipboardPaste,
+  Code2,
   FolderDown,
   Globe,
   LoaderCircle,
@@ -30,7 +31,7 @@ import type {
 } from "../types";
 import { TagPoolInput } from "./TagPoolInput";
 
-type ImportMode = "login" | "public" | "browser" | "zhihu" | "zhihu_public";
+type ImportMode = "login" | "public" | "browser" | "zhihu" | "zhihu_public" | "csdn" | "csdn_public";
 type ImportStep = "source" | "tags" | "done";
 
 interface PerVideoTagState {
@@ -72,6 +73,13 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
   const [browserHtmlContent, setBrowserHtmlContent] = useState("");
   const [browserFileName, setBrowserFileName] = useState("");
   const [browserItems, setBrowserItems] = useState<VideoItem[]>([]);
+
+  // CSDN state
+  const [csdnUsername, setCsdnUsername] = useState("");
+  const [csdnCollections, setCsdnCollections] = useState<CollectionInfo[]>([]);
+  const [csdnSelectedCollectionId, setCsdnSelectedCollectionId] = useState("");
+  const [csdnPublicUrl, setCsdnPublicUrl] = useState("");
+  const [csdnParsedCollection, setCsdnParsedCollection] = useState<CollectionInfo | null>(null);
 
   const loadCollections = useCallback(async () => {
     setBusy(true);
@@ -308,12 +316,45 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
     }
   };
 
+  const loadCsdnCollections = async (username: string) => {
+    setBusy(true);
+    setError("");
+    setCsdnSelectedCollectionId("");
+    try {
+      setCsdnCollections(await api.listCsdnCollections(username));
+    } catch (err) {
+      setError(String(err));
+      setCsdnCollections([]);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const parseCsdnUrl = async () => {
+    if (!csdnPublicUrl.trim()) {
+      setError("请先粘贴 CSDN 收藏夹链接。");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      setCsdnParsedCollection(await api.parseCsdnCollectionUrl(csdnPublicUrl.trim()));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const currentCollection = useMemo(() => {
     if (mode === "public" || mode === "login") {
       return parsedCollection || collections.find((item) => item.id === selectedCollectionId) || null;
     }
     if (mode === "zhihu_public" || mode === "zhihu") {
       return zhihuParsedCollection || zhihuCollections.find((item) => item.id === zhihuSelectedCollectionId) || null;
+    }
+    if (mode === "csdn_public" || mode === "csdn") {
+      return csdnParsedCollection || csdnCollections.find((item) => item.id === csdnSelectedCollectionId) || null;
     }
     if (mode === "browser" && browserItems.length > 0) {
       return {
@@ -326,7 +367,7 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
       } as CollectionInfo;
     }
     return null;
-  }, [mode, parsedCollection, zhihuParsedCollection, collections, zhihuCollections, selectedCollectionId, zhihuSelectedCollectionId, browserItems, browserFileName]);
+  }, [mode, parsedCollection, zhihuParsedCollection, csdnParsedCollection, collections, zhihuCollections, csdnCollections, selectedCollectionId, zhihuSelectedCollectionId, csdnSelectedCollectionId, browserItems, browserFileName]);
 
   const startPreview = async () => {
     if (!currentCollection) {
@@ -363,15 +404,23 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
 
     try {
       const isZhihu = mode === "zhihu" || mode === "zhihu_public";
+      const isCsdn = mode === "csdn" || mode === "csdn_public";
       const isBili = mode === "login" || mode === "public";
       const input = {
-        kind: (isBili || isZhihu) && currentCollection?.id && !parsedCollection && !zhihuParsedCollection ? ("favorites" as const) : ("public_url" as const),
-        mediaId: (isBili || isZhihu) && currentCollection?.id && !parsedCollection && !zhihuParsedCollection ? currentCollection.id : undefined,
-        url: isBili ? (publicUrl.trim() || undefined) : isZhihu ? (zhihuPublicUrl.trim() || undefined) : undefined,
+        kind: (isBili || isZhihu || isCsdn) && currentCollection?.id && !parsedCollection && !zhihuParsedCollection && !csdnParsedCollection ? ("favorites" as const) : ("public_url" as const),
+        mediaId: (isBili || isZhihu || isCsdn) && currentCollection?.id && !parsedCollection && !zhihuParsedCollection && !csdnParsedCollection ? currentCollection.id : undefined,
+        url: isBili ? (publicUrl.trim() || undefined) : isZhihu ? (zhihuPublicUrl.trim() || undefined) : isCsdn ? (csdnPublicUrl.trim() || csdnUsername.trim() || undefined) : undefined,
         tagSpecs: [],
         itemTagAssignments: []
       };
-      const next = isZhihu ? await api.previewZhihuImport(input) : await api.previewImport(input);
+      let next: ImportPreview;
+      if (isZhihu) {
+        next = await api.previewZhihuImport(input);
+      } else if (isCsdn) {
+        next = await api.previewCsdnImport(input);
+      } else {
+        next = await api.previewImport(input);
+      }
       const states: Record<string, PerVideoTagState> = {};
       next.items.forEach((item) => {
         states[item.externalId] = {
@@ -481,15 +530,23 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
         tagSpecs: buildTagSpecs(item, perVideoTags[item.externalId])
       }));
       const isZhihu = mode === "zhihu" || mode === "zhihu_public";
+      const isCsdn = mode === "csdn" || mode === "csdn_public";
       const isBili = mode === "login" || mode === "public";
       const input = {
-        kind: (isBili || isZhihu) && currentCollection?.id && !parsedCollection && !zhihuParsedCollection ? ("favorites" as const) : ("public_url" as const),
-        mediaId: (isBili || isZhihu) && currentCollection?.id && !parsedCollection && !zhihuParsedCollection ? currentCollection.id : undefined,
-        url: isBili ? (publicUrl.trim() || undefined) : isZhihu ? (zhihuPublicUrl.trim() || undefined) : undefined,
+        kind: (isBili || isZhihu || isCsdn) && currentCollection?.id && !parsedCollection && !zhihuParsedCollection && !csdnParsedCollection ? ("favorites" as const) : ("public_url" as const),
+        mediaId: (isBili || isZhihu || isCsdn) && currentCollection?.id && !parsedCollection && !zhihuParsedCollection && !csdnParsedCollection ? currentCollection.id : undefined,
+        url: isBili ? (publicUrl.trim() || undefined) : isZhihu ? (zhihuPublicUrl.trim() || undefined) : isCsdn ? (csdnPublicUrl.trim() || csdnUsername.trim() || undefined) : undefined,
         tagSpecs: [],
         itemTagAssignments: assignments
       };
-      const next = isZhihu ? await api.executeZhihuImport(input) : await api.executeImport(input);
+      let next: ImportResult;
+      if (isZhihu) {
+        next = await api.executeZhihuImport(input);
+      } else if (isCsdn) {
+        next = await api.executeCsdnImport(input);
+      } else {
+        next = await api.executeImport(input);
+      }
       setResult(next);
       setStep("done");
       window.setTimeout(() => {
@@ -551,6 +608,15 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
               <LogIn size={20} />
               <strong>知乎收藏</strong>
               <span>登录知乎读取收藏夹，或粘贴链接导入。</span>
+            </button>
+            <button
+              type="button"
+              className={`import-mode-card ${(mode === "csdn" || mode === "csdn_public") ? "is-active" : ""}`}
+              onClick={() => setMode(mode === "csdn" ? "csdn_public" : "csdn")}
+            >
+              <Code2 size={20} />
+              <strong>CSDN 收藏</strong>
+              <span>输入用户名读取收藏夹，或粘贴链接导入。</span>
             </button>
           </div>
 
@@ -756,6 +822,84 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
                     <strong>{zhihuParsedCollection.title}</strong>
                     <span>{zhihuParsedCollection.owner || "公开用户"}</span>
                     <span>{zhihuParsedCollection.count} 条</span>
+                  </div>
+                )}
+              </div>
+            ) : mode === "csdn" || mode === "csdn_public" ? (
+              <div className="login-block">
+                <div className="account-line">
+                  <div style={{ display: "grid", gap: "8px", width: "100%" }}>
+                    <p style={{ margin: 0, color: "var(--muted)", fontSize: "13px" }}>
+                      CSDN 收藏夹是公开的，无需登录。请输入你的 CSDN <strong>英文用户名</strong>（非中文昵称）。
+                    </p>
+                    <p style={{ margin: 0, color: "var(--muted)", fontSize: "12px" }}>
+                      如何找到？登录 CSDN → 点击右上角头像 → 「我的主页」→ 地址栏中 <code>blog.csdn.net/</code> 后面的部分即为英文用户名。
+                    </p>
+                    <div className="input-with-button">
+                      <input
+                        value={csdnUsername}
+                        onChange={(event) => setCsdnUsername(event.target.value)}
+                        placeholder="CSDN 英文用户名，如 LOVEmy134611"
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" && csdnUsername.trim()) {
+                            void loadCsdnCollections(csdnUsername.trim());
+                          }
+                        }}
+                      />
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        onClick={() => csdnUsername.trim() && loadCsdnCollections(csdnUsername.trim())}
+                        disabled={busy || !csdnUsername.trim()}
+                      >
+                        {busy ? <LoaderCircle className="spin" size={16} /> : <RefreshCcw size={16} />}
+                        获取收藏夹
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <label className="field-label">选择收藏夹</label>
+                <select
+                  className="select-control full"
+                  value={csdnSelectedCollectionId}
+                  onChange={(event) => setCsdnSelectedCollectionId(event.target.value)}
+                  disabled={csdnCollections.length === 0}
+                >
+                  <option value="">请选择收藏夹</option>
+                  {csdnCollections.map((collection) => (
+                    <option key={collection.id} value={collection.id}>
+                      {collection.title}（{collection.count}）
+                    </option>
+                  ))}
+                </select>
+                {csdnCollections.length > 0 && (
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    onClick={() => csdnUsername.trim() && loadCsdnCollections(csdnUsername.trim())}
+                  >
+                    <RefreshCcw size={15} />
+                    刷新收藏夹
+                  </button>
+                )}
+                <div className="import-section-divider" />
+                <label className="field-label">或者粘贴收藏夹链接</label>
+                <div className="input-with-button">
+                  <input
+                    value={csdnPublicUrl}
+                    onChange={(event) => setCsdnPublicUrl(event.target.value)}
+                    placeholder="https://blog.csdn.net/用户名/favorites?folderId=123"
+                  />
+                  <button className="secondary-button" type="button" onClick={parseCsdnUrl} disabled={busy}>
+                    <ClipboardPaste size={16} />
+                    解析
+                  </button>
+                </div>
+                {csdnParsedCollection && (
+                  <div className="parsed-card">
+                    <strong>{csdnParsedCollection.title}</strong>
+                    <span>{csdnParsedCollection.owner || "公开用户"}</span>
+                    <span>{csdnParsedCollection.count} 条</span>
                   </div>
                 )}
               </div>

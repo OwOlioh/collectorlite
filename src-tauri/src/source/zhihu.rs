@@ -50,10 +50,7 @@ impl ZhihuClient {
             "accept-language",
             HeaderValue::from_static("zh-CN,zh;q=0.9,en;q=0.8"),
         );
-        headers.insert(
-            "x-requested-with",
-            HeaderValue::from_static("fetch"),
-        );
+        headers.insert("x-requested-with", HeaderValue::from_static("fetch"));
         if let Some(cookie_str) = cookie {
             if let Ok(val) = HeaderValue::from_str(cookie_str) {
                 headers.insert(COOKIE, val);
@@ -64,7 +61,8 @@ impl ZhihuClient {
 
     /// Parse a zhihu collection URL like https://www.zhihu.com/collection/123456
     pub fn parse_collection_id(input: &str) -> Result<String, AppError> {
-        let re = Regex::new(r"zhihu\.com/collection/(\d+)").map_err(|e| AppError::Other(e.to_string()))?;
+        let re = Regex::new(r"zhihu\.com/collection/(\d+)")
+            .map_err(|e| AppError::Other(e.to_string()))?;
         if let Some(caps) = re.captures(input) {
             return Ok(caps[1].to_string());
         }
@@ -73,12 +71,19 @@ impl ZhihuClient {
         if trimmed.chars().all(|c| c.is_ascii_digit()) {
             return Ok(trimmed.to_string());
         }
-        Err(AppError::InvalidInput("无法解析知乎收藏夹链接，请提供 https://www.zhihu.com/collection/数字ID 格式的链接".into()))
+        Err(AppError::InvalidInput(
+            "无法解析知乎收藏夹链接，请提供 https://www.zhihu.com/collection/数字ID 格式的链接"
+                .into(),
+        ))
     }
 
     async fn fetch_json(&self, url: &str) -> Result<Value, AppError> {
         let cookie = self.get_cookie();
-        eprintln!("[zhihu] fetch_json url={}, has_cookie={}", url, cookie.is_some());
+        eprintln!(
+            "[zhihu] fetch_json url={}, has_cookie={}",
+            url,
+            cookie.is_some()
+        );
         let headers = Self::build_headers(cookie.as_deref());
         let resp = self
             .client
@@ -123,7 +128,10 @@ impl ZhihuClient {
                 let q_title = question["title"].as_str().unwrap_or("");
                 let q_id = json_value_to_string(&question["id"]);
                 let answer_id = json_value_to_string(&content["id"]);
-                let u = format!("https://www.zhihu.com/question/{}/answer/{}", q_id, answer_id);
+                let u = format!(
+                    "https://www.zhihu.com/question/{}/answer/{}",
+                    q_id, answer_id
+                );
                 (q_title.to_string(), u)
             }
             "article" => {
@@ -154,9 +162,9 @@ impl ZhihuClient {
 
         let author_name = content["author"]["name"].as_str().map(|s| s.to_string());
         let author_id = content["author"]["id"].as_str().map(|s| s.to_string());
-        let created_time = content["created_time"].as_i64().or_else(|| {
-            content["updated_time"].as_i64()
-        });
+        let created_time = content["created_time"]
+            .as_i64()
+            .or_else(|| content["updated_time"].as_i64());
 
         let collected_time = item["collected_time"].as_i64().or(created_time);
 
@@ -164,7 +172,11 @@ impl ZhihuClient {
         if item_id.is_empty() {
             eprintln!("[zhihu] WARNING: empty content id, using url as fallback");
         }
-        let item_id = if item_id.is_empty() { url.clone() } else { item_id };
+        let item_id = if item_id.is_empty() {
+            url.clone()
+        } else {
+            item_id
+        };
 
         let cover_url = content["image_url"]
             .as_str()
@@ -223,7 +235,10 @@ impl SourceAdapter for ZhihuClient {
 
             if let Some(items) = data {
                 for item in items {
-                    let id = item["id"].as_i64().map(|id| id.to_string()).unwrap_or_default();
+                    let id = item["id"]
+                        .as_i64()
+                        .map(|id| id.to_string())
+                        .unwrap_or_default();
                     let title = item["title"].as_str().unwrap_or("未命名收藏夹").to_string();
                     let count = item["item_count"].as_i64().unwrap_or(0);
                     collections.push(CollectionInfo {
@@ -252,7 +267,10 @@ impl SourceAdapter for ZhihuClient {
         let json = self.fetch_json(&url).await?;
 
         let collection = &json["collection"];
-        let title = collection["title"].as_str().unwrap_or("未命名收藏夹").to_string();
+        let title = collection["title"]
+            .as_str()
+            .unwrap_or("未命名收藏夹")
+            .to_string();
         let count = collection["item_count"].as_i64().unwrap_or(0);
 
         Ok(CollectionInfo {
@@ -265,7 +283,10 @@ impl SourceAdapter for ZhihuClient {
         })
     }
 
-    async fn fetch_collection(&self, collection: &CollectionInfo) -> Result<Vec<ExternalItem>, AppError> {
+    async fn fetch_collection(
+        &self,
+        collection: &CollectionInfo,
+    ) -> Result<Vec<ExternalItem>, AppError> {
         let mut items = Vec::new();
         let mut offset = 0i64;
 
@@ -312,13 +333,16 @@ mod tests {
 
     #[test]
     fn test_parse_collection_url() {
-        let id = ZhihuClient::parse_collection_id("https://www.zhihu.com/collection/19677733").unwrap();
+        let id =
+            ZhihuClient::parse_collection_id("https://www.zhihu.com/collection/19677733").unwrap();
         assert_eq!(id, "19677733");
     }
 
     #[test]
     fn test_parse_collection_url_with_query() {
-        let id = ZhihuClient::parse_collection_id("https://www.zhihu.com/collection/19677733?page=1").unwrap();
+        let id =
+            ZhihuClient::parse_collection_id("https://www.zhihu.com/collection/19677733?page=1")
+                .unwrap();
         assert_eq!(id, "19677733");
     }
 

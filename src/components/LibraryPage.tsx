@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  Code2,
   FileText,
   Globe,
   LayoutGrid,
@@ -206,6 +207,21 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
             >
               <span style={{fontSize: "13px", fontWeight: 700}}>知</span>
             </button>
+            <button
+              type="button"
+              className={filters.sources.includes("csdn") ? "is-active" : ""}
+              onClick={() =>
+                setFilters((current) => ({
+                  ...current,
+                  sources: current.sources.includes("csdn")
+                    ? current.sources.filter((s) => s !== "csdn")
+                    : [...current.sources, "csdn"]
+                }))
+              }
+              title="CSDN 收藏"
+            >
+              <Code2 size={15} />
+            </button>
           </div>
           <div className="view-toggle" role="group" aria-label="视图切换">
             <button
@@ -389,7 +405,7 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
                       ) : (
                         <div className="cover-placeholder">无封面</div>
                       )}
-                      {!isBrowser && <span className="duration">{formatDuration(item.duration)}</span>}
+                      {!isBrowser && item.duration != null && <span className="duration">{formatDuration(item.duration)}</span>}
                     </button>
                     <div className="video-card-body">
                       <button
