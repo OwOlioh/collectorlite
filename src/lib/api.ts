@@ -103,6 +103,13 @@ export const api = {
     call<ImportPreview>("preview_csdn_import", { input: request }),
   executeCsdnImport: (request: ImportRequest) =>
     call<ImportResult>("execute_csdn_import", { input: request }),
+  // GitHub
+  listGithubStars: (username: string) =>
+    call<CollectionInfo[]>("list_github_stars", { username }),
+  previewGithubImport: (request: ImportRequest) =>
+    call<ImportPreview>("preview_github_import", { input: request }),
+  executeGithubImport: (request: ImportRequest) =>
+    call<ImportResult>("execute_github_import", { input: request }),
 };
 
 let mockTags: Tag[] = [
@@ -445,6 +452,72 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
         skipped: 0,
         failed: 0,
         cleanupStatus: undefined,
+        errors: []
+      } as T;
+    case "list_github_stars":
+      return [
+        {
+          source: "github",
+          id: "starred",
+          title: "OwOlioh's Stars",
+          owner: "OwOlioh",
+          count: 30,
+          url: undefined
+        }
+      ] as T;
+    case "preview_github_import":
+      return {
+        collection: {
+          source: "github",
+          id: "starred",
+          title: "OwOlioh's Stars",
+          owner: "OwOlioh",
+          count: 3,
+          url: undefined
+        },
+        items: [
+          {
+            id: -1,
+            source: "github",
+            externalId: "1074250582",
+            sourceUrl: "https://github.com/CuteLeaf/Firefly",
+            title: "CuteLeaf/Firefly",
+            description: "Fresh and aesthetic Astro blog theme template.",
+            notes: undefined,
+            coverUrl: "https://avatars.githubusercontent.com/u/43440669?v=4",
+            coverLocalPath: undefined,
+            authorName: "CuteLeaf",
+            authorId: undefined,
+            partitionName: "Astro",
+            duration: undefined,
+            tags: []
+          },
+          {
+            id: -2,
+            source: "github",
+            externalId: "1091679870",
+            sourceUrl: "https://github.com/w-Steve/BUAA-Physics-Labs",
+            title: "w-Steve/BUAA-Physics-Labs",
+            description: "BUAA Physics Labs",
+            notes: undefined,
+            coverUrl: "https://avatars.githubusercontent.com/u/41997389?v=4",
+            coverLocalPath: undefined,
+            authorName: "w-Steve",
+            authorId: undefined,
+            partitionName: "HTML",
+            duration: undefined,
+            tags: []
+          }
+        ],
+        partitionSuggestions: []
+      } as T;
+    case "execute_github_import":
+      return {
+        runId: 1,
+        total: 2,
+        imported: 2,
+        skipped: 0,
+        failed: 0,
         errors: []
       } as T;
     default:

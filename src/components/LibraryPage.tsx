@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   Code2,
   FileText,
+  Github,
   Globe,
   LayoutGrid,
   List,
@@ -221,6 +222,21 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
               title="CSDN 收藏"
             >
               <Code2 size={15} />
+            </button>
+            <button
+              type="button"
+              className={filters.sources.includes("github") ? "is-active" : ""}
+              onClick={() =>
+                setFilters((current) => ({
+                  ...current,
+                  sources: current.sources.includes("github")
+                    ? current.sources.filter((s) => s !== "github")
+                    : [...current.sources, "github"]
+                }))
+              }
+              title="GitHub Stars"
+            >
+              <Github size={15} />
             </button>
           </div>
           <div className="view-toggle" role="group" aria-label="视图切换">

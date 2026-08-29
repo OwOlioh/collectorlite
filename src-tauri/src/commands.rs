@@ -925,3 +925,120 @@ async fn resolve_csdn_collection(
         }
     }
 }
+
+// ── GitHub commands ──
+
+#[tauri::command]
+pub async fn list_github_stars(
+    state: State<'_, AppState>,
+    username: String,
+) -> Result<Vec<CollectionInfo>, String> {
+    state
+        .github
+        .list_stars_for_user(&username)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn preview_github_import(
+    state: State<'_, AppState>,
+    input: ImportRequest,
+) -> Result<ImportPreview, String> {
+    let collection = resolve_github_collection(&state, &input)
+        .await
+        .map_err(|e| e.to_string())?;
+    let items = state
+        .github
+        .fetch_collection(&collection)
+        .await
+        .map_err(|e| e.to_string())?;
+    let items: Vec<VideoItem> = items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| to_video_item(item, -(i as i64 + 1)))
+        .collect();
+    Ok(ImportPreview {
+        collection,
+        items,
+        partition_suggestions: vec![],
+    })
+}
+
+#[tauri::command]
+pub async fn execute_github_import(
+    state: State<'_, AppState>,
+    input: ImportRequest,
+) -> Result<ImportResult, String> {
+    let collection = resolve_github_collection(&state, &input)
+        .await
+        .map_err(|e| e.to_string())?;
+    let items = state
+        .github
+        .fetch_collection(&collection)
+        .await
+        .map_err(|e| e.to_string())?;
+    let enriched = state
+        .github
+        .enrich_items(&items)
+        .await
+        .map_err(|e| e.to_string())?;
+    let assignments = input
+        .item_tag_assignments
+        .iter()
+        .map(|a| (a.external_id.as_str(), &a.tag_specs))
+        .collect::<HashMap<_, _>>();
+    let total = enriched.len() as i64;
+    let run_id = db::create_import_run(&state.pool, &collection, total, false)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut imported = 0i64;
+    let mut skipped = 0i64;
+    let mut failed = 0i64;
+    let mut errors = Vec::new();
+    for item in &enriched {
+        let result = async {
+            let (item_id, inserted) = db::upsert_item(&state.pool, item).await?;
+            let tag_specs: &[TagInput] = assignments
+                .get(item.external_id.as_str())
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            for tag_spec in tag_specs {
+                let tag_id = db::get_or_create_tag(&state.pool, tag_spec).await?;
+                db::attach_tag(&state.pool, item_id, tag_id).await?;
+            }
+            db::rebuild_item_fts(&state.pool, item_id).await?;
+            db::link_import_item(&state.pool, run_id, item_id).await?;
+            Ok::<bool, AppError>(inserted)
+        }
+        .await;
+        match result {
+            Ok(true) => imported += 1,
+            Ok(false) => skipped += 1,
+            Err(error) => {
+                failed += 1;
+                if errors.len() < 20 {
+                    errors.push(error.to_string());
+                }
+            }
+        }
+    }
+    db::finish_import_run(&state.pool, run_id, imported, skipped, failed, &errors)
+        .await
+        .map_err(|e| e.to_string())?;
+    db::build_import_result(&state.pool, run_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn resolve_github_collection(
+    state: &AppState,
+    input: &ImportRequest,
+) -> Result<CollectionInfo, AppError> {
+    let username = input
+        .url
+        .as_deref()
+        .ok_or_else(|| AppError::InvalidInput("请提供 GitHub 用户名".into()))?;
+    state.github.resolve_collection(username).await
+}

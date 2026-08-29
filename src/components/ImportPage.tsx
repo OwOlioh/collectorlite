@@ -7,6 +7,7 @@ import {
   ClipboardPaste,
   Code2,
   FolderDown,
+  Github,
   Globe,
   LoaderCircle,
   LogIn,
@@ -31,7 +32,7 @@ import type {
 } from "../types";
 import { TagPoolInput } from "./TagPoolInput";
 
-type ImportMode = "login" | "public" | "browser" | "zhihu" | "zhihu_public" | "csdn" | "csdn_public";
+type ImportMode = "login" | "public" | "browser" | "zhihu" | "zhihu_public" | "csdn" | "csdn_public" | "github";
 type ImportStep = "source" | "tags" | "done";
 
 interface PerVideoTagState {
@@ -80,6 +81,10 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
   const [csdnSelectedCollectionId, setCsdnSelectedCollectionId] = useState("");
   const [csdnPublicUrl, setCsdnPublicUrl] = useState("");
   const [csdnParsedCollection, setCsdnParsedCollection] = useState<CollectionInfo | null>(null);
+
+  // GitHub state
+  const [githubUsername, setGithubUsername] = useState("");
+  const [githubCollections, setGithubCollections] = useState<CollectionInfo[]>([]);
 
   const loadCollections = useCallback(async () => {
     setBusy(true);
@@ -330,6 +335,19 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
     }
   };
 
+  const loadGithubStars = async (username: string) => {
+    setBusy(true);
+    setError("");
+    try {
+      setGithubCollections(await api.listGithubStars(username));
+    } catch (err) {
+      setError(String(err));
+      setGithubCollections([]);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const parseCsdnUrl = async () => {
     if (!csdnPublicUrl.trim()) {
       setError("请先粘贴 CSDN 收藏夹链接。");
@@ -356,6 +374,9 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
     if (mode === "csdn_public" || mode === "csdn") {
       return csdnParsedCollection || csdnCollections.find((item) => item.id === csdnSelectedCollectionId) || null;
     }
+    if (mode === "github") {
+      return githubCollections[0] || null;
+    }
     if (mode === "browser" && browserItems.length > 0) {
       return {
         source: "browser",
@@ -367,7 +388,7 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
       } as CollectionInfo;
     }
     return null;
-  }, [mode, parsedCollection, zhihuParsedCollection, csdnParsedCollection, collections, zhihuCollections, csdnCollections, selectedCollectionId, zhihuSelectedCollectionId, csdnSelectedCollectionId, browserItems, browserFileName]);
+  }, [mode, parsedCollection, zhihuParsedCollection, csdnParsedCollection, collections, zhihuCollections, csdnCollections, githubCollections, selectedCollectionId, zhihuSelectedCollectionId, csdnSelectedCollectionId, browserItems, browserFileName]);
 
   const startPreview = async () => {
     if (!currentCollection) {
@@ -405,11 +426,12 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
     try {
       const isZhihu = mode === "zhihu" || mode === "zhihu_public";
       const isCsdn = mode === "csdn" || mode === "csdn_public";
+      const isGithub = mode === "github";
       const isBili = mode === "login" || mode === "public";
       const input = {
         kind: (isBili || isZhihu || isCsdn) && currentCollection?.id && !parsedCollection && !zhihuParsedCollection && !csdnParsedCollection ? ("favorites" as const) : ("public_url" as const),
         mediaId: (isBili || isZhihu || isCsdn) && currentCollection?.id && !parsedCollection && !zhihuParsedCollection && !csdnParsedCollection ? currentCollection.id : undefined,
-        url: isBili ? (publicUrl.trim() || undefined) : isZhihu ? (zhihuPublicUrl.trim() || undefined) : isCsdn ? (csdnPublicUrl.trim() || csdnUsername.trim() || undefined) : undefined,
+        url: isBili ? (publicUrl.trim() || undefined) : isZhihu ? (zhihuPublicUrl.trim() || undefined) : isCsdn ? (csdnPublicUrl.trim() || csdnUsername.trim() || undefined) : isGithub ? (githubUsername.trim() || undefined) : undefined,
         tagSpecs: [],
         itemTagAssignments: []
       };
@@ -418,6 +440,8 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
         next = await api.previewZhihuImport(input);
       } else if (isCsdn) {
         next = await api.previewCsdnImport(input);
+      } else if (isGithub) {
+        next = await api.previewGithubImport(input);
       } else {
         next = await api.previewImport(input);
       }
@@ -531,11 +555,12 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
       }));
       const isZhihu = mode === "zhihu" || mode === "zhihu_public";
       const isCsdn = mode === "csdn" || mode === "csdn_public";
+      const isGithub = mode === "github";
       const isBili = mode === "login" || mode === "public";
       const input = {
         kind: (isBili || isZhihu || isCsdn) && currentCollection?.id && !parsedCollection && !zhihuParsedCollection && !csdnParsedCollection ? ("favorites" as const) : ("public_url" as const),
         mediaId: (isBili || isZhihu || isCsdn) && currentCollection?.id && !parsedCollection && !zhihuParsedCollection && !csdnParsedCollection ? currentCollection.id : undefined,
-        url: isBili ? (publicUrl.trim() || undefined) : isZhihu ? (zhihuPublicUrl.trim() || undefined) : isCsdn ? (csdnPublicUrl.trim() || csdnUsername.trim() || undefined) : undefined,
+        url: isBili ? (publicUrl.trim() || undefined) : isZhihu ? (zhihuPublicUrl.trim() || undefined) : isCsdn ? (csdnPublicUrl.trim() || csdnUsername.trim() || undefined) : isGithub ? (githubUsername.trim() || undefined) : undefined,
         tagSpecs: [],
         itemTagAssignments: assignments
       };
@@ -544,6 +569,8 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
         next = await api.executeZhihuImport(input);
       } else if (isCsdn) {
         next = await api.executeCsdnImport(input);
+      } else if (isGithub) {
+        next = await api.executeGithubImport(input);
       } else {
         next = await api.executeImport(input);
       }
@@ -617,6 +644,15 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
               <Code2 size={20} />
               <strong>CSDN 收藏</strong>
               <span>输入用户名读取收藏夹，或粘贴链接导入。</span>
+            </button>
+            <button
+              type="button"
+              className={`import-mode-card ${mode === "github" ? "is-active" : ""}`}
+              onClick={() => setMode("github")}
+            >
+              <Github size={20} />
+              <strong>GitHub Stars</strong>
+              <span>输入 GitHub 用户名即可导入 Star 仓库列表。</span>
             </button>
           </div>
 
@@ -900,6 +936,43 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
                     <strong>{csdnParsedCollection.title}</strong>
                     <span>{csdnParsedCollection.owner || "公开用户"}</span>
                     <span>{csdnParsedCollection.count} 条</span>
+                  </div>
+                )}
+              </div>
+            ) : mode === "github" ? (
+              <div className="login-block">
+                <div className="account-line">
+                  <div style={{ display: "grid", gap: "8px", width: "100%" }}>
+                    <p style={{ margin: 0, color: "var(--muted)", fontSize: "13px" }}>
+                      GitHub Stars 列表是公开的，无需登录。输入你的 GitHub <strong>用户名</strong> 即可获取。
+                    </p>
+                    <div className="input-with-button">
+                      <input
+                        value={githubUsername}
+                        onChange={(event) => setGithubUsername(event.target.value)}
+                        placeholder="GitHub 用户名，如 OwOlioh"
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" && githubUsername.trim()) {
+                            void loadGithubStars(githubUsername.trim());
+                          }
+                        }}
+                      />
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        onClick={() => githubUsername.trim() && loadGithubStars(githubUsername.trim())}
+                        disabled={busy || !githubUsername.trim()}
+                      >
+                        {busy ? <LoaderCircle className="spin" size={16} /> : <RefreshCcw size={16} />}
+                        获取 Stars
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                {githubCollections.length > 0 && (
+                  <div className="parsed-card">
+                    <strong>{githubCollections[0].title}</strong>
+                    <span>{githubCollections[0].owner}</span>
                   </div>
                 )}
               </div>

@@ -7,6 +7,7 @@ use crate::db;
 use crate::error::AppError;
 use crate::source::bilibili::BilibiliClient;
 use crate::source::csdn::CsdnClient;
+use crate::source::github::GithubClient;
 use crate::source::zhihu::ZhihuClient;
 
 const KEYRING_SERVICE: &str = "bili-collector";
@@ -17,6 +18,7 @@ pub struct AppState {
     pub pool: SqlitePool,
     pub bili: BilibiliClient,
     pub csdn: CsdnClient,
+    pub github: GithubClient,
     pub zhihu: ZhihuClient,
     pub data_dir: PathBuf,
 }
@@ -31,6 +33,7 @@ impl AppState {
         let pool = db::connect(&db_path).await?;
         let bili = BilibiliClient::new()?;
         let csdn = CsdnClient::new()?;
+        let github = GithubClient::new()?;
         let zhihu = ZhihuClient::new()?;
         let cookie_file = data_dir.join("bilibili_cookie.txt");
         let zhihu_cookie_file = data_dir.join("zhihu_cookie.txt");
@@ -53,6 +56,7 @@ impl AppState {
             pool,
             bili,
             csdn,
+            github,
             zhihu,
             data_dir,
         })
