@@ -1,6 +1,6 @@
 # 收藏管理器 - 新增来源开发指南
 
-本文档记录了在开发 B站 → 浏览器书签 → 知乎 三个来源过程中积累的经验和踩过的坑，供后续开发新来源（如 CSDN 收藏夹等）时参考。
+本文档记录了在开发 B站 → 浏览器书签 → 知乎 → CSDN → GitHub Stars 五个来源过程中积累的经验和踩过的坑，供后续开发新来源时参考。其中 CSDN 收藏夹与 GitHub Stars 已严格按本文档的步骤成功落地，相关来源特有的经验见第六节。
 
 ---
 
@@ -253,6 +253,8 @@ const [zhihuCollections, setZhihuCollections] = useState(...);
 - [ ] 测试标签分配（每个 item 只获得自己的标签）
 - [ ] 测试去重（同一 URL 导入两次不会重复）
 - [ ] 测试 source_url 链接正确性
+- [ ] 新增 UI 颜色一律用 CSS 变量（`:root` 浅色 + `[data-theme="dark"]` 深色 + 侧边栏 `--side-*`），不要硬编码 hex（深浅色主题已支持）
+- [ ] 跨源反馈用 `useToast()`，不要 `window.alert`
 - [ ] 提交 + 打 tag
 
 ---
@@ -267,3 +269,29 @@ const [zhihuCollections, setZhihuCollections] = useState(...);
 ```
 
 WorkBuddy 会自动读取文档并按照其中的模板和检查清单进行开发。
+
+---
+
+## 六、已落地案例：CSDN 与 GitHub Stars
+
+本文档的步骤已成功用于新增 CSDN 收藏夹与 GitHub Stars 两个来源，补充以下来源特有的经验（通用步骤见上文，此处只记差异与坑）。
+
+### 6.1 CSDN 收藏夹
+- **入口**：用户输入**英文用户名（handle）**，不是中文昵称。API 对未知/错误用户名返回空列表，前端必须给出明确提示（告诉用户去个人主页 URL 里找英文名）。
+- **封面**：列表 API 不含封面。`enrich_items` 对每篇文章页面抓取 `og:image` 元信息，下载到本地 `cover_local_path`（复用 migration 0005 的字段），避免卡片封面空白。
+- **无需登录**：公开收藏夹直接抓取。
+- 注册位置：`src-tauri/src/source/csdn.rs` + 前端 `src/components/import/CsdnForm.tsx` + `LibraryPage` 筛选按钮。
+
+### 6.2 GitHub Stars
+- **入口**：个人访问令牌（PAT，建议 `public_repo`/`read:user` 范围）或仅用户名（只能取公开 stars）。
+- **网络（关键坑）**：国内访问 `api.github.com` 常被墙。客户端使用 `native-tls`（**不是** `rustls-tls`），从而自动走系统/代理的 TLS 栈。若报错 `error sending request for url (https://api.github.com/...)`，基本是代理/TLS 问题——确认 `Cargo.toml` 中 `reqwest` 启用了 `native-tls`（feature `default-tls`），而非 `rustls-tls`。
+- **封面**：用仓库 owner 的 `avatar_url`。
+- 注册位置：`src-tauri/src/source/github.rs` + 前端 `src/components/import/GithubForm.tsx` + `LibraryPage` 筛选按钮。
+
+### 6.3 与新增来源正交、但本仓库已采用的前端约定
+新增来源后，以下优化会自动覆盖你的来源卡片，无需额外开发；但新增 UI 时请遵守：
+- 收藏库长列表用 `VirtuosoGrid`（`react-virtuoso`）做虚拟滚动，数据多时不卡。
+- 封面统一走 `CoverImage`（blur-up 懒加载 + shimmer 占位），卡片在 `VideoCard` 中接入即可。
+- 跨源反馈统一用 `useToast()`（`src/components/Toast.tsx`），不要用 `window.alert`；导入执行阶段的错误原先被 `catch` 静默吞掉，现已改为 toast 提示。
+- **深浅色主题**：所有颜色必须写成 CSS 变量（`:root` 浅色、`[data-theme="dark"]` 深色、侧边栏用 `--side-*`），新增 UI 禁止硬编码 hex，否则深色模式下会"开盲盒"。
+- 微动效统一用 CSS 变量 + `transition`，并已纳入 `@media (prefers-reduced-motion: reduce)` 无障碍降级。

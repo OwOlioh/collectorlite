@@ -1,14 +1,22 @@
 import { useEffect, useState } from "react";
-import { Database, LogOut, ShieldCheck } from "lucide-react";
+import { Database, LogOut, ShieldCheck, SunMoon } from "lucide-react";
 import { api } from "../lib/api";
 import type { BilibiliProfile } from "../types";
+import { applyTheme, getStoredTheme, storeTheme, type ThemeMode } from "../lib/theme";
 
 export function SettingsPage() {
   const [profile, setProfile] = useState<BilibiliProfile | null>(null);
+  const [theme, setTheme] = useState<ThemeMode>(getStoredTheme());
 
   useEffect(() => {
     void api.getProfile().then(setProfile);
   }, []);
+
+  const changeTheme = (mode: ThemeMode) => {
+    setTheme(mode);
+    storeTheme(mode);
+    applyTheme(mode);
+  };
 
   return (
     <section className="page settings-page">
@@ -20,6 +28,30 @@ export function SettingsPage() {
       </header>
 
       <div className="settings-grid">
+        <div className="settings-card">
+          <div className="settings-icon"><SunMoon size={20} /></div>
+          <div>
+            <h2>外观</h2>
+            <p>选择浅色或深色主题，或跟随系统设置自动切换。</p>
+            <div className="theme-options">
+              {([
+                { value: "light", label: "浅色" },
+                { value: "dark", label: "深色" },
+                { value: "system", label: "跟随系统" }
+              ] as { value: ThemeMode; label: string }[]).map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={`theme-opt ${theme === option.value ? "is-active" : ""}`}
+                  onClick={() => changeTheme(option.value)}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
         <div className="settings-card">
           <div className="settings-icon"><ShieldCheck size={20} /></div>
           <div>

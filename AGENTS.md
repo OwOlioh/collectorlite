@@ -17,17 +17,31 @@ Multi-platform local desktop app for collecting favorites (Bilibili, browser boo
 
 | File | Purpose |
 |------|---------|
-| `src/App.tsx` | All views mounted, state survives navigation |
-| `src/components/LibraryPage.tsx` | Item library, text/tag search, source filter, tag editing |
-| `src/components/ImportPage.tsx` | Multi-source import: B站 login/URL, browser HTML, Zhihu login/URL |
+| `src/App.tsx` | All views mounted, `ToastProvider` wrapper, theme applied on mount |
+| `src/components/LibraryPage.tsx` | Item library: search, source filter, tag editing, **virtual scroll (`VirtuosoGrid`)**, batch multi-select |
+| `src/components/ImportPage.tsx` | Multi-source import orchestrator (step state + flow); per-source UI lives in `src/components/import/` |
+| `src/components/import/BilibiliForm.tsx` | B站 source card (QR login / URL) |
+| `src/components/import/ZhihuForm.tsx` | Zhihu source card (cookie login / URL) |
+| `src/components/import/CsdnForm.tsx` | CSDN source card (username) |
+| `src/components/import/GithubForm.tsx` | GitHub Stars source card (token / username) |
+| `src/components/import/BrowserForm.tsx` | Browser bookmark HTML drag/drop |
+| `src/components/import/TagEditor.tsx` | Per-item tag assignment preview/execute during import (toast on execute error) |
+| `src/components/import/ResultCard.tsx` | Per-item import result card |
+| `src/components/VideoCard.tsx` | Unified library card (covers, select checkbox, hover actions) |
+| `src/components/CoverImage.tsx` | Blur-up lazy cover: shimmer skeleton → fade-in on decode |
+| `src/components/BatchTagEditorModal.tsx` | Batch tag editor for multiple selected items |
+| `src/components/Toast.tsx` | `ToastProvider` + `useToast()` lightweight notification system |
 | `src/components/TagManagerPanel.tsx` | Tag pool, categories, drag/drop |
 | `src/components/TagPoolInput.tsx` | Shared tag input with inline selected tags |
 | `src/components/VideoTagEditorModal.tsx` | Edit tags for one item |
 | `src/components/VideoNoteEditorModal.tsx` | Edit notes for one item |
 | `src/components/TagEditorModal.tsx` | Edit tag name/color |
-| `src/components/SettingsPage.tsx` | Account status and privacy info |
+| `src/components/SettingsPage.tsx` | Account status, privacy info, **appearance (theme) selector** |
 | `src/components/Sidebar.tsx` | Navigation sidebar |
 | `src/lib/api.ts` | Tauri invoke wrapper with mock fallback |
+| `src/lib/format.ts` | Shared `formatDuration` / `formatDate` helpers |
+| `src/lib/theme.ts` | Theme persistence (localStorage + system preference) and `applyTheme` |
+| `src/lib/tagUtils.ts` | Tag match/merge helpers |
 | `src/types.ts` | Shared TypeScript types |
 
 ### Backend
@@ -35,14 +49,16 @@ Multi-platform local desktop app for collecting favorites (Bilibili, browser boo
 | File | Purpose |
 |------|---------|
 | `src-tauri/src/lib.rs` | Tauri setup and command registration |
-| `src-tauri/src/commands.rs` | All Tauri command handlers (B站 + browser + Zhihu) |
+| `src-tauri/src/commands.rs` | All Tauri command handlers (B站 / browser / Zhihu / CSDN / GitHub) |
 | `src-tauri/src/db.rs` | SQLite queries, upsert, tag operations, FTS, search |
 | `src-tauri/src/models.rs` | Backend request/response types, `ExternalItem`, `CollectionInfo` |
 | `src-tauri/src/source/mod.rs` | `SourceAdapter` trait definition |
 | `src-tauri/src/source/bilibili.rs` | Bilibili client: QR login, favorites API |
 | `src-tauri/src/source/browser.rs` | Browser bookmark HTML parser |
 | `src-tauri/src/source/zhihu.rs` | Zhihu client: cookie login, collections API |
-| `src-tauri/src/state.rs` | App state, cookie persistence (file + keyring) |
+| `src-tauri/src/source/csdn.rs` | CSDN client: username → collections, article covers via `og:image` |
+| `src-tauri/src/source/github.rs` | GitHub client: Stars import, uses `native-tls` (system proxy) |
+| `src-tauri/src/state.rs` | App state, cookie/token persistence (file + keyring) |
 | `src-tauri/src/wbi.rs` | Bilibili WBI signing |
 | `src-tauri/src/error.rs` | `AppError` enum |
 
@@ -72,6 +88,16 @@ Multi-platform local desktop app for collecting favorites (Bilibili, browser boo
 - Partial-match text search (title, description, author, tags)
 - FTS5 full-text search index
 - Website favicon service for browser bookmarks (`favicon.im`)
+
+## Frontend Features (added later)
+
+- **CSDN**: username-based favorites import; article covers fetched via `og:image` meta and stored locally (`cover_local_path`)
+- **GitHub Stars**: public starred repos import via personal access token (or username); `native-tls` client uses system proxy for China network access
+- **Appearance / theme**: Light / dark / system theme toggle persisted to localStorage (`src/lib/theme.ts`); `:root` holds light tokens, `[data-theme="dark"]` overrides; sidebar uses `--side-*` variables
+- **Toast notifications**: lightweight `ToastProvider` + `useToast()` for success/error/info feedback (import, delete, tag save, execute errors) — see `src/components/Toast.tsx`
+- **Batch operations**: multi-select cards → batch tag editor (`BatchTagEditorModal`) + batch delete + JSON export; `⌘A` select all, `Esc` clear (input focused = no-op)
+- **Performance**: library list uses `VirtuosoGrid` virtual scrolling; covers use blur-up lazy loading (`CoverImage`)
+- **Micro-animations**: card hover lift, tag scale, sidebar transitions, modal/toast entrance, shimmer skeletons — all gated by `prefers-reduced-motion`
 
 ## Key Implementation Notes
 
@@ -105,6 +131,26 @@ Multi-platform local desktop app for collecting favorites (Bilibili, browser boo
 - Items API always returns 401 without cookie (even for public collections)
 - 403 errors often caused by missing request headers (`accept`, `x-requested-with`)
 - Login state auto-checked on page load via `refreshZhihuProfile`
+
+### CSDN Specifics
+
+- Import by **username** (the English handle, not the Chinese display name). API returns an empty list for unknown/wrong username — surface a clear hint telling the user where to find their English handle.
+- Cover images are not in the list API; `enrich_items` fetches each article page, extracts the `og:image` meta, then downloads to local `cover_local_path`.
+- No login required for public collections.
+
+### GitHub Specifics
+
+- Import public Stars via **personal access token** (or username for public-only stars).
+- **Network**: GitHub API is often blocked in China. The client is built with `native-tls` (not `rustls-tls`) so it uses the OS/system proxy TLS stack. If you see `error sending request for url (https://api.github.com/...)`, it is a proxy/TLS issue — confirm `Cargo.toml` enables `native-tls`, not `rustls-tls`.
+- Avatar (`avatar_url`) is used as the cover.
+
+### Frontend Structure
+
+- `ImportPage` is a thin orchestrator owning import step state; each source's UI is a component in `src/components/import/` (one file per source) plus shared `TagEditor` / `ResultCard`. Keep per-source UI in those subcomponents.
+- Library cards render via `VideoCard` (covers, select checkbox, hover actions); covers go through `CoverImage` for blur-up lazy loading. New sources automatically benefit once they appear in the library.
+- Global notifications use `useToast()` from `src/components/Toast.tsx` — prefer it over `window.alert`.
+- Theme is applied by setting `data-theme` on `<html>`; **new colors MUST be added as CSS variables** (never hardcode hex in component CSS) so both light and dark themes work.
+- Performance: `LibraryPage` list uses `react-virtuoso` (`VirtuosoGrid`); ensure the scroll region is `height:100%` inside a flex column.
 
 ### Tag Assignment
 

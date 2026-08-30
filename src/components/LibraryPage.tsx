@@ -1,23 +1,26 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   Code2,
-  FileText,
+  Download,
   Github,
   Globe,
   LayoutGrid,
   List,
-  Pencil,
   Search,
   Tags,
   Trash2
 } from "lucide-react";
-import { api, resolveCoverUrl } from "../lib/api";
+import { api } from "../lib/api";
 import type { ItemFilters, Tag, VideoItem } from "../types";
 import { TagBadge } from "./TagBadge";
 import { TagManagerPanel } from "./TagManagerPanel";
 import { TagPoolInput } from "./TagPoolInput";
 import { VideoNoteEditorModal } from "./VideoNoteEditorModal";
 import { VideoTagEditorModal } from "./VideoTagEditorModal";
+import { VirtuosoGrid } from "react-virtuoso";
+import { VideoCard } from "./VideoCard";
+import { useToast } from "./Toast";
+import { BatchTagEditorModal } from "./BatchTagEditorModal";
 
 type LibrarySection = "search" | "manage";
 
@@ -33,18 +36,6 @@ const initialFilters: ItemFilters = {
   sort: "favorite_desc",
   sources: []
 };
-
-function formatDuration(seconds?: number) {
-  if (!seconds) return "未知";
-  const mins = Math.floor(seconds / 60);
-  const secs = seconds % 60;
-  return `${mins}:${String(secs).padStart(2, "0")}`;
-}
-
-function formatDate(timestamp?: number) {
-  if (!timestamp) return "未知";
-  return new Date(timestamp * 1000).toLocaleDateString("zh-CN");
-}
 
 function BilibiliIcon({ size = 15 }: { size?: number }) {
   return (
@@ -64,6 +55,8 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
   const [noteVideo, setNoteVideo] = useState<VideoItem | null>(null);
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [deleting, setDeleting] = useState(false);
+  const { toast } = useToast();
+  const [batchTagging, setBatchTagging] = useState(false);
 
   const loadItems = useCallback(async () => {
     setLoading(true);
@@ -86,6 +79,26 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
     setSelectedIds([]);
   }, [filters]);
 
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const typing =
+        !!target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable);
+      if (typing) return;
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
+        event.preventDefault();
+        setSelectedIds(items.map((item) => item.id));
+      } else if (event.key === "Escape") {
+        setSelectedIds([]);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [items]);
+
   const createFilterTag = async (name: string) => {
     const tag = await api.upsertTag({ namespace: "manual", name });
     onTagsChanged();
@@ -100,9 +113,14 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
     if (!window.confirm(`删除本地收藏"${item.title}"吗？该操作不会影响原始来源。`)) {
       return;
     }
-    await api.deleteItem(item.id);
-    setItems((current) => current.filter((video) => video.id !== item.id));
-    onTagsChanged();
+    try {
+      await api.deleteItem(item.id);
+      setItems((current) => current.filter((video) => video.id !== item.id));
+      onTagsChanged();
+      toast("success", "已删除该收藏");
+    } catch (error) {
+      toast("error", `删除失败：${String(error)}`);
+    }
   };
 
   const toggleSelected = (itemId: number) => {
@@ -130,8 +148,9 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
       );
       setSelectedIds([]);
       onTagsChanged();
+      toast("success", `已删除 ${selectedIds.length} 条收藏`);
     } catch (error) {
-      window.alert(String(error));
+      toast("error", `删除失败：${String(error)}`);
     } finally {
       setDeleting(false);
     }
@@ -148,9 +167,60 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
       await loadItems();
       onTagsChanged();
     } catch (error) {
-      window.alert(String(error));
+      toast("error", `删除失败：${String(error)}`);
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const exportSelected = () => {
+    if (selectedIds.length === 0) return;
+    const selected = items.filter((item) => selectedIds.includes(item.id));
+    const data = selected.map((item) => ({
+      id: item.id,
+      title: item.title,
+      authorName: item.authorName,
+      source: item.source,
+      sourceUrl: item.sourceUrl,
+      favoriteTime: item.favoriteTime,
+      publishedAt: item.publishedAt,
+      partitionName: item.partitionName,
+      tags: item.tags.map((tag) => tag.name)
+    }));
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `collection-export-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    toast("success", `已导出 ${selected.length} 条收藏`);
+  };
+
+  const saveBatchTags = async (addedTags: Tag[]) => {
+    const targets = items.filter((item) => selectedIds.includes(item.id));
+    if (targets.length === 0) return;
+    try {
+      for (const item of targets) {
+        const merged = mergeTags(item.tags, addedTags);
+        await api.updateItemTags(
+          item.id,
+          merged.map((tag) => ({
+            id: tag.id,
+            namespace: tag.namespace,
+            name: tag.name,
+            color: tag.color
+          }))
+        );
+      }
+      onTagsChanged();
+      setSelectedIds([]);
+      setBatchTagging(false);
+      toast("success", `已为 ${targets.length} 条收藏更新标签`);
+    } catch (error) {
+      toast("error", `批量打标签失败：${String(error)}`);
     }
   };
 
@@ -364,126 +434,73 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
                     checked={allSelected}
                     onChange={toggleSelectAll}
                   />
-                  <span>全选当前结果</span>
+                  <span>全选当前结果（{items.length}）</span>
                 </label>
                 {selectedIds.length > 0 && (
-                  <button
-                    className="secondary-button danger-action"
-                    type="button"
-                    onClick={deleteSelected}
-                    disabled={deleting}
-                  >
-                    <Trash2 size={16} />
-                    删除选中（{selectedIds.length}）
-                  </button>
+                  <>
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      onClick={() => setBatchTagging(true)}
+                    >
+                      <Tags size={16} />
+                      批量打标签（{selectedIds.length}）
+                    </button>
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      onClick={exportSelected}
+                    >
+                      <Download size={16} />
+                      导出（{selectedIds.length}）
+                    </button>
+                    <button
+                      className="secondary-button danger-action"
+                      type="button"
+                      onClick={deleteSelected}
+                      disabled={deleting}
+                    >
+                      <Trash2 size={16} />
+                      删除选中（{selectedIds.length}）
+                    </button>
+                  </>
                 )}
               </div>
 
-              <div className={`video-grid ${view === "list" ? "is-list" : ""}`}>
-                {items.map((item) => {
-                  const isBrowser = item.source === "browser";
-                  return (
-                  <article className="video-card" key={item.id}>
-                    <label
-                      className={`video-select-checkbox ${
-                        selectedIds.includes(item.id) ? "is-checked" : ""
-                      }`}
-                      title="选择视频"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={selectedIds.includes(item.id)}
-                        onChange={() => toggleSelected(item.id)}
-                      />
-                    </label>
-                    <button
-                      className="video-cover-button"
-                      type="button"
-                      onClick={() => api.openUrl(item.sourceUrl)}
-                      title="在浏览器打开"
-                    >
-                      {isBrowser ? (
-                        item.coverUrl ? (
-                          <div className="browser-cover-placeholder">
-                            <img src={item.coverUrl} alt="" className="browser-favicon" />
-                          </div>
-                        ) : (
-                          <div className="browser-cover-placeholder">
-                            <Globe size={28} />
-                          </div>
-                        )
-                      ) : resolveCoverUrl(item.coverUrl, item.coverLocalPath) ? (
-                        <img
-                          src={resolveCoverUrl(item.coverUrl, item.coverLocalPath)}
-                          alt=""
-                          loading="lazy"
-                        />
-                      ) : (
-                        <div className="cover-placeholder">无封面</div>
-                      )}
-                      {!isBrowser && item.duration != null && <span className="duration">{formatDuration(item.duration)}</span>}
-                    </button>
-                    <div className="video-card-body">
-                      <button
-                        type="button"
-                        className="video-title"
-                        onClick={() => api.openUrl(item.sourceUrl)}
-                      >
-                        {item.title}
-                      </button>
-                      <div className="video-meta">
-                        {isBrowser ? (
-                          <span>{formatDate(item.favoriteTime || item.publishedAt)}</span>
-                        ) : (
-                          <>
-                            <span>{item.authorName || "未知作者"}</span>
-                            {item.partitionName && <span>{item.partitionName}</span>}
-                            <span>{formatDate(item.favoriteTime || item.publishedAt)}</span>
-                          </>
-                        )}
-                      </div>
-                      <div className="video-tag-line">
-                        <div className="card-tags">
-                          {item.tags.slice(0, 3).map((tag) => (
-                            <TagBadge key={tag.id} tag={tag} compact />
-                          ))}
-                        {item.tags.length > 3 && (
-                          <span className="muted">+{item.tags.length - 3}</span>
-                        )}
-                      </div>
-                      <button
-                        className="icon-button card-note-button"
-                        type="button"
-                        onClick={() => setNoteVideo(item)}
-                        title="编辑视频批注"
-                      >
-                        <FileText size={14} />
-                      </button>
-                      <button
-                        className="icon-button danger card-delete-button"
-                          type="button"
-                          onClick={() => deleteVideo(item)}
-                          title="删除本地视频"
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                        <button
-                          className="icon-button card-edit-button"
-                          type="button"
-                          onClick={() => setEditingVideo(item)}
-                          title="编辑视频标签"
-                        >
-                          <Pencil size={14} />
-                        </button>
-                      </div>
-                    </div>
-                  </article>
-                  );
-                })}
+              <div className="library-list-wrap">
+                <VirtuosoGrid
+                  data={items}
+                  style={{ height: "100%" }}
+                  className="video-list-region"
+                  listClassName={`video-grid ${view === "list" ? "is-list" : ""}`}
+                  itemClassName="video-grid-cell"
+                  overscan={400}
+                  itemContent={(_index, item) => (
+                    <VideoCard
+                      item={item}
+                      isSelected={selectedIds.includes(item.id)}
+                      onToggleSelect={toggleSelected}
+                      onOpen={(url) => api.openUrl(url)}
+                      onEditTags={setEditingVideo}
+                      onEditNote={setNoteVideo}
+                      onDelete={deleteVideo}
+                    />
+                  )}
+                />
               </div>
             </>
           )}
         </>
+      )}
+
+      {batchTagging && (
+        <BatchTagEditorModal
+          count={selectedIds.length}
+          tagPool={tags}
+          onClose={() => setBatchTagging(false)}
+          onSave={saveBatchTags}
+          onTagsChanged={onTagsChanged}
+        />
       )}
 
       {editingVideo && (
@@ -491,7 +508,7 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
           item={editingVideo}
           tagPool={tags}
           onClose={() => setEditingVideo(null)}
-          onSaved={loadItems}
+          onSaved={() => { loadItems(); toast("success", "标签已保存"); }}
           onTagsChanged={onTagsChanged}
         />
       )}
@@ -500,9 +517,18 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
         <VideoNoteEditorModal
           item={noteVideo}
           onClose={() => setNoteVideo(null)}
-          onSaved={loadItems}
+          onSaved={() => { loadItems(); toast("success", "批注已保存"); }}
         />
       )}
     </section>
   );
+}
+
+function mergeTags(current: Tag[], additions: Tag[]): Tag[] {
+  const map = new Map<number, Tag>();
+  current.forEach((tag) => map.set(tag.id, tag));
+  additions.forEach((tag) => {
+    if (!map.has(tag.id)) map.set(tag.id, tag);
+  });
+  return [...map.values()];
 }
