@@ -2,8 +2,8 @@
   color-scheme: light;
   font-family:
     "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-  background: #eef1f5;
-  color: #1e293b;
+  background: var(--bg);
+  color: var(--text);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   --bg: #eef1f5;
@@ -24,17 +24,19 @@
   --transition-base: 0.15s var(--ease-out);
   --transition-slow: 0.25s var(--ease-out);
   --transition-fast: 0.1s var(--ease-out);
+  --radius-input: 12px;
+  --radius-card: 14px;
 
-  /* Sidebar-specific tokens (kept dark in both themes, fine-tuned per theme) */
-  --side-bg: #162033;
-  --side-text: #e5edf8;
-  --side-muted: #9eafc6;
-  --side-hover: #1f2c42;
-  --side-active: #2f6fed;
-  --side-border: rgba(255, 255, 255, 0.1);
-  --brand-mark-bg: #273a5a;
-  --brand-mark-border: rgba(255, 255, 255, 0.16);
-  --side-foot: #8396ad;
+  /* Sidebar-specific tokens (now follow the global theme: light here, dark in [data-theme="dark"]) */
+  --side-bg: #f4f6fa;
+  --side-text: #1e293b;
+  --side-muted: #64748b;
+  --side-hover: #e7ecf3;
+  --side-active: #eaf1ff;
+  --side-border: rgba(15, 23, 42, 0.08);
+  --brand-mark-bg: #e6edf6;
+  --brand-mark-border: rgba(15, 23, 42, 0.1);
+  --side-foot: #64748b;
 }
 
 * {
@@ -375,6 +377,7 @@ button,
   font-size: 26px;
   font-weight: 720;
   letter-spacing: 0;
+  color: var(--text);
 }
 
 .page-header p {
@@ -506,7 +509,7 @@ button,
   min-height: 40px;
   padding: 0 12px;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--radius-input);
   background: var(--surface);
   color: var(--muted);
   transition: border-color var(--transition-base), box-shadow var(--transition-base), transform var(--transition-base);
@@ -533,7 +536,7 @@ button,
   min-height: 40px;
   padding: 0 12px;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--radius-input);
   background: var(--surface);
   color: var(--muted);
   transition: border-color var(--transition-base), box-shadow var(--transition-base);
@@ -556,7 +559,7 @@ button,
   min-height: 40px;
   padding: 0 32px 0 11px;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--radius-input);
   background: var(--surface);
   color: var(--text);
   transition: border-color var(--transition-base), box-shadow var(--transition-base);
@@ -586,7 +589,7 @@ button,
   min-height: 40px;
   padding: 0 12px;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--radius-input);
   background: var(--surface);
   color: var(--muted);
 }
@@ -605,7 +608,7 @@ button,
   min-height: 40px;
   padding: 0 32px 0 11px;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--radius-input);
   background: var(--surface);
   color: var(--text);
 }
@@ -637,8 +640,8 @@ button,
   padding: 0 9px;
   border: 1px solid color-mix(in srgb, var(--tag-color), transparent 78%);
   border-radius: 7px;
-  background: color-mix(in srgb, var(--tag-color), #ffffff 93%);
-  color: #334155;
+  background: color-mix(in srgb, var(--tag-color), var(--surface) 93%);
+  color: var(--text);
   font-size: 12px;
   line-height: 1;
   transition: transform var(--transition-base), background var(--transition-base), border-color var(--transition-base);
@@ -650,7 +653,7 @@ button,
 
 .tag-badge.is-clickable:hover {
   transform: scale(1.05);
-  background: color-mix(in srgb, var(--tag-color), #ffffff 88%);
+  background: color-mix(in srgb, var(--tag-color), var(--surface) 88%);
   border-color: color-mix(in srgb, var(--tag-color), transparent 65%);
 }
 
@@ -828,7 +831,7 @@ button,
   padding: 0;
   overflow: hidden;
   border: 0;
-  background: #d9e0e8;
+  background: var(--surface-soft);
   cursor: pointer;
 }
 
@@ -1118,7 +1121,7 @@ button,
   margin: 24px auto;
   padding: 34px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
   background: var(--surface);
   text-align: center;
   animation: resultIn 0.35s var(--ease-out);
@@ -1273,7 +1276,7 @@ button,
 .section-label {
   display: block;
   margin: 15px 0 7px;
-  color: #475569;
+  color: var(--muted);
   font-size: 12px;
   font-weight: 650;
 }
@@ -1293,7 +1296,16 @@ button,
   min-height: 40px;
   padding: 0 12px;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--radius-input);
+}
+
+.input-with-button input {
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  background: var(--surface);
+  color: var(--text);
 }
 
 .parsed-card {
@@ -1363,46 +1375,41 @@ button,
 }
 
 .folder-partition-input {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  min-height: 40px;
-  padding: 0 11px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--surface);
-  color: var(--muted);
-}
-
-.folder-partition-input input {
+  display: block;
   width: 100%;
-  border: 0;
-  background: transparent;
-  color: var(--text);
-}
-
-.folder-partition-input input:focus {
-  outline: 0;
 }
 
 .per-video-tag-list {
   display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 14px;
   max-height: 620px;
   overflow: auto;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
+  align-content: start;
+  padding: 2px;
 }
 
 .per-video-tag-card {
   display: grid;
   gap: 12px;
-  padding: 15px 16px;
-  border-bottom: 1px solid #edf1f5;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  transition: transform var(--transition-base), box-shadow var(--transition-base);
 }
 
-.per-video-tag-card:last-child {
-  border-bottom: 0;
+.per-video-tag-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .per-video-tag-card:hover {
+    transform: none;
+    box-shadow: var(--shadow-sm);
+  }
 }
 
 .video-tag-summary {
@@ -1436,30 +1443,17 @@ button,
 
 .video-tag-fields {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) auto;
-  gap: 14px;
-  align-items: end;
-}
-
-.video-tag-fields label:not(.compact-checkbox) {
-  display: grid;
   gap: 6px;
 }
 
-.video-tag-fields label > span,
-.picker-label {
-  color: #475569;
-  font-size: 12px;
-  font-weight: 650;
+.per-video-tag-card .video-tag-fields {
+  grid-template-columns: 1fr;
 }
 
-.video-tag-fields input[type="text"] {
-  min-height: 36px;
-  padding: 0 10px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--surface);
-  color: var(--text);
+.picker-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
 }
 
 .compact-checkbox {
@@ -1492,7 +1486,7 @@ button,
   min-height: 36px;
   padding: 0 10px;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--radius-input);
   background: var(--surface);
   color: var(--muted);
 }
@@ -1515,6 +1509,10 @@ button,
   position: relative;
 }
 
+.tag-pool-input.is-disabled {
+  opacity: 0.6;
+}
+
 .tag-pool-selected {
   display: flex;
   flex-wrap: wrap;
@@ -1530,7 +1528,7 @@ button,
   min-height: 38px;
   padding: 0 10px;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--radius-input);
   background: var(--surface);
   color: var(--muted);
 }
@@ -1665,7 +1663,7 @@ button,
   aspect-ratio: 16 / 9;
   overflow: hidden;
   border-radius: 6px;
-  background: #d9e0e8;
+  background: var(--surface-soft);
 }
 
 .preview-item > div:last-child {
@@ -1744,7 +1742,7 @@ button,
   min-height: 29px;
   padding: 0 9px;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--radius-input);
   background: var(--surface);
   color: var(--text);
   cursor: pointer;
@@ -1767,7 +1765,7 @@ textarea {
   resize: vertical;
   padding: 10px 11px;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--radius-input);
   background: var(--surface);
   color: var(--text);
 }
@@ -1906,7 +1904,7 @@ textarea {
 
 .category-sidebar-title {
   margin-bottom: 5px;
-  color: #475569;
+  color: var(--muted);
   font-size: 12px;
   font-weight: 700;
 }
@@ -1920,7 +1918,7 @@ textarea {
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: #334155;
+  color: var(--text);
   cursor: pointer;
   text-align: left;
 }
@@ -2020,7 +2018,7 @@ textarea {
 }
 
 .category-title {
-  color: #475569;
+  color: var(--muted);
   font-size: 12px;
   font-weight: 700;
 }
@@ -2229,6 +2227,7 @@ textarea {
 .settings-card h2 {
   margin: 0;
   font-size: 15px;
+  color: var(--text);
 }
 
 .settings-card p {
@@ -2249,6 +2248,7 @@ textarea {
 .privacy-note h3 {
   margin: 0 0 8px;
   font-size: 15px;
+  color: var(--text);
 }
 
 .privacy-note p {
@@ -2640,6 +2640,7 @@ textarea {
   --muted: #94a3b8;
   --blue: #5b9bff;
   --blue-soft: #1e2a44;
+  --danger: #f87171;
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
@@ -2654,6 +2655,53 @@ textarea {
   --brand-mark-bg: #1e293b;
   --brand-mark-border: rgba(255, 255, 255, 0.14);
   --side-foot: #64748b;
+}
+
+[data-theme="dark"] .category-color {
+  filter: brightness(1.5) saturate(1.25);
+}
+
+/* ── Dark theme: status / alert surfaces ──
+   These used light-bg + dark-text palettes (#fef2f2/#fecaca/#b91c1c,
+   #ecfdf5/#059669) that clashed on a dark page. Re-skin for dark. ── */
+[data-theme="dark"] .alert,
+[data-theme="dark"] .result-errors {
+  background: #2a1416;
+  border-color: #7f1d1d;
+  color: #fca5a5;
+}
+
+[data-theme="dark"] .result-icon {
+  background: #052e1a;
+  color: #6ee7b7;
+}
+
+[data-theme="dark"] .icon-button.danger:hover {
+  background: #2a1416;
+  border-color: #7f1d1d;
+}
+
+[data-theme="dark"] .danger-action {
+  border-color: #7f1d1d;
+  background: #2a1416;
+}
+
+[data-theme="dark"] .toast-success .toast-icon {
+  color: #6ee7b7;
+}
+
+/* Light-bg + inherited-text surfaces that become unreadable on dark */
+[data-theme="dark"] .warning-line {
+  background: #3a2a16;
+  border-color: #92400e;
+}
+
+[data-theme="dark"] .up-tag-zone {
+  background: var(--blue-soft);
+}
+
+[data-theme="dark"] .category-accordion-item.is-drag-over {
+  background: var(--blue-soft);
 }
 
 /* ── Toast notifications ── */
@@ -2732,7 +2780,7 @@ textarea {
   min-height: 34px;
   padding: 0 14px;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--radius-input);
   background: var(--surface);
   color: var(--text);
   cursor: pointer;

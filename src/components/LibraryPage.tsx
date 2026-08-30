@@ -400,22 +400,6 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
               </button>
             )}
 
-            <select
-              className="select-control"
-              value={filters.sort}
-              onChange={(event) =>
-                setFilters((current) => ({
-                  ...current,
-                  sort: event.target.value as ItemFilters["sort"]
-                }))
-              }
-            >
-              <option value="favorite_desc">收藏时间：最近优先</option>
-              <option value="published_desc">发布时间：最近优先</option>
-              <option value="duration_desc">时长：最长优先</option>
-              <option value="title_asc">标题：字母升序</option>
-              <option value="imported_desc">入库时间：最近优先</option>
-            </select>
           </div>
 
           {loading ? (

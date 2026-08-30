@@ -15,6 +15,7 @@ interface TagPoolInputProps {
   placeholder?: string;
   namespace?: TagNamespace;
   single?: boolean;
+  disabled?: boolean;
 }
 
 export function TagPoolInput({
@@ -25,11 +26,13 @@ export function TagPoolInput({
   onCreate,
   placeholder = "输入标签，空格或回车创建",
   namespace = "manual",
-  single = false
+  single = false,
+  disabled = false
 }: TagPoolInputProps) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const blurTimer = useRef<number | undefined>(undefined);
+  const effectiveOnRemove = disabled ? () => {} : onRemove;
 
   const normalized = query.trim().toLowerCase();
   const suggestions = useMemo(() => {
@@ -69,20 +72,21 @@ export function TagPoolInput({
   };
 
   return (
-    <div className="tag-pool-input">
+    <div className={`tag-pool-input ${disabled ? "is-disabled" : ""}`}>
       <div className="tag-pool-input-row">
         <div className="tag-pool-selected">
           {selected.map((tag) => (
             <TagBadge
               key={tag.id}
               tag={tag}
-              onRemove={() => onRemove(tag)}
+              onRemove={() => effectiveOnRemove(tag)}
             />
           ))}
         </div>
         <Search size={16} />
         <input
           value={query}
+          disabled={disabled}
           onChange={(event) => {
             setQuery(event.target.value);
             setOpen(true);
@@ -94,7 +98,7 @@ export function TagPoolInput({
           onKeyDown={handleKeyDown}
           placeholder={placeholder}
         />
-        {normalized && (
+        {normalized && !disabled && (
           <button
             type="button"
             className="tag-pool-create"
@@ -108,7 +112,7 @@ export function TagPoolInput({
           </button>
         )}
       </div>
-      {open && suggestions.length > 0 && (
+      {open && !disabled && suggestions.length > 0 && (
         <div className="tag-pool-menu">
           {suggestions.map((tag) => (
             <button

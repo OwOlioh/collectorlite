@@ -13,6 +13,7 @@ import { api } from "../lib/api";
 import type { Tag, TagCategory } from "../types";
 import { TagBadge } from "./TagBadge";
 import { TagPoolInput } from "./TagPoolInput";
+import { useToast } from "./Toast";
 
 const categoryColors = ["#64748b", "#0f766e", "#b45309", "#7c3aed", "#be123c"];
 
@@ -23,6 +24,7 @@ interface TagManagerPanelProps {
 
 export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
   const [categories, setCategories] = useState<TagCategory[]>([]);
+  const { toast } = useToast();
   const [newCategory, setNewCategory] = useState("");
   const [expandedCategoryId, setExpandedCategoryId] = useState<number | null>(null);
   const [draggedTagId, setDraggedTagId] = useState<number | null>(null);
@@ -56,10 +58,34 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
 
   const addCategory = async () => {
     if (!newCategory.trim()) return;
-    const color = categoryColors[Math.abs(newCategory.trim().length) % categoryColors.length];
-    await api.createTagCategory(newCategory.trim(), color);
-    setNewCategory("");
-    await refreshCategories();
+    const name = newCategory.trim();
+    const color = categoryColors[Math.abs(name.length) % categoryColors.length];
+    try {
+      const created = await api.createTagCategory(name, color);
+      setNewCategory("");
+      setCategories((current) => {
+        const next = current.some((category) => category.id === created.id)
+          ? current
+          : [...current, created];
+        // 与后端 list_tag_categories 的 ORDER BY position, name 保持一致，新分类立即出现在正确位置
+        return [...next].sort(
+          (a, b) =>
+            (a.position ?? 0) - (b.position ?? 0) ||
+            a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
+        );
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("UNIQUE constraint") || message.includes("normalized")) {
+        // 分类名已存在（如重复创建，或大小写/空格差异归一到同一 normalized）：
+        // 不再抛原始数据库错误，而是友好提示并立即拉取最新列表，确保已有分类直接可见。
+        setNewCategory("");
+        toast("info", `分类「${name}」已存在`);
+        await refreshCategories();
+      } else {
+        toast("error", `新建分类失败：${message}`);
+      }
+    }
   };
 
   const deleteCategory = async (category: TagCategory) => {

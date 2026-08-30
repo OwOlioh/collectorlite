@@ -488,6 +488,11 @@ pub async fn create_tag_category(
     if normalized.is_empty() {
         return Err(AppError::InvalidInput("分类名称不能为空".into()));
     }
+    // 同名（忽略大小写/首尾空格）已存在时直接返回已有分类，避免 UNIQUE 冲突报错，
+    // 这样前端“新建分类”永远能得到该分类并立即显示。
+    if let Some(existing) = get_tag_category_by_normalized(pool, &normalized).await? {
+        return Ok(existing);
+    }
     let id = sqlx::query_scalar::<_, i64>(
         "INSERT INTO tag_categories (name, normalized, color, position, created_at)
          VALUES (?, ?, ?, ?, ?)
@@ -603,6 +608,20 @@ async fn get_tag_category(pool: &SqlitePool, id: i64) -> Result<TagCategory, App
     .bind(id)
     .map(category_from_row)
     .fetch_one(pool)
+    .await?;
+    Ok(row)
+}
+
+async fn get_tag_category_by_normalized(
+    pool: &SqlitePool,
+    normalized: &str,
+) -> Result<Option<TagCategory>, AppError> {
+    let row = sqlx::query(
+        "SELECT id, name, normalized, color, position FROM tag_categories WHERE normalized = ?",
+    )
+    .bind(normalized)
+    .map(category_from_row)
+    .fetch_optional(pool)
     .await?;
     Ok(row)
 }

@@ -1,12 +1,12 @@
 import { useState } from "react";
-import { Check, ChevronLeft, ChevronRight, LoaderCircle, Tag, Undo2 } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, LoaderCircle, Undo2 } from "lucide-react";
 import type { ImportPreview, ImportResult, ItemTagAssignment, Tag as AppTag, TagInput, TagNamespace, VideoItem } from "../../types";
 import { TagPoolInput } from "../TagPoolInput";
 import { api } from "../../lib/api";
 import { useToast } from "../Toast";
 
 interface PerVideoTagState {
-  partitionTag: string;
+  partitionTags: AppTag[];
   partitionManuallyEdited: boolean;
   otherTags: AppTag[];
 }
@@ -26,12 +26,26 @@ const PAGE_SIZE = 8;
 
 export function TagEditor({ preview, tagPool, onTagsChanged, onBack, onExecute, buildImportInput }: TagEditorProps) {
   const [folderPartitionEnabled, setFolderPartitionEnabled] = useState(false);
-  const [folderPartitionTag, setFolderPartitionTag] = useState("");
+  const [folderPartitionTags, setFolderPartitionTags] = useState<AppTag[]>([]);
   const [perVideoTags, setPerVideoTags] = useState<Record<string, PerVideoTagState>>(() => {
     const states: Record<string, PerVideoTagState> = {};
+    const poolByName = new Map(tagPool.map((t) => [t.normalized, t]));
     preview.items.forEach((item) => {
+      let partitionTags: AppTag[] = [];
+      if (item.partitionName) {
+        const existing = poolByName.get(item.partitionName.toLowerCase());
+        partitionTags = [
+          existing ?? {
+            id: 0,
+            namespace: "manual",
+            name: item.partitionName,
+            normalized: item.partitionName.toLowerCase(),
+            color: undefined
+          }
+        ];
+      }
       states[item.externalId] = {
-        partitionTag: item.partitionName || "",
+        partitionTags,
         partitionManuallyEdited: false,
         otherTags: []
       };
@@ -55,14 +69,14 @@ export function TagEditor({ preview, tagPool, onTagsChanged, onBack, onExecute, 
     }));
   };
 
-  const updateFolderPartitionTag = (value: string) => {
-    setFolderPartitionTag(value);
+  const updateFolderPartitionTags = (tags: AppTag[]) => {
+    setFolderPartitionTags(tags);
     if (!folderPartitionEnabled) return;
     setPerVideoTags((current) => {
       const next = { ...current };
       Object.entries(next).forEach(([externalId, state]) => {
         if (!state.partitionManuallyEdited) {
-          next[externalId] = { ...state, partitionTag: value };
+          next[externalId] = { ...state, partitionTags: tags };
         }
       });
       return next;
@@ -77,9 +91,13 @@ export function TagEditor({ preview, tagPool, onTagsChanged, onBack, onExecute, 
 
   const buildTagSpecs = (item: VideoItem, state: PerVideoTagState): TagInput[] => {
     const specs: TagInput[] = [];
-    if (state.partitionTag.trim()) {
-      specs.push({ namespace: "auto", name: state.partitionTag.trim() });
-    }
+    state.partitionTags.forEach((tag) => {
+      if (tag.id === 0) {
+        specs.push({ namespace: "manual", name: tag.name });
+      } else {
+        specs.push({ id: tag.id, namespace: tag.namespace, name: tag.name, color: tag.color });
+      }
+    });
     state.otherTags.forEach((tag) => {
       specs.push({ id: tag.id, namespace: tag.namespace, name: tag.name, color: tag.color });
     });
@@ -128,7 +146,7 @@ export function TagEditor({ preview, tagPool, onTagsChanged, onBack, onExecute, 
                 const next = { ...current };
                 Object.entries(next).forEach(([externalId, state]) => {
                   if (!state.partitionManuallyEdited) {
-                    next[externalId] = { ...state, partitionTag: folderPartitionTag };
+                    next[externalId] = { ...state, partitionTags: folderPartitionTags };
                   }
                 });
                 return next;
@@ -141,22 +159,18 @@ export function TagEditor({ preview, tagPool, onTagsChanged, onBack, onExecute, 
           </span>
         </label>
         <div className="folder-partition-input">
-          <Tag size={16} />
-          <input
-            value={folderPartitionTag}
-            onChange={(event) => updateFolderPartitionTag(event.target.value)}
+          <TagPoolInput
+            pool={tagPool}
+            selected={folderPartitionTags}
+            namespace="manual"
             disabled={!folderPartitionEnabled}
-            list="folder-partition-options"
+            onAdd={(tag) => updateFolderPartitionTags([...folderPartitionTags, tag])}
+            onRemove={(tag) =>
+              updateFolderPartitionTags(folderPartitionTags.filter((t) => t.id !== tag.id))
+            }
+            onCreate={createTag}
             placeholder="例如：知识、科技"
           />
-          <datalist id="folder-partition-options">
-            {preview.partitionSuggestions.map((item) => (
-              <option key={item.name} value={item.name} />
-            ))}
-            {tagPool.map((tag) => (
-              <option key={tag.id} value={tag.name} />
-            ))}
-          </datalist>
         </div>
       </div>
 
@@ -176,20 +190,26 @@ export function TagEditor({ preview, tagPool, onTagsChanged, onBack, onExecute, 
                 </div>
               </div>
               <div className="video-tag-fields">
-                <label>
-                  <span>分区标签</span>
-                  <input
-                    value={state.partitionTag}
-                    onChange={(event) =>
-                      updateVideoTag(item.externalId, {
-                        partitionTag: event.target.value,
-                        partitionManuallyEdited: true
-                      })
-                    }
-                    list="folder-partition-options"
-                    placeholder="输入或修改分区标签"
-                  />
-                </label>
+                <label className="field-label">分区标签</label>
+                <TagPoolInput
+                  pool={tagPool}
+                  selected={state.partitionTags}
+                  namespace="manual"
+                  onAdd={(tag) =>
+                    updateVideoTag(item.externalId, {
+                      partitionTags: [...state.partitionTags, tag],
+                      partitionManuallyEdited: true
+                    })
+                  }
+                  onRemove={(tag) =>
+                    updateVideoTag(item.externalId, {
+                      partitionTags: state.partitionTags.filter((t) => t.id !== tag.id),
+                      partitionManuallyEdited: true
+                    })
+                  }
+                  onCreate={createTag}
+                  placeholder="检索或新建分区标签"
+                />
               </div>
               <div className="video-other-tags">
                 <TagPoolInput
