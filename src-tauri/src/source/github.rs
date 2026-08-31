@@ -75,7 +75,10 @@ impl GithubClient {
             return None;
         }
 
-        let repo_id = repo["id"].as_i64().map(|id| id.to_string()).unwrap_or_default();
+        let repo_id = repo["id"]
+            .as_i64()
+            .map(|id| id.to_string())
+            .unwrap_or_default();
         let description = repo["description"].as_str().unwrap_or("").to_string();
         let owner_name = repo["owner"]["login"].as_str().map(|s| s.to_string());
         let owner_avatar = repo["owner"]["avatar_url"].as_str().map(|s| s.to_string());

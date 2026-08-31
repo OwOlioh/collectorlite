@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Code2, FolderDown, Github, Globe, LoaderCircle, LogIn } from "lucide-react";
+import { Code2, FolderDown, Github, Globe, LoaderCircle, LogIn, Upload } from "lucide-react";
 import { api } from "../lib/api";
 import type {
   BilibiliProfile, BrowserImportRequest, CollectionInfo, ImportPreview,
@@ -14,7 +14,7 @@ import { TagEditor } from "./import/TagEditor";
 import { ResultCard } from "./import/ResultCard";
 import { useToast } from "./Toast";
 
-type ImportMode = "login" | "public" | "browser" | "zhihu" | "zhihu_public" | "csdn" | "csdn_public" | "github";
+type ImportMode = "login" | "public" | "browser" | "zhihu" | "zhihu_public" | "csdn" | "csdn_public" | "github" | "file";
 type ImportStep = "source" | "tags" | "done";
 
 interface ImportPageProps {
@@ -312,6 +312,43 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
     }, 1200);
   };
 
+  // ── 从文件导入 ──
+  const importFromFile = async (file: File) => {
+    setBusy(true); setError("");
+    try {
+      const text = await file.text();
+      const result = await api.importCollection(text);
+      setResult(result);
+      setStep("done");
+      const parts = [`新增 ${result.imported} 条`, `跳过重复 ${result.skipped} 条`];
+      if (result.failed > 0) parts.push(`失败 ${result.failed} 条`);
+      const summary = `导入完成：${parts.join("，")}`;
+      if (result.failed > 0) toast("error", summary);
+      else toast("success", summary);
+
+      // 导入后自动补一次封面缓存，覆盖新导入项以及库中历史遗留的缺封面项，
+      // 保证封面都能正常显示（B站/CSDN 会下载到本地，其余来源走远程 https 封面）。
+      void api
+        .recacheCovers()
+        .then((recache) => {
+          if (recache.cached > 0) {
+            toast("info", `已自动缓存 ${recache.cached} 张封面`);
+          }
+        })
+        .catch(() => {
+          // 封面缓存失败不阻断导入结果，静默忽略
+        });
+
+      onTagsChanged();
+    } catch (err) {
+      const msg = String(err);
+      setError(msg);
+      toast("error", msg);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   // ── 渲染 ──
   return (
     <section className="page import-page">
@@ -334,6 +371,8 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
               active={mode === "csdn" || mode === "csdn_public"} onClick={() => setMode(mode === "csdn" ? "csdn_public" : "csdn")} />
             <SourceCard icon={<Github size={20} />} title="GitHub Stars" desc="输入 GitHub 用户名即可导入 Star 仓库列表。"
               active={mode === "github"} onClick={() => setMode("github")} />
+            <SourceCard icon={<Upload size={20} />} title="从文件导入" desc="导入此前导出的收藏 JSON 文件，仅新增不覆盖。"
+              active={mode === "file"} onClick={() => setMode("file")} />
           </div>
 
           <div className="import-form-panel">
@@ -362,17 +401,21 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
             ) : mode === "github" ? (
               <GithubForm busy={busy} username={githubUsername} setUsername={setGithubUsername}
                 collections={githubCollections} onLoadStars={loadGithubStars} />
+            ) : mode === "file" ? (
+              <FileImportForm onFile={importFromFile} busy={busy} />
             ) : (
               <BrowserForm browserFileName={browserFileName} browserItems={browserItems}
                 onFileDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) handleBrowserFile(f); }}
                 onFileInput={(e) => { const f = e.target.files?.[0]; if (f) handleBrowserFile(f); }} />
             )}
 
-            <button className="primary-button wide" type="button" onClick={startPreview}
-              disabled={!currentCollection || busy}>
-              {busy ? <LoaderCircle className="spin" size={17} /> : <FolderDown size={17} />}
-              预览并配置标签
-            </button>
+            {mode !== "file" && (
+              <button className="primary-button wide" type="button" onClick={startPreview}
+                disabled={!currentCollection || busy}>
+                {busy ? <LoaderCircle className="spin" size={17} /> : <FolderDown size={17} />}
+                预览并配置标签
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -403,5 +446,28 @@ function SourceCard({ icon, title, desc, active, onClick }: {
       <strong>{title}</strong>
       <span>{desc}</span>
     </button>
+  );
+}
+
+function FileImportForm({ onFile, busy }: { onFile: (file: File) => void; busy: boolean }) {
+  return (
+    <div className="file-import-form">
+      <p>
+        选择一个此前从本应用导出的收藏 <code>.json</code> 文件。
+        导入时只会<strong>新增不存在的收藏</strong>，已存在的项会被跳过、不会被覆盖；标签会自动合并。
+      </p>
+      <label className="file-drop">
+        <input
+          type="file"
+          accept="application/json,.json"
+          disabled={busy}
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) onFile(file);
+          }}
+        />
+        <span>{busy ? "导入中..." : "点击选择 .json 文件"}</span>
+      </label>
+    </div>
   );
 }

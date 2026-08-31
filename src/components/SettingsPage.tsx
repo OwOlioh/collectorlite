@@ -1,12 +1,15 @@
 import { useEffect, useState } from "react";
-import { Database, LogOut, ShieldCheck, SunMoon } from "lucide-react";
+import { Database, LogOut, RefreshCw, ShieldCheck, SunMoon } from "lucide-react";
 import { api } from "../lib/api";
+import { useToast } from "./Toast";
 import type { BilibiliProfile } from "../types";
 import { applyTheme, getStoredTheme, storeTheme, type ThemeMode } from "../lib/theme";
 
 export function SettingsPage() {
   const [profile, setProfile] = useState<BilibiliProfile | null>(null);
   const [theme, setTheme] = useState<ThemeMode>(getStoredTheme());
+  const [recaching, setRecaching] = useState(false);
+  const { toast } = useToast();
 
   useEffect(() => {
     void api.getProfile().then(setProfile);
@@ -83,6 +86,36 @@ export function SettingsPage() {
             <h2>本地数据</h2>
             <p>收藏元数据、标签和导入记录存储在本机 SQLite 数据库中，不包含视频或文件内容。</p>
           </div>
+          <button
+            className="ghost-button"
+            type="button"
+            disabled={recaching}
+            onClick={async () => {
+              setRecaching(true);
+              try {
+                const result = await api.recacheCovers();
+                if (result.cached > 0 && result.failed === 0) {
+                  toast("success", `已重新缓存 ${result.cached} 张封面`);
+                } else if (result.cached > 0) {
+                  toast("info", `已缓存 ${result.cached} 张封面，${result.failed} 张失败`);
+                } else if (result.failed > 0) {
+                  const detail = result.errors?.length
+                    ? `：${result.errors.slice(0, 3).join("; ")}`
+                    : "";
+                  toast("error", `封面缓存失败 ${result.failed} 张${detail}`);
+                } else {
+                  toast("info", "没有需要缓存的封面");
+                }
+              } catch (e) {
+                toast("error", `封面缓存请求失败: ${String(e)}`);
+              } finally {
+                setRecaching(false);
+              }
+            }}
+          >
+            <RefreshCw size={16} className={recaching ? "spin" : ""} />
+            {recaching ? "缓存中..." : "重新缓存封面"}
+          </button>
         </div>
       </div>
 

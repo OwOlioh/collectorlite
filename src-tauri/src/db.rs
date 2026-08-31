@@ -6,7 +6,8 @@ use sqlx::{FromRow, QueryBuilder, Row, Sqlite, SqlitePool};
 
 use crate::error::AppError;
 use crate::models::{
-    CollectionInfo, ExternalItem, ImportResult, ItemFilters, Tag, TagCategory, TagInput, VideoItem,
+    CollectionExport, CollectionInfo, ExportItem, ExportTag, ExternalItem, ImportResult,
+    ItemFilters, Tag, TagCategory, TagInput, VideoItem,
 };
 
 fn now_seconds() -> i64 {
@@ -493,19 +494,22 @@ pub async fn create_tag_category(
     if let Some(existing) = get_tag_category_by_normalized(pool, &normalized).await? {
         return Ok(existing);
     }
-    let id = sqlx::query_scalar::<_, i64>(
+    // 一条语句完成插入并 RETURNING 完整行，避免「INSERT 后另起连接二次 SELECT」
+    // 在 WAL 模式下读不到刚提交行、触发 RowNotFound（"no rows returned"）的竞态。
+    let row = sqlx::query(
         "INSERT INTO tag_categories (name, normalized, color, position, created_at)
          VALUES (?, ?, ?, ?, ?)
-         RETURNING id",
+         RETURNING id, name, normalized, color, position",
     )
     .bind(name.trim())
     .bind(&normalized)
     .bind(&color)
     .bind(0)
     .bind(now_seconds())
+    .map(category_from_row)
     .fetch_one(pool)
     .await?;
-    get_tag_category(pool, id).await
+    Ok(row)
 }
 
 pub async fn rename_tag_category(
@@ -515,14 +519,19 @@ pub async fn rename_tag_category(
     color: Option<String>,
 ) -> Result<TagCategory, AppError> {
     let normalized = normalize_tag(name);
-    sqlx::query("UPDATE tag_categories SET name = ?, normalized = ?, color = ? WHERE id = ?")
-        .bind(name.trim())
-        .bind(&normalized)
-        .bind(&color)
-        .bind(id)
-        .execute(pool)
-        .await?;
-    get_tag_category(pool, id).await
+    // UPDATE ... RETURNING 一步返回完整行，避免 UPDATE 后二次 SELECT 的 WAL 竞态。
+    let row = sqlx::query(
+        "UPDATE tag_categories SET name = ?, normalized = ?, color = ? WHERE id = ?
+         RETURNING id, name, normalized, color, position",
+    )
+    .bind(name.trim())
+    .bind(&normalized)
+    .bind(&color)
+    .bind(id)
+    .map(category_from_row)
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
 }
 
 pub async fn delete_tag_category(pool: &SqlitePool, id: i64) -> Result<(), AppError> {
@@ -599,17 +608,6 @@ pub async fn delete_items_by_tag(pool: &SqlitePool, tag_id: i64) -> Result<Vec<S
         .fetch_all(pool)
         .await?;
     delete_items(pool, &item_ids).await
-}
-
-async fn get_tag_category(pool: &SqlitePool, id: i64) -> Result<TagCategory, AppError> {
-    let row = sqlx::query(
-        "SELECT id, name, normalized, color, position FROM tag_categories WHERE id = ?",
-    )
-    .bind(id)
-    .map(category_from_row)
-    .fetch_one(pool)
-    .await?;
-    Ok(row)
 }
 
 async fn get_tag_category_by_normalized(
@@ -801,4 +799,317 @@ pub async fn build_import_result(pool: &SqlitePool, run_id: i64) -> Result<Impor
     .fetch_one(pool)
     .await?;
     Ok(row)
+}
+
+// ── 收藏库导入 / 导出 ──
+
+#[derive(Debug, Clone, FromRow)]
+struct ExportRow {
+    id: i64,
+    source: String,
+    external_id: String,
+    source_url: String,
+    title: String,
+    description: String,
+    notes: String,
+    cover_url: Option<String>,
+    author_name: Option<String>,
+    author_id: Option<String>,
+    partition_name: Option<String>,
+    published_at: Option<i64>,
+    duration: Option<i64>,
+    favorite_time: Option<i64>,
+    extra_json: String,
+}
+
+/// 把收藏库导出为 `CollectionExport`。`item_ids` 为 None 时导出全部，为空数组时不导出任何项。
+pub async fn export_items(
+    pool: &SqlitePool,
+    item_ids: Option<Vec<i64>>,
+) -> Result<CollectionExport, AppError> {
+    let mut qb = QueryBuilder::<Sqlite>::new(
+        "SELECT id, source, external_id, source_url, title, description, notes, cover_url,
+                author_name, author_id, partition_name, published_at, duration, favorite_time, extra_json
+         FROM items WHERE 1 = 1",
+    );
+    match &item_ids {
+        Some(ids) if !ids.is_empty() => {
+            qb.push(" AND id IN (");
+            let mut separated = qb.separated(", ");
+            for id in ids {
+                separated.push_bind(id);
+            }
+            qb.push(")");
+        }
+        Some(_) => {
+            // 空选择 -> 不导出任何项
+            qb.push(" AND 0 = 1");
+        }
+        None => {}
+    }
+    let rows = qb.build_query_as::<ExportRow>().fetch_all(pool).await?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        let tags = sqlx::query(
+            "SELECT t.namespace, t.name, t.color, tc.name AS category_name
+             FROM tags t
+             JOIN item_tags it ON it.tag_id = t.id
+             LEFT JOIN tag_categories tc ON tc.id = t.category_id
+             WHERE it.item_id = ?
+             ORDER BY t.name COLLATE NOCASE",
+        )
+        .bind(row.id)
+        .map(|r: SqliteRow| ExportTag {
+            namespace: r.get("namespace"),
+            name: r.get("name"),
+            color: r.get("color"),
+            category: r.get("category_name"),
+        })
+        .fetch_all(pool)
+        .await?;
+
+        let extra: serde_json::Value =
+            serde_json::from_str(&row.extra_json).unwrap_or(serde_json::Value::Null);
+
+        items.push(ExportItem {
+            source: row.source,
+            external_id: row.external_id,
+            source_url: row.source_url,
+            title: row.title,
+            description: row.description,
+            cover_url: row.cover_url,
+            author_name: row.author_name,
+            author_id: row.author_id,
+            partition_name: row.partition_name,
+            published_at: row.published_at,
+            duration: row.duration,
+            favorite_time: row.favorite_time,
+            notes: row.notes,
+            extra,
+            tags,
+        });
+    }
+
+    Ok(CollectionExport {
+        format_version: 1,
+        exported_at: now_seconds(),
+        app: "bilibili_collector".into(),
+        items,
+    })
+}
+
+/// 把已导入项的封面本地路径写回数据库（文件导入后补缓存用）。
+pub async fn set_item_cover_local_path(
+    pool: &SqlitePool,
+    source: &str,
+    external_id: &str,
+    path: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE items SET cover_local_path = ?, updated_at = ? WHERE source = ? AND external_id = ?",
+    )
+    .bind(path)
+    .bind(now_seconds())
+        .bind(source)
+        .bind(external_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 取出需要补缓存封面的项：bilibili / csdn 来源、有远程 cover_url、但本地缓存为空的项。
+pub async fn fetch_items_needing_cover_cache(
+    pool: &SqlitePool,
+) -> Result<Vec<ExternalItem>, AppError> {
+    let rows = sqlx::query(
+        "SELECT source, external_id, cover_url FROM items
+         WHERE source IN ('bilibili', 'csdn')
+           AND cover_url IS NOT NULL AND cover_url <> ''
+           AND (cover_local_path IS NULL OR cover_local_path = '')",
+    )
+    .map(|r: SqliteRow| CoverNeedRow {
+        source: r.get("source"),
+        external_id: r.get("external_id"),
+        cover_url: r.get("cover_url"),
+    })
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| ExternalItem {
+            source: row.source,
+            external_id: row.external_id,
+            source_url: String::new(),
+            title: String::new(),
+            description: String::new(),
+            cover_url: Some(row.cover_url),
+            cover_local_path: None,
+            author_name: None,
+            author_id: None,
+            partition_name: None,
+            published_at: None,
+            duration: None,
+            favorite_time: None,
+            extra: serde_json::Value::Null,
+        })
+        .collect())
+}
+
+struct CoverNeedRow {
+    source: String,
+    external_id: String,
+    cover_url: String,
+}
+
+/// 从导出文件增量导入：仅新增 `(source, external_id)` 不存在的项，已存在项跳过（不覆盖）。
+/// 返回 `(导入结果, 新插入项清单)`，新项清单供调用方补下载封面缓存。
+pub async fn import_collection(
+    pool: &SqlitePool,
+    payload: &str,
+) -> Result<(ImportResult, Vec<ExternalItem>), AppError> {
+    let export: CollectionExport = serde_json::from_str(payload)
+        .map_err(|e| AppError::InvalidInput(format!("收藏文件格式无效：{e}")))?;
+
+    // 版本兼容性守卫：当前支持 v1，拒绝更高版本以避免静默数据损坏
+    if export.format_version > 1 {
+        return Err(AppError::InvalidInput(format!(
+            "文件格式版本 {} 高于当前支持的版本 1，请升级应用后再导入",
+            export.format_version
+        )));
+    }
+
+    let collection = CollectionInfo {
+        source: "file".into(),
+        id: "import".into(),
+        title: format!("导入文件（{} 条）", export.items.len()),
+        owner: None,
+        count: export.items.len() as i64,
+        url: None,
+    };
+    let run_id = create_import_run(pool, &collection, export.items.len() as i64, false).await?;
+
+    let mut imported: i64 = 0;
+    let mut skipped: i64 = 0;
+    let mut failed: i64 = 0;
+    let mut errors: Vec<String> = Vec::new();
+    let mut new_items: Vec<ExternalItem> = Vec::new();
+
+    for item in &export.items {
+        if item.source.trim().is_empty() || item.external_id.trim().is_empty() {
+            failed += 1;
+            errors.push(format!("跳过无效项（缺少来源或 ID）：{}", item.title));
+            continue;
+        }
+
+        // 增量模式：已存在则跳过，绝不覆盖原库
+        let existing = sqlx::query_scalar::<_, i64>(
+            "SELECT id FROM items WHERE source = ? AND external_id = ?",
+        )
+        .bind(&item.source)
+        .bind(&item.external_id)
+        .fetch_optional(pool)
+        .await?;
+        if existing.is_some() {
+            skipped += 1;
+            continue;
+        }
+
+        let now = now_seconds();
+        let extra_str = serde_json::to_string(&item.extra).unwrap_or_else(|_| "null".to_string());
+
+        let insert_result = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO items (
+                source, external_id, source_url, title, description, cover_url, cover_local_path, author_name,
+                author_id, partition_name, published_at, duration, favorite_time, notes, extra_json,
+                created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             RETURNING id",
+        )
+        .bind(&item.source)
+        .bind(&item.external_id)
+        .bind(&item.source_url)
+        .bind(&item.title)
+        .bind(&item.description)
+        .bind(&item.cover_url)
+        .bind(&item.author_name)
+        .bind(&item.author_id)
+        .bind(&item.partition_name)
+        .bind(item.published_at)
+        .bind(item.duration)
+        .bind(item.favorite_time)
+        .bind(&item.notes)
+        .bind(&extra_str)
+        .bind(now)
+        .bind(now)
+        .fetch_one(pool)
+        .await;
+
+        let id = match insert_result {
+            Ok(id) => id,
+            Err(e) => {
+                failed += 1;
+                errors.push(format!("导入失败「{}」：{}", item.title, e));
+                continue;
+            }
+        };
+
+        // 标签：find-or-create，沿用库中已有同名标签的颜色，新标签才创建
+        for tag in &item.tags {
+            let mut input = TagInput {
+                id: None,
+                namespace: if tag.namespace.trim().is_empty() {
+                    "manual".into()
+                } else {
+                    tag.namespace.clone()
+                },
+                name: tag.name.trim().to_string(),
+                color: tag.color.clone(),
+                description: None,
+                category_id: None,
+            };
+            if let Some(cat_name) = &tag.category {
+                if !cat_name.trim().is_empty() {
+                    if let Ok(cat) = create_tag_category(pool, cat_name.trim(), None).await {
+                        input.category_id = Some(cat.id);
+                    }
+                }
+            }
+            match get_or_create_tag(pool, &input).await {
+                Ok(tag_id) => {
+                    let _ = attach_tag(pool, id, tag_id).await;
+                }
+                Err(e) => {
+                    errors.push(format!("标签「{}」创建失败：{}", tag.name, e));
+                }
+            }
+        }
+
+        // 重建全文索引，使标签可被检索
+        let _ = rebuild_item_fts(pool, id).await;
+        imported += 1;
+
+        // 记录新插入项，供命令层下载封面缓存（复刻实时 B站导入行为）
+        new_items.push(ExternalItem {
+            source: item.source.clone(),
+            external_id: item.external_id.clone(),
+            source_url: item.source_url.clone(),
+            title: item.title.clone(),
+            description: item.description.clone(),
+            cover_url: item.cover_url.clone(),
+            cover_local_path: None,
+            author_name: item.author_name.clone(),
+            author_id: item.author_id.clone(),
+            partition_name: item.partition_name.clone(),
+            published_at: item.published_at,
+            duration: item.duration,
+            favorite_time: item.favorite_time,
+            extra: item.extra.clone(),
+        });
+    }
+
+    finish_import_run(pool, run_id, imported, skipped, failed, &errors).await?;
+    let result = build_import_result(pool, run_id).await?;
+    Ok((result, new_items))
 }

@@ -141,6 +141,58 @@ pub struct ImportResult {
     pub errors: Vec<String>,
 }
 
+/// 重新缓存封面的结果统计。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecacheResult {
+    pub total: i64,
+    pub cached: i64,
+    pub failed: i64,
+    #[serde(default)]
+    pub errors: Vec<String>,
+}
+
+/// 导出文件中单个标签的精简表示（不含库内 id，靠 name+namespace 重新关联）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportTag {
+    pub namespace: String,
+    pub name: String,
+    pub color: Option<String>,
+    pub category: Option<String>,
+}
+
+/// 导出文件中单条收藏的完整元数据（保留 extra_json 以不丢浏览器书签的 folder_tags）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportItem {
+    pub source: String,
+    pub external_id: String,
+    pub source_url: String,
+    pub title: String,
+    pub description: String,
+    pub cover_url: Option<String>,
+    pub author_name: Option<String>,
+    pub author_id: Option<String>,
+    pub partition_name: Option<String>,
+    pub published_at: Option<i64>,
+    pub duration: Option<i64>,
+    pub favorite_time: Option<i64>,
+    pub notes: String,
+    pub extra: Value,
+    pub tags: Vec<ExportTag>,
+}
+
+/// 收藏库导出文件根结构。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionExport {
+    pub format_version: u32,
+    pub exported_at: i64,
+    pub app: String,
+    pub items: Vec<ExportItem>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemFilters {

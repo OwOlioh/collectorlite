@@ -6,8 +6,8 @@ use crate::db;
 use crate::error::AppError;
 use crate::models::{
     BilibiliProfile, CollectionInfo, ImportPreview, ImportRequest, ImportResult, ItemFilters,
-    ItemTagAssignment, PartitionSuggestion, QrSession, QrStatus, Tag, TagCategory, TagInput,
-    VideoItem,
+    ItemTagAssignment, PartitionSuggestion, QrSession, QrStatus, RecacheResult, Tag, TagCategory,
+    TagInput, VideoItem,
 };
 use crate::source::browser::BrowserBookmarkClient;
 use crate::source::SourceAdapter;
@@ -100,6 +100,30 @@ async fn cache_csdn_covers(
         cached.push(next);
     }
     cached
+}
+
+/// 文件导入后补封面缓存：复刻实时 B站收藏夹导入的 `cache_item_covers` 行为。
+/// 仅对 bilibili / csdn 这类「远程封面为 http（或需带 Referer）」的来源下载到本地，
+/// 其余来源（知乎 / GitHub / 浏览器）封面为 https 远程链接，无需本地缓存。
+async fn cache_imported_covers(state: &AppState, items: &mut [crate::models::ExternalItem]) {
+    for item in items.iter_mut() {
+        let url = match item.cover_url.as_deref().filter(|value| !value.is_empty()) {
+            Some(value) => value,
+            None => continue,
+        };
+        let download = match item.source.as_str() {
+            "bilibili" => state.bili.download_cover(url).await,
+            "csdn" => state.csdn.download_cover(url).await,
+            _ => continue,
+        };
+        if let Ok((bytes, extension)) = download {
+            if let Ok(path) =
+                save_cover_file(state, &item.source, &item.external_id, &bytes, &extension)
+            {
+                item.cover_local_path = Some(path);
+            }
+        }
+    }
 }
 
 async fn resolve_collection(
@@ -1041,4 +1065,182 @@ async fn resolve_github_collection(
         .as_deref()
         .ok_or_else(|| AppError::InvalidInput("请提供 GitHub 用户名".into()))?;
     state.github.resolve_collection(username).await
+}
+
+// ── 收藏库导出 / 导入 ──
+
+#[tauri::command]
+pub async fn export_collection(
+    state: State<'_, AppState>,
+    item_ids: Option<Vec<i64>>,
+) -> Result<String, String> {
+    let export = db::export_items(&state.pool, item_ids)
+        .await
+        .map_err(|e| e.to_string())?;
+    serde_json::to_string(&export).map_err(|e| e.to_string())
+}
+
+/// 弹出「另存为」对话框，让用户选择导出文件的保存位置并写入内容，
+/// 返回最终保存的完整路径（含用户手动填写的文件名），供前端 toast 提示。
+#[tauri::command]
+pub async fn save_export_file(
+    app: tauri::AppHandle,
+    content: String,
+    suggested_name: String,
+) -> Result<String, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    // 弹保存对话框，让用户选择路径（cancel 返回 None 时直接放弃，不写文件）
+    let path = app
+        .dialog()
+        .file()
+        .set_file_name(&suggested_name)
+        .blocking_save_file();
+
+    // FilePath 可能是 Url 或 Path，这里统一转成 PathBuf
+    let Some(path) = path.and_then(|fp| fp.into_path().ok()) else {
+        return Err("已取消保存".into());
+    };
+
+    // 确保文件以 .json 结尾（用户若没填扩展名则补上）
+    let path = match path.extension() {
+        Some(_) => path,
+        None => path.with_extension("json"),
+    };
+
+    std::fs::write(&path, content).map_err(|e| format!("写入文件失败：{e}"))?;
+
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub async fn import_collection(
+    state: State<'_, AppState>,
+    payload: String,
+) -> Result<ImportResult, String> {
+    let (result, new_items) = db::import_collection(&state.pool, &payload)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 像实时 B站收藏夹导入那样，把新导入项的封面下载到本地缓存，
+    // 保证导入后封面正常显示（尤其 B站 http 封面在 WebView 中无法直接加载）。
+    if !new_items.is_empty() {
+        let mut items = new_items;
+        cache_imported_covers(&state, &mut items).await;
+        for item in &items {
+            if let Some(path) = &item.cover_local_path {
+                let _ = db::set_item_cover_local_path(
+                    &state.pool,
+                    &item.source,
+                    &item.external_id,
+                    path,
+                )
+                .await;
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+/// 维护操作：把已存在但缺本地封面的 B站 / CSDN 项重新下载缓存（复刻实时导入行为）。
+#[tauri::command]
+pub async fn recache_covers(state: State<'_, AppState>) -> Result<RecacheResult, String> {
+    let mut items = db::fetch_items_needing_cover_cache(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let total = items.len() as i64;
+
+    let mut cached: i64 = 0;
+    let mut failed: i64 = 0;
+    let mut errors: Vec<String> = Vec::new();
+
+    for item in items.iter_mut() {
+        let url = match item.cover_url.as_deref().filter(|v| !v.is_empty()) {
+            Some(v) => v,
+            None => {
+                failed += 1;
+                errors.push(format!(
+                    "{}:{} 缺少 cover_url",
+                    item.source, item.external_id
+                ));
+                continue;
+            }
+        };
+
+        let download = match item.source.as_str() {
+            "bilibili" => state.bili.download_cover(url).await,
+            "csdn" => state.csdn.download_cover(url).await,
+            other => {
+                failed += 1;
+                errors.push(format!(
+                    "{}:{} 未知来源 {}",
+                    item.source, item.external_id, other
+                ));
+                continue;
+            }
+        };
+
+        match download {
+            Ok((bytes, extension)) => {
+                match save_cover_file(&state, &item.source, &item.external_id, &bytes, &extension) {
+                    Ok(path) => {
+                        item.cover_local_path = Some(path);
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        errors.push(format!(
+                            "{}:{} 保存封面失败: {}",
+                            item.source, item.external_id, e
+                        ));
+                        continue;
+                    }
+                }
+            }
+            Err(e) => {
+                failed += 1;
+                errors.push(format!(
+                    "{}:{} 下载封面失败: {}",
+                    item.source, item.external_id, e
+                ));
+                continue;
+            }
+        }
+
+        // 写回 cover_local_path
+        match &item.cover_local_path {
+            Some(path) => {
+                if let Err(e) = db::set_item_cover_local_path(
+                    &state.pool,
+                    &item.source,
+                    &item.external_id,
+                    path,
+                )
+                .await
+                {
+                    failed += 1;
+                    errors.push(format!(
+                        "{}:{} 写回 cover_local_path 失败: {}",
+                        item.source, item.external_id, e
+                    ));
+                } else {
+                    cached += 1;
+                }
+            }
+            None => {
+                failed += 1;
+                errors.push(format!(
+                    "{}:{} 下载后无本地路径",
+                    item.source, item.external_id
+                ));
+            }
+        }
+    }
+
+    Ok(RecacheResult {
+        total,
+        cached,
+        failed,
+        errors,
+    })
 }

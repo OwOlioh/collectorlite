@@ -306,7 +306,8 @@ impl CsdnClient {
             return None;
         }
         let text = resp.text().await.ok()?;
-        let re = regex::Regex::new(r#"<meta[^>]*property="og:image"[^>]*content="([^"]+)""#).ok()?;
+        let re =
+            regex::Regex::new(r#"<meta[^>]*property="og:image"[^>]*content="([^"]+)""#).ok()?;
         re.captures(&text)
             .and_then(|caps| caps.get(1))
             .map(|m| m.as_str().to_string())
@@ -334,9 +335,10 @@ impl CsdnClient {
             let data = &json["data"];
             // data is null when the user doesn't exist
             if data.is_null() {
-                return Err(AppError::NotFound(
-                    format!("未找到 CSDN 用户 '{}'，请检查用户名是否正确", username),
-                ));
+                return Err(AppError::NotFound(format!(
+                    "未找到 CSDN 用户 '{}'，请检查用户名是否正确",
+                    username
+                )));
             }
             let total = data["total"].as_i64().unwrap_or(0);
             let list = data["list"].as_array();
@@ -412,15 +414,10 @@ mod tests {
     async fn test_fetch_article_cover() {
         let client = CsdnClient::new().unwrap();
         let cover = client
-            .fetch_article_cover(
-                "https://blog.csdn.net/2401_83830408/article/details/164078212",
-            )
+            .fetch_article_cover("https://blog.csdn.net/2401_83830408/article/details/164078212")
             .await;
         eprintln!("cover result: {:?}", cover);
-        assert!(
-            cover.is_some(),
-            "Cover should be found for this article"
-        );
+        assert!(cover.is_some(), "Cover should be found for this article");
         assert!(
             cover.unwrap().contains("i-blog.csdnimg.cn"),
             "Cover URL should be from CSDN image CDN"

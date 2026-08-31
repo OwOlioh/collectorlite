@@ -103,6 +103,13 @@ export interface BilibiliProfile {
   face?: string;
 }
 
+export interface RecacheResult {
+  total: number;
+  cached: number;
+  failed: number;
+  errors?: string[];
+}
+
 export interface QrSession {
   qrcodeKey: string;
   qrcodeUrl: string;

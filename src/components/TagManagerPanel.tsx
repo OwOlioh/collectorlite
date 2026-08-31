@@ -61,30 +61,22 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
     const name = newCategory.trim();
     const color = categoryColors[Math.abs(name.length) % categoryColors.length];
     try {
-      const created = await api.createTagCategory(name, color);
+      await api.createTagCategory(name, color);
       setNewCategory("");
-      setCategories((current) => {
-        const next = current.some((category) => category.id === created.id)
-          ? current
-          : [...current, created];
-        // 与后端 list_tag_categories 的 ORDER BY position, name 保持一致，新分类立即出现在正确位置
-        return [...next].sort(
-          (a, b) =>
-            (a.position ?? 0) - (b.position ?? 0) ||
-            a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
-        );
-      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const detail = error instanceof Error ? "" : ` :: ${JSON.stringify(error)}`;
       if (message.includes("UNIQUE constraint") || message.includes("normalized")) {
-        // 分类名已存在（如重复创建，或大小写/空格差异归一到同一 normalized）：
-        // 不再抛原始数据库错误，而是友好提示并立即拉取最新列表，确保已有分类直接可见。
         setNewCategory("");
         toast("info", `分类「${name}」已存在`);
-        await refreshCategories();
       } else {
-        toast("error", `新建分类失败：${message}`);
+        // 即使报错也先刷新：后端可能已写入（如返回值反序列化失败等瞬态错误），
+        // 权威刷新能保证新建分类在数据库里确实存在时被显示出来。
+        toast("error", `新建分类失败：${message}${detail}`);
       }
+    } finally {
+      // 无论成功还是报错，都从后端拉取权威列表刷新，确保列表与数据库一致。
+      await refreshCategories();
     }
   };
 

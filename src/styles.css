@@ -924,6 +924,53 @@ button,
   font-size: 12px;
 }
 
+/* ── 从文件导入 ── */
+.file-import-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  color: var(--text);
+}
+
+.file-import-form p {
+  margin: 0;
+  line-height: 1.7;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.file-import-form code {
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.file-drop {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 38px 20px;
+  border: 1.5px dashed var(--border);
+  border-radius: 12px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 15px;
+  transition: border-color 0.18s ease, background 0.18s ease;
+}
+
+.file-drop:hover {
+  border-color: var(--blue);
+  background: var(--surface);
+}
+
+.file-drop input[type="file"] {
+  display: none;
+}
+
 .video-card-body .card-tags {
   margin-top: 10px;
 }

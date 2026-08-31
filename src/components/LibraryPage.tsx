@@ -173,30 +173,37 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
     }
   };
 
-  const exportSelected = () => {
+  const exportSelected = async () => {
     if (selectedIds.length === 0) return;
-    const selected = items.filter((item) => selectedIds.includes(item.id));
-    const data = selected.map((item) => ({
-      id: item.id,
-      title: item.title,
-      authorName: item.authorName,
-      source: item.source,
-      sourceUrl: item.sourceUrl,
-      favoriteTime: item.favoriteTime,
-      publishedAt: item.publishedAt,
-      partitionName: item.partitionName,
-      tags: item.tags.map((tag) => tag.name)
-    }));
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `collection-export-${new Date().toISOString().slice(0, 10)}.json`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-    toast("success", `已导出 ${selected.length} 条收藏`);
+    try {
+      const json = await api.exportCollection(selectedIds);
+      const suggested = `collection-export-${selectedIds.length}-${new Date().toISOString().slice(0, 10)}.json`;
+      const savedPath = await api.saveExportFile(json, suggested);
+      toast("success", `已导出 ${selectedIds.length} 条收藏到：${savedPath}`);
+    } catch (error) {
+      const message = String(error);
+      if (message.includes("取消保存")) {
+        toast("info", "已取消导出");
+      } else {
+        toast("error", `导出失败：${message}`);
+      }
+    }
+  };
+
+  const exportAll = async () => {
+    try {
+      const json = await api.exportCollection();
+      const suggested = `collection-export-all-${new Date().toISOString().slice(0, 10)}.json`;
+      const savedPath = await api.saveExportFile(json, suggested);
+      toast("success", `已导出全部收藏到：${savedPath}`);
+    } catch (error) {
+      const message = String(error);
+      if (message.includes("取消保存")) {
+        toast("info", "已取消导出");
+      } else {
+        toast("error", `导出失败：${message}`);
+      }
+    }
   };
 
   const saveBatchTags = async (addedTags: Tag[]) => {
@@ -420,6 +427,14 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
                   />
                   <span>全选当前结果（{items.length}）</span>
                 </label>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={exportAll}
+                >
+                  <Download size={16} />
+                  导出全部
+                </button>
                 {selectedIds.length > 0 && (
                   <>
                     <button

@@ -7,6 +7,7 @@ import type {
   ImportRequest,
   ImportResult,
   ItemFilters,
+  RecacheResult,
   QrSession,
   QrStatus,
   Tag,
@@ -79,6 +80,15 @@ export const api = {
       itemTagAssignments: request.itemTagAssignments
     }),
   openUrl: (url: string) => call<null>("open_url", { url }),
+  // 收藏库导出 / 导入
+  exportCollection: (itemIds?: number[]) =>
+    call<string>("export_collection", { itemIds: itemIds ?? null }),
+  importCollection: (payload: string) =>
+    call<ImportResult>("import_collection", { payload }),
+  saveExportFile: (content: string, suggestedName: string) =>
+    call<string>("save_export_file", { content, suggestedName }),
+  // 维护：重新缓存封面
+  recacheCovers: () => call<RecacheResult>("recache_covers", {}),
   // Zhihu
   zhihuSetCookie: (cookie: string) =>
     call<null>("zhihu_set_cookie", { cookie }),
@@ -520,6 +530,55 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
         failed: 0,
         errors: []
       } as T;
+    case "export_collection": {
+      const exportObj = {
+        formatVersion: 1,
+        exportedAt: Math.floor(Date.now() / 1000),
+        app: "bilibili_collector",
+        items: mockItems.map((item) => ({
+          source: item.source,
+          externalId: item.externalId,
+          sourceUrl: item.sourceUrl,
+          title: item.title,
+          description: item.description,
+          coverUrl: item.coverUrl,
+          authorName: item.authorName,
+          authorId: item.authorId,
+          partitionName: item.partitionName,
+          publishedAt: item.publishedAt,
+          duration: item.duration,
+          favoriteTime: item.favoriteTime,
+          notes: item.notes ?? "",
+          extra: {},
+          tags: item.tags.map((t) => ({
+            namespace: t.namespace,
+            name: t.name,
+            color: t.color,
+            category: t.categoryId ? "示例分类" : undefined
+          }))
+        }))
+      };
+      return JSON.stringify(exportObj) as T;
+    }
+    case "import_collection":
+      return {
+        runId: 1,
+        total: 1,
+        imported: 1,
+        skipped: 0,
+        failed: 0,
+        errors: []
+      } as T;
+    case "recache_covers":
+      return {
+        total: 2,
+        cached: 2,
+        failed: 0,
+        errors: []
+      } as T;
+    case "save_export_file":
+      // 浏览器 mock 环境没有系统对话框，退化为触发下载并返回一个示意路径
+      return "已保存（示例路径）" as T;
     default:
       return null as T;
   }
