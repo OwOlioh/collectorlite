@@ -1,13 +1,19 @@
 import { useEffect, useState } from "react";
-import { Database, LogOut, RefreshCw, ShieldCheck, SunMoon } from "lucide-react";
+import { Database, LogOut, RefreshCw, ShieldCheck, SunMoon, Trash2 } from "lucide-react";
 import { api } from "../lib/api";
 import { useToast } from "./Toast";
 import type { BilibiliProfile } from "../types";
 import { applyTheme, getStoredTheme, storeTheme, type ThemeMode } from "../lib/theme";
+import { getRetentionDays, setRetentionDays, RETENTION_OPTIONS } from "../lib/retention";
 
-export function SettingsPage() {
+interface SettingsPageProps {
+  onOpenTrash?: () => void;
+}
+
+export function SettingsPage({ onOpenTrash }: SettingsPageProps) {
   const [profile, setProfile] = useState<BilibiliProfile | null>(null);
   const [theme, setTheme] = useState<ThemeMode>(getStoredTheme());
+  const [retention, setRetention] = useState<number>(getRetentionDays());
   const [recaching, setRecaching] = useState(false);
   const { toast } = useToast();
 
@@ -117,6 +123,33 @@ export function SettingsPage() {
             {recaching ? "缓存中..." : "重新缓存封面"}
           </button>
         </div>
+      </div>
+
+      <div className="settings-card">
+        <div className="settings-icon"><Trash2 size={20} /></div>
+        <div>
+          <h2>回收站</h2>
+          <p>删除的收藏会先进入回收站，超过下方保留期后将在应用启动时自动清除。</p>
+          <div className="theme-options">
+            {RETENTION_OPTIONS.map((days) => (
+              <button
+                key={days}
+                type="button"
+                className={`theme-opt ${retention === days ? "is-active" : ""}`}
+                onClick={() => {
+                  setRetention(days);
+                  setRetentionDays(days);
+                }}
+              >
+                {days} 天
+              </button>
+            ))}
+          </div>
+        </div>
+        <button className="ghost-button" type="button" onClick={() => onOpenTrash?.()}>
+          <Trash2 size={16} />
+          打开回收站
+        </button>
       </div>
 
       <div className="privacy-note">

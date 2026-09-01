@@ -48,6 +48,7 @@ export interface VideoItem {
   publishedAt?: number;
   duration?: number;
   favoriteTime?: number;
+  deletedAt?: number;
   tags: Tag[];
 }
 
@@ -127,6 +128,7 @@ export interface ItemFilters {
   tagMode: "and" | "or";
   sort: "favorite_desc" | "published_desc" | "duration_desc" | "title_asc" | "imported_desc";
   sources: string[];
+  trash?: boolean;
 }
 
-export type AppView = "library" | "import" | "settings";
+export type AppView = "library" | "import" | "trash" | "settings";

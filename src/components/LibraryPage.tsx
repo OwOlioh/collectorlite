@@ -11,6 +11,7 @@ import {
   Trash2
 } from "lucide-react";
 import { api } from "../lib/api";
+import { getRetentionDays } from "../lib/retention";
 import type { ItemFilters, Tag, VideoItem } from "../types";
 import { TagBadge } from "./TagBadge";
 import { TagManagerPanel } from "./TagManagerPanel";
@@ -27,6 +28,7 @@ type LibrarySection = "search" | "manage";
 interface LibraryPageProps {
   tags: Tag[];
   onTagsChanged: () => void;
+  onTrashChanged: () => void;
 }
 
 const initialFilters: ItemFilters = {
@@ -45,7 +47,7 @@ function BilibiliIcon({ size = 15 }: { size?: number }) {
   );
 }
 
-export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
+export function LibraryPage({ tags, onTagsChanged, onTrashChanged }: LibraryPageProps) {
   const [section, setSection] = useState<LibrarySection>("search");
   const [filters, setFilters] = useState<ItemFilters>(initialFilters);
   const [items, setItems] = useState<VideoItem[]>([]);
@@ -110,14 +112,28 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
   };
 
   const deleteVideo = async (item: VideoItem) => {
-    if (!window.confirm(`删除本地收藏"${item.title}"吗？该操作不会影响原始来源。`)) {
+    if (!window.confirm(`将本地收藏"${item.title}"移入回收站吗？${getRetentionDays()} 天内可恢复。`)) {
       return;
     }
     try {
       await api.deleteItem(item.id);
       setItems((current) => current.filter((video) => video.id !== item.id));
       onTagsChanged();
-      toast("success", "已删除该收藏");
+      onTrashChanged();
+      toast("success", `已移入回收站（${getRetentionDays()} 天内可恢复）`, {
+        action: {
+          label: "撤销",
+          onClick: async () => {
+            try {
+              await api.restoreItem(item.id);
+              setItems((current) => [item, ...current]);
+              onTrashChanged();
+            } catch (error) {
+              toast("error", `恢复失败：${String(error)}`);
+            }
+          }
+        }
+      });
     } catch (error) {
       toast("error", `删除失败：${String(error)}`);
     }
@@ -139,7 +155,7 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
 
   const deleteSelected = async () => {
     if (selectedIds.length === 0) return;
-    if (!window.confirm(`删除选中的 ${selectedIds.length} 条本地视频吗？`)) return;
+    if (!window.confirm(`将选中的 ${selectedIds.length} 条本地收藏移入回收站吗？`)) return;
     setDeleting(true);
     try {
       await api.deleteItems(selectedIds);
@@ -148,7 +164,8 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
       );
       setSelectedIds([]);
       onTagsChanged();
-      toast("success", `已删除 ${selectedIds.length} 条收藏`);
+      onTrashChanged();
+      toast("success", `已移入回收站 ${selectedIds.length} 条收藏（${getRetentionDays()} 天内可恢复）`);
     } catch (error) {
       toast("error", `删除失败：${String(error)}`);
     } finally {
@@ -157,7 +174,7 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
   };
 
   const deleteVideosByTag = async (tag: Tag) => {
-    if (!window.confirm(`删除标签“${tag.name}”下的本地视频吗？该操作不会删除标签本身。`)) {
+    if (!window.confirm(`将标签“${tag.name}”下的本地收藏移入回收站吗？该操作不会删除标签本身。`)) {
       return;
     }
     setDeleting(true);
@@ -166,6 +183,8 @@ export function LibraryPage({ tags, onTagsChanged }: LibraryPageProps) {
       setSelectedIds([]);
       await loadItems();
       onTagsChanged();
+      onTrashChanged();
+      toast("success", `已移入回收站（${getRetentionDays()} 天内可恢复）`);
     } catch (error) {
       toast("error", `删除失败：${String(error)}`);
     } finally {

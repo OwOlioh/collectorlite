@@ -12,9 +12,11 @@ mod wbi;
 use tauri::Manager;
 
 use commands::{
-    assign_tag_category, bilibili_poll_qr_login, bilibili_profile, bilibili_start_qr_login,
-    create_tag_category, delete_item, delete_items, delete_items_by_tag, delete_tag,
-    delete_tag_category, execute_csdn_import, execute_github_import, execute_import,
+    assign_tag_category, auto_purge_trash, bilibili_poll_qr_login, bilibili_profile,
+    bilibili_start_qr_login, create_tag_category, delete_item, delete_items, delete_items_by_tag,
+    delete_tag, delete_tag_category, empty_trash, execute_csdn_import, execute_github_import,
+    execute_import, get_trash_count, list_trash, purge_item, purge_items, restore_item,
+    restore_items,
     execute_zhihu_import, export_collection, import_browser_bookmarks, import_collection,
     list_bilibili_favorites, list_csdn_collections, list_github_stars, list_tag_categories,
     list_tags, list_zhihu_collections, logout, merge_tags, open_url, parse_csdn_collection_url,
@@ -48,6 +50,15 @@ pub fn run() {
             delete_item,
             delete_items,
             delete_items_by_tag,
+            // 回收站
+            list_trash,
+            restore_item,
+            restore_items,
+            purge_item,
+            purge_items,
+            empty_trash,
+            get_trash_count,
+            auto_purge_trash,
             list_tags,
             list_tag_categories,
             upsert_tag,

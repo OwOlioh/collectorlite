@@ -74,6 +74,7 @@ struct ItemRow {
     published_at: Option<i64>,
     duration: Option<i64>,
     favorite_time: Option<i64>,
+    deleted_at: Option<i64>,
 }
 
 impl ItemRow {
@@ -94,6 +95,7 @@ impl ItemRow {
             published_at: self.published_at,
             duration: self.duration,
             favorite_time: self.favorite_time,
+            deleted_at: self.deleted_at,
             tags,
         }
     }
@@ -113,7 +115,7 @@ pub async fn upsert_item(pool: &SqlitePool, item: &ExternalItem) -> Result<(i64,
             "UPDATE items SET
                 source_url = ?, title = ?, description = ?, cover_url = ?, cover_local_path = ?, author_name = ?,
                 author_id = ?, partition_name = ?, published_at = ?, duration = ?,
-                favorite_time = ?, extra_json = ?, updated_at = ?
+                favorite_time = ?, extra_json = ?, deleted_at = NULL, updated_at = ?
              WHERE id = ?",
         )
         .bind(&item.source_url)
@@ -205,7 +207,7 @@ async fn update_fts_row(
 pub async fn rebuild_item_fts(pool: &SqlitePool, item_id: i64) -> Result<(), AppError> {
     let row = sqlx::query_as::<_, ItemRow>(
         "SELECT id, source, external_id, source_url, title, description, notes, cover_url, cover_local_path,
-                author_name, author_id, partition_name, published_at, duration, favorite_time
+                author_name, author_id, partition_name, published_at, duration, favorite_time, deleted_at
          FROM items WHERE id = ?",
     )
     .bind(item_id)
@@ -361,7 +363,7 @@ pub async fn replace_item_tags(
     rebuild_item_fts(pool, item_id).await?;
     let row = sqlx::query_as::<_, ItemRow>(
         "SELECT id, source, external_id, source_url, title, description, notes, cover_url, cover_local_path,
-                author_name, author_id, partition_name, published_at, duration, favorite_time
+                author_name, author_id, partition_name, published_at, duration, favorite_time, deleted_at
          FROM items WHERE id = ?",
     )
     .bind(item_id)
@@ -397,7 +399,7 @@ pub async fn update_item_notes(
         .await?;
     let row = sqlx::query_as::<_, ItemRow>(
         "SELECT id, source, external_id, source_url, title, description, notes, cover_url, cover_local_path,
-                author_name, author_id, partition_name, published_at, duration, favorite_time
+                author_name, author_id, partition_name, published_at, duration, favorite_time, deleted_at
          FROM items WHERE id = ?",
     )
     .bind(item_id)
@@ -571,14 +573,70 @@ pub async fn assign_tag_category(
     Ok(tag)
 }
 
-pub async fn delete_item(pool: &SqlitePool, item_id: i64) -> Result<Option<String>, AppError> {
-    let cover_path =
-        sqlx::query_scalar::<_, Option<String>>("SELECT cover_local_path FROM items WHERE id = ?")
-            .bind(item_id)
-            .fetch_optional(pool)
-            .await?
-            .flatten();
+// ── 回收站（软删除） ──
+// 软删除只置 deleted_at 并移除 FTS 行，保留 item_tags / import_run_items 关联与封面文件，
+// 以便恢复时零成本还原、且不丢失标签与导入来源。
 
+pub async fn soft_delete_item(pool: &SqlitePool, item_id: i64) -> Result<(), AppError> {
+    let now = now_seconds();
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE items SET deleted_at = ?, updated_at = ? WHERE id = ?")
+        .bind(now)
+        .bind(now)
+        .bind(item_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM items_fts WHERE rowid = ?")
+        .bind(item_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn soft_delete_items(pool: &SqlitePool, item_ids: &[i64]) -> Result<(), AppError> {
+    for item_id in item_ids {
+        soft_delete_item(pool, *item_id).await?;
+    }
+    Ok(())
+}
+
+pub async fn soft_delete_items_by_tag(pool: &SqlitePool, tag_id: i64) -> Result<usize, AppError> {
+    let item_ids = sqlx::query_scalar::<_, i64>("SELECT item_id FROM item_tags WHERE tag_id = ?")
+        .bind(tag_id)
+        .fetch_all(pool)
+        .await?;
+    let count = item_ids.len();
+    soft_delete_items(pool, &item_ids).await?;
+    Ok(count)
+}
+
+pub async fn restore_item(pool: &SqlitePool, item_id: i64) -> Result<(), AppError> {
+    sqlx::query("UPDATE items SET deleted_at = NULL, updated_at = ? WHERE id = ?")
+        .bind(now_seconds())
+        .bind(item_id)
+        .execute(pool)
+        .await?;
+    rebuild_item_fts(pool, item_id).await?;
+    Ok(())
+}
+
+pub async fn restore_items(pool: &SqlitePool, item_ids: &[i64]) -> Result<(), AppError> {
+    for item_id in item_ids {
+        restore_item(pool, *item_id).await?;
+    }
+    Ok(())
+}
+
+/// 永久删除单条（真正删库行 + FTS 行），返回封面本地路径供调用方删文件。
+pub async fn purge_item(pool: &SqlitePool, item_id: i64) -> Result<Option<String>, AppError> {
+    let cover_path = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT cover_local_path FROM items WHERE id = ?",
+    )
+    .bind(item_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten();
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM items_fts WHERE rowid = ?")
         .bind(item_id)
@@ -592,22 +650,55 @@ pub async fn delete_item(pool: &SqlitePool, item_id: i64) -> Result<Option<Strin
     Ok(cover_path)
 }
 
-pub async fn delete_items(pool: &SqlitePool, item_ids: &[i64]) -> Result<Vec<String>, AppError> {
+pub async fn purge_items(pool: &SqlitePool, item_ids: &[i64]) -> Result<Vec<String>, AppError> {
     let mut cover_paths = Vec::with_capacity(item_ids.len());
     for item_id in item_ids {
-        if let Some(path) = delete_item(pool, *item_id).await? {
+        if let Some(path) = purge_item(pool, *item_id).await? {
             cover_paths.push(path);
         }
     }
     Ok(cover_paths)
 }
 
-pub async fn delete_items_by_tag(pool: &SqlitePool, tag_id: i64) -> Result<Vec<String>, AppError> {
-    let item_ids = sqlx::query_scalar::<_, i64>("SELECT item_id FROM item_tags WHERE tag_id = ?")
-        .bind(tag_id)
-        .fetch_all(pool)
+pub async fn empty_trash(pool: &SqlitePool) -> Result<Vec<String>, AppError> {
+    let item_ids =
+        sqlx::query_scalar::<_, i64>("SELECT id FROM items WHERE deleted_at IS NOT NULL")
+            .fetch_all(pool)
+            .await?;
+    purge_items(pool, &item_ids).await
+}
+
+pub async fn list_trash(pool: &SqlitePool) -> Result<Vec<VideoItem>, AppError> {
+    let rows = sqlx::query_as::<_, ItemRow>(
+        "SELECT id, source, external_id, source_url, title, description, notes, cover_url, cover_local_path,
+                author_name, author_id, partition_name, published_at, duration, favorite_time, deleted_at
+         FROM items WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+    hydrate_items(pool, rows).await
+}
+
+pub async fn get_trash_count(pool: &SqlitePool) -> Result<i64, AppError> {
+    let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM items WHERE deleted_at IS NOT NULL")
+        .fetch_one(pool)
         .await?;
-    delete_items(pool, &item_ids).await
+    Ok(count)
+}
+
+/// 清理超过保留期的回收站条目，返回被删封面路径（由调用方删文件）。
+pub async fn auto_purge_expired(
+    pool: &SqlitePool,
+    retention_days: i64,
+) -> Result<Vec<String>, AppError> {
+    let threshold = now_seconds() - retention_days * 86400;
+    let item_ids = sqlx::query_scalar::<_, i64>(
+        "SELECT id FROM items WHERE deleted_at IS NOT NULL AND deleted_at < ?",
+    )
+    .bind(threshold)
+    .fetch_all(pool)
+    .await?;
+    purge_items(pool, &item_ids).await
 }
 
 async fn get_tag_category_by_normalized(
@@ -694,9 +785,19 @@ pub async fn search_items(
 ) -> Result<Vec<VideoItem>, AppError> {
     let mut query = QueryBuilder::<Sqlite>::new(
         "SELECT id, source, external_id, source_url, title, description, notes, cover_url, cover_local_path,
-                author_name, author_id, partition_name, published_at, duration, favorite_time
+                author_name, author_id, partition_name, published_at, duration, favorite_time, deleted_at
          FROM items i WHERE 1 = 1",
     );
+
+    // 回收站过滤：默认（trash 为 None/false）仅显示正常在库项；trash=Some(true) 时只看回收站。
+    match &filters.trash {
+        Some(true) => {
+            query.push(" AND i.deleted_at IS NOT NULL");
+        }
+        _ => {
+            query.push(" AND i.deleted_at IS NULL");
+        }
+    }
 
     if !filters.tag_ids.is_empty() {
         if filters.tag_mode == "or" {
@@ -830,7 +931,7 @@ pub async fn export_items(
     let mut qb = QueryBuilder::<Sqlite>::new(
         "SELECT id, source, external_id, source_url, title, description, notes, cover_url,
                 author_name, author_id, partition_name, published_at, duration, favorite_time, extra_json
-         FROM items WHERE 1 = 1",
+         FROM items WHERE 1 = 1 AND deleted_at IS NULL",
     );
     match &item_ids {
         Some(ids) if !ids.is_empty() => {

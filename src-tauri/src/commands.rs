@@ -30,6 +30,7 @@ fn to_video_item(item: &crate::models::ExternalItem, local_id: i64) -> VideoItem
         published_at: item.published_at,
         duration: item.duration,
         favorite_time: item.favorite_time,
+        deleted_at: None,
         tags: vec![],
     }
 }
@@ -345,37 +346,100 @@ pub async fn search_items(
         .map_err(|error| error.to_string())
 }
 
+// ── 删除改为移入回收站（软删除） ──
 #[tauri::command]
 pub async fn delete_item(state: State<'_, AppState>, item_id: i64) -> Result<(), String> {
-    let cover_path = db::delete_item(&state.pool, item_id)
+    db::soft_delete_item(&state.pool, item_id)
         .await
-        .map_err(|error| error.to_string())?;
-    remove_cover_files(&state, cover_path.into_iter().collect::<Vec<_>>());
-    Ok(())
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 pub async fn delete_items(state: State<'_, AppState>, item_ids: Vec<i64>) -> Result<usize, String> {
     let count = item_ids.len();
-    let cover_paths = db::delete_items(&state.pool, &item_ids)
+    db::soft_delete_items(&state.pool, &item_ids)
         .await
         .map_err(|error| error.to_string())?;
-    remove_cover_files(&state, cover_paths);
     Ok(count)
 }
 
 #[tauri::command]
 pub async fn delete_items_by_tag(state: State<'_, AppState>, tag_id: i64) -> Result<usize, String> {
-    let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM item_tags WHERE tag_id = ?")
-        .bind(tag_id)
-        .fetch_one(&state.pool)
+    db::soft_delete_items_by_tag(&state.pool, tag_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+// ── 回收站操作 ──
+#[tauri::command]
+pub async fn restore_item(state: State<'_, AppState>, item_id: i64) -> Result<(), String> {
+    db::restore_item(&state.pool, item_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn restore_items(state: State<'_, AppState>, item_ids: Vec<i64>) -> Result<usize, String> {
+    let count = item_ids.len();
+    db::restore_items(&state.pool, &item_ids)
         .await
         .map_err(|error| error.to_string())?;
-    let cover_paths = db::delete_items_by_tag(&state.pool, tag_id)
+    Ok(count)
+}
+
+#[tauri::command]
+pub async fn purge_item(state: State<'_, AppState>, item_id: i64) -> Result<(), String> {
+    let cover_paths = db::purge_item(&state.pool, item_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    remove_cover_files(&state, cover_paths.into_iter().collect::<Vec<_>>());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn purge_items(state: State<'_, AppState>, item_ids: Vec<i64>) -> Result<usize, String> {
+    let cover_paths = db::purge_items(&state.pool, &item_ids)
         .await
         .map_err(|error| error.to_string())?;
     remove_cover_files(&state, cover_paths);
-    Ok(count as usize)
+    Ok(item_ids.len())
+}
+
+#[tauri::command]
+pub async fn empty_trash(state: State<'_, AppState>) -> Result<usize, String> {
+    let cover_paths = db::empty_trash(&state.pool)
+        .await
+        .map_err(|error| error.to_string())?;
+    let count = cover_paths.len();
+    remove_cover_files(&state, cover_paths);
+    Ok(count)
+}
+
+#[tauri::command]
+pub async fn list_trash(state: State<'_, AppState>) -> Result<Vec<VideoItem>, String> {
+    db::list_trash(&state.pool)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn get_trash_count(state: State<'_, AppState>) -> Result<i64, String> {
+    db::get_trash_count(&state.pool)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn auto_purge_trash(
+    state: State<'_, AppState>,
+    retention_days: i64,
+) -> Result<usize, String> {
+    let cover_paths = db::auto_purge_expired(&state.pool, retention_days)
+        .await
+        .map_err(|error| error.to_string())?;
+    let count = cover_paths.len();
+    remove_cover_files(&state, cover_paths);
+    Ok(count)
 }
 
 fn remove_cover_files(state: &AppState, cover_paths: Vec<String>) {

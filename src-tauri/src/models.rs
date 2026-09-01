@@ -83,6 +83,7 @@ pub struct VideoItem {
     pub published_at: Option<i64>,
     pub duration: Option<i64>,
     pub favorite_time: Option<i64>,
+    pub deleted_at: Option<i64>,
     pub tags: Vec<Tag>,
 }
 
@@ -202,6 +203,9 @@ pub struct ItemFilters {
     pub sort: String,
     #[serde(default)]
     pub sources: Vec<String>,
+    /// 回收站过滤：None/false = 仅正常在库；Some(true) = 仅回收站。
+    #[serde(default)]
+    pub trash: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

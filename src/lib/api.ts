@@ -55,6 +55,20 @@ export const api = {
     call<number>("delete_items", { itemIds }),
   deleteItemsByTag: (tagId: number) =>
     call<number>("delete_items_by_tag", { tagId }),
+  // 回收站
+  listTrash: () => call<VideoItem[]>("list_trash", {}),
+  restoreItem: (itemId: number) =>
+    call<null>("restore_item", { itemId }),
+  restoreItems: (itemIds: number[]) =>
+    call<number>("restore_items", { itemIds }),
+  purgeItem: (itemId: number) =>
+    call<null>("purge_item", { itemId }),
+  purgeItems: (itemIds: number[]) =>
+    call<number>("purge_items", { itemIds }),
+  emptyTrash: () => call<number>("empty_trash", {}),
+  getTrashCount: () => call<number>("get_trash_count", {}),
+  autoPurgeTrash: (retentionDays: number) =>
+    call<number>("auto_purge_trash", { retentionDays }),
   listTags: () => call<Tag[]>("list_tags"),
   listTagCategories: () => call<TagCategory[]>("list_tag_categories"),
   upsertTag: (tag: TagInput) => call<Tag>("upsert_tag", { tag }),
@@ -167,6 +181,8 @@ const mockItems: VideoItem[] = [
   }
 ];
 
+const mockTrash: VideoItem[] = [];
+
 const mockCollections: CollectionInfo[] = [
   {
     source: "bilibili",
@@ -240,14 +256,20 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
     case "delete_item": {
       const itemId = Number(args?.itemId);
       const index = mockItems.findIndex((item) => item.id === itemId);
-      if (index >= 0) mockItems.splice(index, 1);
+      if (index >= 0) {
+        const [item] = mockItems.splice(index, 1);
+        mockTrash.push({ ...item, deletedAt: Math.floor(Date.now() / 1000) });
+      }
       return null as T;
     }
     case "delete_items": {
       const itemIds = (args?.itemIds as number[] | undefined) ?? [];
       const ids = new Set(itemIds.map(Number));
       for (let index = mockItems.length - 1; index >= 0; index -= 1) {
-        if (ids.has(mockItems[index].id)) mockItems.splice(index, 1);
+        if (ids.has(mockItems[index].id)) {
+          const [item] = mockItems.splice(index, 1);
+          mockTrash.push({ ...item, deletedAt: Math.floor(Date.now() / 1000) });
+        }
       }
       return itemIds.length as T;
     }
@@ -256,10 +278,66 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
       const before = mockItems.length;
       for (let index = mockItems.length - 1; index >= 0; index -= 1) {
         if (mockItems[index].tags.some((tag) => tag.id === tagId)) {
-          mockItems.splice(index, 1);
+          const [item] = mockItems.splice(index, 1);
+          mockTrash.push({ ...item, deletedAt: Math.floor(Date.now() / 1000) });
         }
       }
       return (before - mockItems.length) as T;
+    }
+    case "list_trash":
+      return mockTrash.map((item) => ({ ...item })) as T;
+    case "restore_item": {
+      const itemId = Number(args?.itemId);
+      const index = mockTrash.findIndex((item) => item.id === itemId);
+      if (index >= 0) {
+        const [item] = mockTrash.splice(index, 1);
+        const restored = { ...item };
+        delete restored.deletedAt;
+        mockItems.push(restored);
+      }
+      return null as T;
+    }
+    case "restore_items": {
+      const itemIds = (args?.itemIds as number[] | undefined) ?? [];
+      const ids = new Set(itemIds.map(Number));
+      for (let index = mockTrash.length - 1; index >= 0; index -= 1) {
+        if (ids.has(mockTrash[index].id)) {
+          const [item] = mockTrash.splice(index, 1);
+          const restored = { ...item };
+          delete restored.deletedAt;
+          mockItems.push(restored);
+        }
+      }
+      return itemIds.length as T;
+    }
+    case "purge_item": {
+      const itemId = Number(args?.itemId);
+      const index = mockTrash.findIndex((item) => item.id === itemId);
+      if (index >= 0) mockTrash.splice(index, 1);
+      return null as T;
+    }
+    case "purge_items": {
+      const itemIds = (args?.itemIds as number[] | undefined) ?? [];
+      const ids = new Set(itemIds.map(Number));
+      for (let index = mockTrash.length - 1; index >= 0; index -= 1) {
+        if (ids.has(mockTrash[index].id)) mockTrash.splice(index, 1);
+      }
+      return itemIds.length as T;
+    }
+    case "empty_trash": {
+      const count = mockTrash.length;
+      mockTrash.length = 0;
+      return count as T;
+    }
+    case "get_trash_count":
+      return mockTrash.length as T;
+    case "auto_purge_trash": {
+      const retentionDays = Number(args?.retentionDays ?? 7);
+      const threshold = Math.floor(Date.now() / 1000) - retentionDays * 86400;
+      for (let index = mockTrash.length - 1; index >= 0; index -= 1) {
+        if ((mockTrash[index].deletedAt ?? 0) < threshold) mockTrash.splice(index, 1);
+      }
+      return 0 as T;
     }
     case "list_tags":
       return mockTags.map((tag) => ({ ...tag })) as T;
