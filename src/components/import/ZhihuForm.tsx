@@ -1,4 +1,4 @@
-import { ClipboardPaste, LoaderCircle, RefreshCcw } from "lucide-react";
+import { ClipboardPaste, FolderDown, LoaderCircle, RefreshCcw } from "lucide-react";
 import type { BilibiliProfile, CollectionInfo } from "../../types";
 import { api } from "../../lib/api";
 
@@ -19,12 +19,15 @@ interface ZhihuFormProps {
   setParsedCollection: (c: CollectionInfo | null) => void;
   loadCollections: () => Promise<void>;
   parseUrl: () => Promise<void>;
+  onPreviewFavorites: () => Promise<void>;
+  onPreviewPublic: () => Promise<void>;
 }
 
 export function ZhihuForm({
   busy, setError, setLoginBusy, profile, setProfile, collections, setCollections,
   selectedCollectionId, setSelectedCollectionId, publicUrl, setPublicUrl,
   parsedCollection, loadCollections, parseUrl,
+  onPreviewFavorites, onPreviewPublic,
 }: ZhihuFormProps) {
   return (
     <div className="login-block">
@@ -89,6 +92,13 @@ export function ZhihuForm({
           <RefreshCcw size={15} /> 刷新收藏夹
         </button>
       )}
+      {profile?.isLogin && (
+        <button className="primary-button wide" type="button" onClick={onPreviewFavorites}
+          disabled={busy || !selectedCollectionId}>
+          {busy ? <LoaderCircle className="spin" size={17} /> : <FolderDown size={17} />}
+          预览并配置标签（登录收藏夹）
+        </button>
+      )}
 
       <div className="import-section-divider" />
       <label className="field-label">或者粘贴收藏夹链接</label>
@@ -104,6 +114,10 @@ export function ZhihuForm({
           <strong>{parsedCollection.title}</strong>
           <span>{parsedCollection.owner || "公开用户"}</span>
           <span>{parsedCollection.count} 条</span>
+          <button className="primary-button wide" type="button" onClick={onPreviewPublic} disabled={busy}>
+            {busy ? <LoaderCircle className="spin" size={17} /> : <FolderDown size={17} />}
+            预览并配置标签（公开链接）
+          </button>
         </div>
       )}
     </div>

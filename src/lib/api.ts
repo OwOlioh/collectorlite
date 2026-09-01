@@ -238,16 +238,21 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
           { name: "科技", count: 1, selected: true }
         ]
       } as T;
-    case "execute_import":
+    case "execute_import": {
+      // 尊重白名单：仅导入 itemTagAssignments 中的项（与真实后端一致）
+      const assignments = (args?.input as { itemTagAssignments?: unknown[] } | undefined)
+        ?.itemTagAssignments as unknown[] | undefined;
+      const count = assignments && assignments.length > 0 ? assignments.length : mockItems.length;
       return {
         runId: 1,
-        total: mockItems.length,
-        imported: mockItems.length,
+        total: count,
+        imported: count,
         skipped: 0,
         failed: 0,
         cleanupStatus: "pending",
         errors: []
       } as T;
+    }
     case "search_items":
       return mockItems.map((item) => ({
         ...item,
@@ -532,16 +537,21 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
         ],
         partitionSuggestions: []
       } as T;
-    case "execute_csdn_import":
+    case "execute_csdn_import": {
+      // 尊重白名单：仅导入 itemTagAssignments 中的项
+      const assignments = (args?.input as { itemTagAssignments?: unknown[] } | undefined)
+        ?.itemTagAssignments as unknown[] | undefined;
+      const count = assignments && assignments.length > 0 ? assignments.length : 2;
       return {
         runId: 1,
-        total: 2,
-        imported: 2,
+        total: count,
+        imported: count,
         skipped: 0,
         failed: 0,
         cleanupStatus: undefined,
         errors: []
       } as T;
+    }
     case "list_github_stars":
       return [
         {
@@ -599,15 +609,20 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
         ],
         partitionSuggestions: []
       } as T;
-    case "execute_github_import":
+    case "execute_github_import": {
+      // 尊重白名单：仅导入 itemTagAssignments 中的项
+      const assignments = (args?.input as { itemTagAssignments?: unknown[] } | undefined)
+        ?.itemTagAssignments as unknown[] | undefined;
+      const count = assignments && assignments.length > 0 ? assignments.length : 2;
       return {
         runId: 1,
-        total: 2,
-        imported: 2,
+        total: count,
+        imported: count,
         skipped: 0,
         failed: 0,
         errors: []
       } as T;
+    }
     case "export_collection": {
       const exportObj = {
         formatVersion: 1,
@@ -657,6 +672,116 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
     case "save_export_file":
       // 浏览器 mock 环境没有系统对话框，退化为触发下载并返回一个示意路径
       return "已保存（示例路径）" as T;
+    // ── 知乎 mock（浏览器模式开发时能跑通完整导入流程） ──
+    case "zhihu_set_cookie":
+      return null as T;
+    case "zhihu_logout":
+      return null as T;
+    case "zhihu_profile":
+      return { isLogin: true, name: "示例知乎用户", face: null, mid: null } as T;
+    case "zhihu_browser_login":
+      return { isLogin: true, name: "示例知乎用户", face: null, mid: null } as T;
+    case "list_zhihu_collections":
+      return [
+        {
+          source: "zhihu",
+          id: "128593041",
+          title: "默认收藏夹",
+          owner: "示例知乎用户",
+          count: 2,
+          url: undefined
+        }
+      ] as T;
+    case "parse_zhihu_collection_url": {
+      const url = String(args?.url ?? "");
+      return {
+        source: "zhihu",
+        id: "128593041",
+        title: url ? "知乎收藏夹" : "知乎收藏夹",
+        owner: "示例知乎用户",
+        count: 2,
+        url
+      } as T;
+    }
+    case "preview_zhihu_import":
+      return {
+        collection: {
+          source: "zhihu",
+          id: "128593041",
+          title: "默认收藏夹",
+          owner: "示例知乎用户",
+          count: 2,
+          url: undefined
+        },
+        items: [
+          {
+            id: -1,
+            source: "zhihu",
+            externalId: "zhihu-a1",
+            sourceUrl: "https://www.zhihu.com/question/1/answer/1001",
+            title: "如何系统地建立知识管理体系？",
+            description: "",
+            notes: undefined,
+            coverUrl: undefined,
+            coverLocalPath: undefined,
+            authorName: "知乎答主A",
+            authorId: undefined,
+            partitionName: undefined,
+            publishedAt: 1787700000,
+            duration: undefined,
+            favoriteTime: 1787700000,
+            tags: []
+          },
+          {
+            id: -2,
+            source: "zhihu",
+            externalId: "zhihu-a2",
+            sourceUrl: "https://www.zhihu.com/pin/2002",
+            title: "关于阅读与笔记的一些实践",
+            description: "",
+            notes: undefined,
+            coverUrl: undefined,
+            coverLocalPath: undefined,
+            authorName: "知乎答主B",
+            authorId: undefined,
+            partitionName: undefined,
+            publishedAt: 1787600000,
+            duration: undefined,
+            favoriteTime: 1787600000,
+            tags: []
+          }
+        ],
+        partitionSuggestions: []
+      } as T;
+    case "execute_zhihu_import": {
+      // 尊重白名单：仅导入 itemTagAssignments 中的项
+      const assignments = (args?.input as { itemTagAssignments?: unknown[] } | undefined)
+        ?.itemTagAssignments as unknown[] | undefined;
+      const count = assignments && assignments.length > 0 ? assignments.length : 2;
+      return {
+        runId: 1,
+        total: count,
+        imported: count,
+        skipped: 0,
+        failed: 0,
+        errors: []
+      } as T;
+    }
+    // ── 浏览器书签 mock ──
+    case "import_browser_bookmarks": {
+      const assignments = (args?.itemTagAssignments as unknown[] | undefined) ?? [];
+      const html = String(args?.htmlContent ?? "");
+      const estimated = html.match(/<a\s/gi)?.length ?? 0;
+      const count = assignments.length > 0 ? assignments.length : estimated;
+      return {
+        runId: 1,
+        total: count,
+        imported: count,
+        skipped: 0,
+        failed: 0,
+        errors: []
+      } as T;
+    }
     default:
       return null as T;
   }

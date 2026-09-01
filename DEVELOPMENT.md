@@ -236,6 +236,39 @@ const [zhihuCollections, setZhihuCollections] = useState(...);
 
 `AppError::AuthRequired` 的 Display 消息已改为通用 `"需要登录后才能获取内容，请先登录"`，不再写死"B站"。
 
+### 3.11 双入口来源的「预览并配置标签」按钮必须拆分
+
+**问题背景**：B站、知乎、CSDN 都有两种导入入口——「登录/用户名收藏夹」和「粘贴公开链接」。某来源同时实现了这两种入口时，若共用同一个「预览并配置标签」按钮，前端只能用 `!parsedCollection` 这类布尔去**推导**本次该走 favorites 还是 public_url。一旦用户既登录又解析了链接，`parsedCollection` 为真，推导永远倒向公开链接，登录收藏夹的选择被覆盖，两种方式互相串味、无法独立切换。
+
+**正确做法**：在用户**点击预览的那一刻就把选择固化下来**，执行阶段只认这个固化值。
+
+1. **定义共享类型**（放在 `ImportPage.tsx` 顶部）：
+   ```ts
+   type ImportChoice = {
+     kind: "favorites" | "public_url";
+     mediaId?: string;
+     url?: string;
+   };
+   ```
+2. **每个来源一个 stored-choice 状态**（B站/知乎/CSDN 各一个，互不复用，避免状态串味）：
+   ```ts
+   const [biliImportInput, setBiliImportInput] = useState<ImportChoice | null>(null);
+   const [zhihuImportInput, setZhihuImportInput] = useState<ImportChoice | null>(null);
+   const [csdnImportInput, setCsdnImportInput] = useState<ImportChoice | null>(null);
+   ```
+3. **每个来源两个独立预览入口**（固化选择后进入 tags 步骤）：
+   - `startXxxFavoritesPreview`：`kind: "favorites"`、`mediaId: selectedCollectionId`、`url: undefined`。
+   - `startXxxPublicPreview`：`kind: "public_url"`、`mediaId: undefined`、`url: publicUrl.trim()`。
+   - 两个函数都先 `setXxxImportInput({...})` 再 `setPreview(next)`、`setStep("tags")`，并对空输入做 `setError` 兜底。
+4. **`buildImportInput` 优先用 stored choice**：对每个来源，先 `if (isXxx && xxxImportInput) { return { apiCall: () => api.executeXxxImport({kind, mediaId, url, itemTagAssignments: assignments}) }; }`；只在无 stored choice 时（如 GitHub、浏览器）才回退到旧推导逻辑。
+5. **返回/完成时清空**：在 `TagEditor` 的 `onBack` 和导入完成 `handleResult` 的 `setTimeout` 里，把三个 `setXxxImportInput(null)`，防止上一次选择残留串到下一次导入。
+6. **隐藏通用按钮**：渲染处通用「预览并配置标签」按钮的显示条件要排除已拆分的来源（B站、知乎、CSDN 各 mode），仅保留给 GitHub、浏览器这类单入口来源。
+7. **表单组件加两个 prop**：`{Source}Form.tsx` 接收 `onPreviewFavorites` / `onPreviewPublic`，分别在「登录/用户名收藏夹」区（已选收藏夹时）和「公开链接」解析卡片内各放一个**独立**的 `预览并配置标签（xxx 收藏夹）` / `（公开链接）` 按钮，文案与 B站保持一致；公开链接按钮无需登录即可用。
+
+**适用范围**：以后新增来源若同样有「登录 + 公开链接」双入口（例如网易云音乐收藏可能既有登录歌单也有公开歌单链接），务必沿用上述模式，不要回到「单按钮 + 布尔推导」的旧做法。
+
+**验证**：`tsc --noEmit` 通过、`vite build` 成功即可；真机 `cargo run` + `npm run dev`，两种入口各点各的按钮验证互不干扰。
+
 ---
 
 ## 四、新增来源检查清单
@@ -247,6 +280,7 @@ const [zhihuCollections, setZhihuCollections] = useState(...);
 - [ ] 添加 Tauri 命令（登录、列表、预览、执行）
 - [ ] 前端 `types.ts` 添加 `ImportMode`、`api.ts` 添加方法
 - [ ] 前端 `ImportPage.tsx` 添加来源卡片 + 表单
+- [ ] 若来源同时有「登录/用户名收藏夹」与「公开链接」两个入口，按 3.11 拆成两个独立「预览并配置标签」按钮（固化 `ImportChoice`，不要用单按钮 + 布尔推导）
 - [ ] 前端 `LibraryPage.tsx` 添加来源筛选按钮
 - [ ] `cargo check` + `cargo test` + `npm build` 全部通过
 - [ ] 测试登录态持久化（重启应用后是否自动恢复）

@@ -1,5 +1,5 @@
 import { QRCodeSVG } from "qrcode.react";
-import { ClipboardPaste, LoaderCircle, LogIn, RefreshCcw } from "lucide-react";
+import { ClipboardPaste, FolderDown, LoaderCircle, LogIn, RefreshCcw } from "lucide-react";
 import type { BilibiliProfile, CollectionInfo, QrSession } from "../../types";
 import { api } from "../../lib/api";
 
@@ -24,12 +24,15 @@ interface BilibiliFormProps {
   loadCollections: () => Promise<void>;
   startQr: () => Promise<void>;
   parsePublic: () => Promise<void>;
+  onPreviewFavorites: () => Promise<void>;
+  onPreviewPublic: () => Promise<void>;
 }
 
 export function BilibiliForm({
   busy, profile, setProfile, collections, setCollections,
   selectedCollectionId, setSelectedCollectionId, publicUrl, setPublicUrl,
   parsedCollection, qr, loginBusy, startQr, parsePublic, loadCollections,
+  onPreviewFavorites, onPreviewPublic,
 }: BilibiliFormProps) {
   return (
     <div className="login-block">
@@ -82,12 +85,19 @@ export function BilibiliForm({
           <RefreshCcw size={15} /> 刷新收藏夹
         </button>
       )}
+      {profile?.isLogin && (
+        <button className="primary-button wide" type="button" onClick={onPreviewFavorites}
+          disabled={busy || !selectedCollectionId}>
+          {busy ? <LoaderCircle className="spin" size={17} /> : <FolderDown size={17} />}
+          预览并配置标签（登录收藏夹）
+        </button>
+      )}
 
       <div className="import-section-divider" />
       <label className="field-label">或者粘贴公开收藏夹链接</label>
       <div className="input-with-button">
         <input value={publicUrl} onChange={(e) => setPublicUrl(e.target.value)}
-          placeholder="https://space.bilibili.com/.../favlist?fid=..." />
+          placeholder="收藏夹/合集/系列链接，如 .../favlist?fid=... 或 .../channel/collectiondetail?sid=..." />
         <button className="secondary-button" type="button" onClick={parsePublic} disabled={busy}>
           <ClipboardPaste size={16} /> 解析
         </button>
@@ -97,6 +107,10 @@ export function BilibiliForm({
           <strong>{parsedCollection.title}</strong>
           <span>{parsedCollection.owner || "公开用户"}</span>
           <span>{parsedCollection.count} 条</span>
+          <button className="primary-button wide" type="button" onClick={onPreviewPublic} disabled={busy}>
+            {busy ? <LoaderCircle className="spin" size={17} /> : <FolderDown size={17} />}
+            预览并配置标签（公开链接）
+          </button>
         </div>
       )}
     </div>

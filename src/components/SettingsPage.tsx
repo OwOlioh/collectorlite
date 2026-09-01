@@ -123,33 +123,33 @@ export function SettingsPage({ onOpenTrash }: SettingsPageProps) {
             {recaching ? "缓存中..." : "重新缓存封面"}
           </button>
         </div>
-      </div>
 
-      <div className="settings-card">
-        <div className="settings-icon"><Trash2 size={20} /></div>
-        <div>
-          <h2>回收站</h2>
-          <p>删除的收藏会先进入回收站，超过下方保留期后将在应用启动时自动清除。</p>
-          <div className="theme-options">
-            {RETENTION_OPTIONS.map((days) => (
-              <button
-                key={days}
-                type="button"
-                className={`theme-opt ${retention === days ? "is-active" : ""}`}
-                onClick={() => {
-                  setRetention(days);
-                  setRetentionDays(days);
-                }}
-              >
-                {days} 天
-              </button>
-            ))}
+        <div className="settings-card">
+          <div className="settings-icon"><Trash2 size={20} /></div>
+          <div>
+            <h2>回收站</h2>
+            <p>删除的收藏会先进入回收站，超过下方保留期后将在应用启动时自动清除。</p>
+            <div className="theme-options">
+              {RETENTION_OPTIONS.map((days) => (
+                <button
+                  key={days}
+                  type="button"
+                  className={`theme-opt ${retention === days ? "is-active" : ""}`}
+                  onClick={() => {
+                    setRetention(days);
+                    setRetentionDays(days);
+                  }}
+                >
+                  {days} 天
+                </button>
+              ))}
+            </div>
           </div>
+          <button className="ghost-button" type="button" onClick={() => onOpenTrash?.()}>
+            <Trash2 size={16} />
+            打开回收站
+          </button>
         </div>
-        <button className="ghost-button" type="button" onClick={() => onOpenTrash?.()}>
-          <Trash2 size={16} />
-          打开回收站
-        </button>
       </div>
 
       <div className="privacy-note">

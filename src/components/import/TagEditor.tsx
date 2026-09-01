@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Check, ChevronLeft, ChevronRight, LoaderCircle, Undo2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Check, ChevronLeft, ChevronRight, LoaderCircle, RotateCcw, Trash2, Undo2 } from "lucide-react";
 import type { ImportPreview, ImportResult, ItemTagAssignment, Tag as AppTag, TagInput, TagNamespace, VideoItem } from "../../types";
 import { TagPoolInput } from "../TagPoolInput";
 import { api } from "../../lib/api";
@@ -54,13 +54,76 @@ export function TagEditor({ preview, tagPool, onTagsChanged, onBack, onExecute, 
   });
   const [currentPage, setCurrentPage] = useState(1);
   const [busy, setBusy] = useState(false);
+  const [selected, setSelected] = useState<Record<string, boolean>>({});
+  const [excluded, setExcluded] = useState<Record<string, boolean>>({});
   const { toast } = useToast();
 
-  const totalPages = Math.max(1, Math.ceil(preview.items.length / PAGE_SIZE));
-  const visibleItems = preview.items.slice(
-    (currentPage - 1) * PAGE_SIZE,
-    currentPage * PAGE_SIZE
+  const activeItems = useMemo(
+    () => preview.items.filter((item) => !excluded[item.externalId]),
+    [preview.items, excluded]
   );
+  const excludedCount = useMemo(
+    () => Object.values(excluded).filter(Boolean).length,
+    [excluded]
+  );
+  const totalPages = Math.max(1, Math.ceil(activeItems.length / PAGE_SIZE));
+  const safePage = Math.min(currentPage, totalPages);
+  const visibleItems = activeItems.slice(
+    (safePage - 1) * PAGE_SIZE,
+    safePage * PAGE_SIZE
+  );
+  const selectedCount = useMemo(
+    () => Object.values(selected).filter(Boolean).length,
+    [selected]
+  );
+  const allActiveSelected =
+    activeItems.length > 0 && activeItems.every((item) => selected[item.externalId]);
+
+  useEffect(() => {
+    if (currentPage > totalPages) setCurrentPage(totalPages);
+  }, [currentPage, totalPages]);
+
+  const toggleSelect = (externalId: string) =>
+    setSelected((current) => {
+      const next = { ...current };
+      if (next[externalId]) delete next[externalId];
+      else next[externalId] = true;
+      return next;
+    });
+
+  const toggleSelectAll = () => {
+    const next = !allActiveSelected;
+    setSelected((current) => {
+      const copy = { ...current };
+      activeItems.forEach((item) => {
+        if (next) copy[item.externalId] = true;
+        else delete copy[item.externalId];
+      });
+      return copy;
+    });
+  };
+
+  const removeSelected = () => {
+    setExcluded((current) => {
+      const next = { ...current };
+      Object.keys(selected).forEach((id) => {
+        if (selected[id]) next[id] = true;
+      });
+      return next;
+    });
+    setSelected({});
+  };
+
+  const removeItem = (externalId: string) => {
+    setExcluded((current) => ({ ...current, [externalId]: true }));
+    setSelected((current) => {
+      const next = { ...current };
+      delete next[externalId];
+      return next;
+    });
+  };
+
+  const restoreAll = () => setExcluded({});
 
   const updateVideoTag = (externalId: string, patch: Partial<PerVideoTagState>) => {
     setPerVideoTags((current) => ({
@@ -105,7 +168,7 @@ export function TagEditor({ preview, tagPool, onTagsChanged, onBack, onExecute, 
   };
 
   const execute = async () => {
-    const assignments: ItemTagAssignment[] = preview.items.map((item) => ({
+    const assignments: ItemTagAssignment[] = activeItems.map((item) => ({
       externalId: item.externalId,
       tagSpecs: buildTagSpecs(item, perVideoTags[item.externalId])
     }));
@@ -130,7 +193,11 @@ export function TagEditor({ preview, tagPool, onTagsChanged, onBack, onExecute, 
         </button>
         <div>
           <h2>{preview.collection.title}</h2>
-          <p>共 {preview.items.length} 条，当前第 {currentPage} / {totalPages} 页。</p>
+          <p>
+            共 {activeItems.length} 条
+            {excludedCount > 0 ? `（已排除 ${excludedCount} 条）` : ""}
+            ，当前第 {safePage} / {totalPages} 页。
+          </p>
         </div>
       </div>
 
@@ -174,12 +241,72 @@ export function TagEditor({ preview, tagPool, onTagsChanged, onBack, onExecute, 
         </div>
       </div>
 
-      <div className="per-video-tag-list">
+      <div className="selection-toolbar">
+        <label className="select-all-line">
+          <input
+            type="checkbox"
+            checked={allActiveSelected}
+            onChange={toggleSelectAll}
+          />
+          <span>全选</span>
+        </label>
+        <div className="bulk-actions">
+          <button
+            className="ghost-button"
+            type="button"
+            onClick={removeSelected}
+            disabled={selectedCount === 0}
+          >
+            <Trash2 size={15} />
+            移除选中（{selectedCount}）
+          </button>
+          {excludedCount > 0 && (
+            <button className="ghost-button" type="button" onClick={restoreAll}>
+              <RotateCcw size={15} />
+              恢复全部（{excludedCount}）
+            </button>
+          )}
+        </div>
+        {excludedCount > 0 && (
+          <span className="bulk-count">已排除 {excludedCount} 条，将不会导入</span>
+        )}
+      </div>
+
+      {activeItems.length === 0 ? (
+        <div className="empty-state">
+          <div className="empty-state-icon"><Trash2 size={22} /></div>
+          <h2>已全部移除</h2>
+          <p>当前没有可导入的项目。点击下方按钮可恢复全部。</p>
+          <button className="secondary-button" type="button" onClick={restoreAll}>
+            <RotateCcw size={15} /> 恢复全部
+          </button>
+        </div>
+      ) : (
+        <>
+          <div className="per-video-tag-list">
         {visibleItems.map((item) => {
           const state = perVideoTags[item.externalId];
           if (!state) return null;
           return (
             <article className="per-video-tag-card" key={item.externalId}>
+              <div className="per-video-tag-card-head">
+                <label className="compact-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={!!selected[item.externalId]}
+                    onChange={() => toggleSelect(item.externalId)}
+                  />
+                  <span>选择</span>
+                </label>
+                <button
+                  className="per-video-remove"
+                  type="button"
+                  title="移除（不导入此项）"
+                  onClick={() => removeItem(item.externalId)}
+                >
+                  <Trash2 size={15} />
+                </button>
+              </div>
               <div className="video-tag-summary">
                 <div className="preview-cover">
                   {item.coverUrl ? <img src={item.coverUrl} alt="" /> : <span>无封面</span>}
@@ -232,29 +359,31 @@ export function TagEditor({ preview, tagPool, onTagsChanged, onBack, onExecute, 
             </article>
           );
         })}
-      </div>
+          </div>
 
-      <div className="pagination-bar">
-        <button
-          className="ghost-button"
-          type="button"
-          disabled={currentPage <= 1}
-          onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
-        >
-          <ChevronLeft size={16} />
-          上一页
-        </button>
-        <span>{currentPage} / {totalPages}</span>
-        <button
-          className="ghost-button"
-          type="button"
-          disabled={currentPage >= totalPages}
-          onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
-        >
-          下一页
-          <ChevronRight size={16} />
-        </button>
-      </div>
+          <div className="pagination-bar">
+            <button
+              className="ghost-button"
+              type="button"
+              disabled={safePage <= 1}
+              onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+            >
+              <ChevronLeft size={16} />
+              上一页
+            </button>
+            <span>{safePage} / {totalPages}</span>
+            <button
+              className="ghost-button"
+              type="button"
+              disabled={safePage >= totalPages}
+              onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+            >
+              下一页
+              <ChevronRight size={16} />
+            </button>
+          </div>
+        </>
+      )}
 
       <div className="import-confirm-row">
         <button className="primary-button" type="button" onClick={execute} disabled={busy}>

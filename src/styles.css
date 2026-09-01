@@ -1515,6 +1515,47 @@ button,
   min-width: 0;
 }
 
+.per-video-tag-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: -2px;
+}
+
+.per-video-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background var(--transition-base), color var(--transition-base), border-color var(--transition-base);
+}
+
+.per-video-remove:hover {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: var(--danger);
+}
+
+.selection-toolbar .bulk-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.selection-toolbar .bulk-count {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+
 .existing-tag-picker {
   display: grid;
   gap: 7px;
@@ -2462,6 +2503,63 @@ textarea {
   resize: vertical;
   font: inherit;
   line-height: 1.65;
+}
+
+.note-mode-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.note-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color var(--transition-base), background var(--transition-base), color var(--transition-base);
+}
+
+.note-tab:hover {
+  border-color: var(--blue);
+  color: var(--text);
+}
+
+.note-tab.is-active {
+  border-color: var(--blue);
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.note-preview {
+  min-height: 320px;
+  max-height: 60vh;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-soft);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.note-link {
+  color: var(--blue);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.note-link:hover {
+  color: var(--blue-strong, var(--blue));
 }
 
 .video-note-editor-modal .primary-button {

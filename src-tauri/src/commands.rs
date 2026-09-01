@@ -291,7 +291,10 @@ pub async fn execute_import(
         .iter()
         .map(|assignment| (assignment.external_id.as_str(), &assignment.tag_specs))
         .collect::<HashMap<_, _>>();
-    let total = enriched.len() as i64;
+    // 前端「配置标签」步骤剔除的项不会进入 assignments：
+    // assignments 即为本次要导入的白名单（external_id 在其中的项才导入）；
+    // 白名单为空表示全部剔除，导入 0 条。
+    let total = assignments.len() as i64;
     let run_id = db::create_import_run(&state.pool, &collection, total, false)
         .await
         .map_err(|error| error.to_string())?;
@@ -301,6 +304,9 @@ pub async fn execute_import(
     let mut failed = 0i64;
     let mut errors = Vec::new();
     for item in &enriched {
+        if !assignments.contains_key(item.external_id.as_str()) {
+            continue; // 被前端剔除的项跳过，不导入
+        }
         let result = async {
             let (item_id, inserted) = db::upsert_item(&state.pool, item).await?;
             let tag_specs = assignments
@@ -588,7 +594,11 @@ pub async fn import_browser_bookmarks(
         .map(|a| (a.external_id.as_str(), a.tag_specs.as_slice()))
         .collect();
 
-    let run_id = db::create_import_run(&state.pool, &collection, total, false)
+    // 前端「配置标签」步骤剔除的项不会进入 item_tag_assignments：按白名单过滤导入项
+    // assignments 即导入白名单（为空表示全部剔除，导入 0 条）。
+    let import_total = assignments.len() as i64;
+
+    let run_id = db::create_import_run(&state.pool, &collection, import_total, false)
         .await
         .map_err(|error| error.to_string())?;
 
@@ -598,6 +608,9 @@ pub async fn import_browser_bookmarks(
     let mut errors = Vec::new();
 
     for item in &items {
+        if !assignments.contains_key(item.external_id.as_str()) {
+            continue; // 被前端剔除的项跳过，不导入
+        }
         let result = async {
             let (item_id, inserted) = db::upsert_item(&state.pool, item).await?;
             // Attach folder name tags from extra.folder_tags (each item only gets its own folders)
@@ -776,7 +789,8 @@ pub async fn execute_zhihu_import(
         .iter()
         .map(|a| (a.external_id.as_str(), &a.tag_specs))
         .collect::<HashMap<_, _>>();
-    let total = enriched.len() as i64;
+    // 前端「配置标签」步骤剔除的项不会进入 assignments：assignments 即导入白名单
+    let total = assignments.len() as i64;
     let run_id = db::create_import_run(&state.pool, &collection, total, false)
         .await
         .map_err(|e| e.to_string())?;
@@ -786,6 +800,9 @@ pub async fn execute_zhihu_import(
     let mut failed = 0i64;
     let mut errors = Vec::new();
     for item in &enriched {
+        if !assignments.contains_key(item.external_id.as_str()) {
+            continue; // 被前端剔除的项跳过，不导入
+        }
         let result = async {
             let (item_id, inserted) = db::upsert_item(&state.pool, item).await?;
             let tag_specs: &[TagInput] = assignments
@@ -936,7 +953,8 @@ pub async fn execute_csdn_import(
         .iter()
         .map(|a| (a.external_id.as_str(), &a.tag_specs))
         .collect::<HashMap<_, _>>();
-    let total = enriched.len() as i64;
+    // 前端「配置标签」步骤剔除的项不会进入 assignments：assignments 即导入白名单
+    let total = assignments.len() as i64;
     let run_id = db::create_import_run(&state.pool, &collection, total, false)
         .await
         .map_err(|e| e.to_string())?;
@@ -946,6 +964,9 @@ pub async fn execute_csdn_import(
     let mut failed = 0i64;
     let mut errors = Vec::new();
     for item in &enriched {
+        if !assignments.contains_key(item.external_id.as_str()) {
+            continue; // 被前端剔除的项跳过，不导入
+        }
         let result = async {
             let (item_id, inserted) = db::upsert_item(&state.pool, item).await?;
             let tag_specs: &[TagInput] = assignments
@@ -1076,7 +1097,8 @@ pub async fn execute_github_import(
         .iter()
         .map(|a| (a.external_id.as_str(), &a.tag_specs))
         .collect::<HashMap<_, _>>();
-    let total = enriched.len() as i64;
+    // 前端「配置标签」步骤剔除的项不会进入 assignments：assignments 即导入白名单
+    let total = assignments.len() as i64;
     let run_id = db::create_import_run(&state.pool, &collection, total, false)
         .await
         .map_err(|e| e.to_string())?;
@@ -1086,6 +1108,9 @@ pub async fn execute_github_import(
     let mut failed = 0i64;
     let mut errors = Vec::new();
     for item in &enriched {
+        if !assignments.contains_key(item.external_id.as_str()) {
+            continue; // 被前端剔除的项跳过，不导入
+        }
         let result = async {
             let (item_id, inserted) = db::upsert_item(&state.pool, item).await?;
             let tag_specs: &[TagInput] = assignments

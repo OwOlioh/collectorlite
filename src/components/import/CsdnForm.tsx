@@ -1,4 +1,4 @@
-import { ClipboardPaste, LoaderCircle, RefreshCcw } from "lucide-react";
+import { ClipboardPaste, FolderDown, LoaderCircle, RefreshCcw } from "lucide-react";
 import type { CollectionInfo } from "../../types";
 
 interface CsdnFormProps {
@@ -13,12 +13,15 @@ interface CsdnFormProps {
   parsedCollection: CollectionInfo | null;
   onLoadCollections: () => void;
   onParseUrl: () => void;
+  onPreviewFavorites: () => Promise<void>;
+  onPreviewPublic: () => Promise<void>;
 }
 
 export function CsdnForm({
   busy, username, setUsername, collections, selectedCollectionId,
   setSelectedCollectionId, publicUrl, setPublicUrl, parsedCollection,
   onLoadCollections, onParseUrl,
+  onPreviewFavorites, onPreviewPublic,
 }: CsdnFormProps) {
   return (
     <div className="login-block">
@@ -57,6 +60,13 @@ export function CsdnForm({
           <RefreshCcw size={15} /> 刷新收藏夹
         </button>
       )}
+      {collections.length > 0 && (
+        <button className="primary-button wide" type="button" onClick={onPreviewFavorites}
+          disabled={busy || !selectedCollectionId}>
+          {busy ? <LoaderCircle className="spin" size={17} /> : <FolderDown size={17} />}
+          预览并配置标签（用户名收藏夹）
+        </button>
+      )}
 
       <div className="import-section-divider" />
       <label className="field-label">或者粘贴收藏夹链接</label>
@@ -72,6 +82,10 @@ export function CsdnForm({
           <strong>{parsedCollection.title}</strong>
           <span>{parsedCollection.owner || "公开用户"}</span>
           <span>{parsedCollection.count} 条</span>
+          <button className="primary-button wide" type="button" onClick={onPreviewPublic} disabled={busy}>
+            {busy ? <LoaderCircle className="spin" size={17} /> : <FolderDown size={17} />}
+            预览并配置标签（公开链接）
+          </button>
         </div>
       )}
     </div>
