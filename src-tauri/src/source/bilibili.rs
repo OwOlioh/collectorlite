@@ -764,27 +764,85 @@ fn parse_public_favorite_url(value: &str) -> Result<ParsedBiliUrl, AppError> {
         .and_then(|mut segments| segments.next())
         .and_then(|segment| segment.parse::<i64>().ok())
         .ok_or_else(|| AppError::InvalidInput("链接中缺少用户 MID".into()))?;
-    // 区分收藏夹 / 合集 / 系列三种路径
+
     let path = url.path().to_string();
-    let collection_type = if path.contains("collectiondetail") {
-        "bili_heji"
-    } else if path.contains("seriesdetail") {
-        "bili_series"
-    } else {
-        "bili_fav"
-    };
-    let id = url
+    let pairs: Vec<(String, String)> = url
         .query_pairs()
-        .find(|(key, _)| key == "fid" || key == "sid")
-        .map(|(_, value)| value.into_owned())
-        .ok_or_else(|| {
-            AppError::InvalidInput("链接中缺少收藏夹 fid 或合集/系列 sid".into())
-        })?;
-    Ok(ParsedBiliUrl {
-        mid,
-        id,
-        collection_type: collection_type.to_string(),
-    })
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    let get = |key: &str| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+
+    // 1) 新版合集/系列：/lists/{id}?type=season|series （V6.39+ 空间页默认形态）
+    if path.contains("/lists/") {
+        // 取 /lists/ 后的第一段作为 id，截掉可能的 ?query 或 / 后缀
+        let after = path.split("/lists/").nth(1).unwrap_or("");
+        let id = after.split(['?', '/']).next().unwrap_or(after).to_string();
+        if id.is_empty() {
+            return Err(AppError::InvalidInput("链接中缺少合集/系列 id".into()));
+        }
+        let collection_type = match get("type").as_deref() {
+            Some("series") => "bili_series",
+            _ => "bili_heji", // type=season 或省略均视为合集
+        };
+        return Ok(ParsedBiliUrl {
+            mid,
+            id,
+            collection_type: collection_type.to_string(),
+        });
+    }
+
+    // 2) 旧版合集/系列：channel/collectiondetail?sid= | channel/seriesdetail?sid=
+    if path.contains("collectiondetail") {
+        let id = get("sid")
+            .ok_or_else(|| AppError::InvalidInput("链接中缺少合集 sid".into()))?;
+        return Ok(ParsedBiliUrl {
+            mid,
+            id,
+            collection_type: "bili_heji".into(),
+        });
+    }
+    if path.contains("seriesdetail") {
+        let id = get("sid")
+            .ok_or_else(|| AppError::InvalidInput("链接中缺少系列 sid".into()))?;
+        return Ok(ParsedBiliUrl {
+            mid,
+            id,
+            collection_type: "bili_series".into(),
+        });
+    }
+
+    // 3) 收藏夹（含「被收藏的合集」ftype=collect / ctype=21）
+    if path.contains("favlist") {
+        let is_collected_heji =
+            get("ftype").as_deref() == Some("collect") || get("ctype").as_deref() == Some("21");
+        let id = get("fid")
+            .ok_or_else(|| AppError::InvalidInput("链接中缺少收藏夹 fid".into()))?;
+        // 「被收藏的合集」其 fid 实为底层合集的 season_id，须走 heji 路径而非普通收藏夹
+        // （B站 season_id 与 media_id 是两套独立命名空间，同名数字指向不同内容）
+        let collection_type = if is_collected_heji {
+            "bili_heji"
+        } else {
+            "bili_fav"
+        };
+        return Ok(ParsedBiliUrl {
+            mid,
+            id,
+            collection_type: collection_type.to_string(),
+        });
+    }
+
+    // 4) 兜底：尝试从 fid/sid 解析为普通收藏夹
+    if let Some(id) = get("fid").or_else(|| get("sid")) {
+        return Ok(ParsedBiliUrl {
+            mid,
+            id,
+            collection_type: "bili_fav".into(),
+        });
+    }
+
+    Err(AppError::InvalidInput(
+        "无法识别的 B 站链接类型（需为收藏夹/合集/系列）".into(),
+    ))
 }
 
 /// 从收藏夹 media 的 `link` 跳转 uri 解析出 (external_id, source_url)。
@@ -874,6 +932,41 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.id, "67890");
         assert_eq!(parsed.collection_type, "bili_series");
+    }
+
+    // 新版空间页合集：/lists/{id}?type=season（id 在路径段，不在 ?sid=）
+    #[test]
+    fn parses_public_lists_heji_url() {
+        let parsed = parse_public_favorite_url(
+            "https://space.bilibili.com/170122257/lists/429082?type=season",
+        )
+        .unwrap();
+        assert_eq!(parsed.mid, 170122257);
+        assert_eq!(parsed.id, "429082");
+        assert_eq!(parsed.collection_type, "bili_heji");
+    }
+
+    // 新版空间页系列：/lists/{id}?type=series
+    #[test]
+    fn parses_public_lists_series_url() {
+        let parsed = parse_public_favorite_url(
+            "https://space.bilibili.com/170122257/lists/123456?type=series",
+        )
+        .unwrap();
+        assert_eq!(parsed.id, "123456");
+        assert_eq!(parsed.collection_type, "bili_series");
+    }
+
+    // 收藏页复制的「被收藏的合集」：fid 实为底层合集的 season_id，须走 heji 路径
+    #[test]
+    fn parses_public_collected_heji_url() {
+        let parsed = parse_public_favorite_url(
+            "https://space.bilibili.com/3546659524970809/favlist?fid=429082&ftype=collect&ctype=21",
+        )
+        .unwrap();
+        assert_eq!(parsed.mid, 3546659524970809);
+        assert_eq!(parsed.id, "429082");
+        assert_eq!(parsed.collection_type, "bili_heji");
     }
 
     // 图文/音频/专栏等非视频项：从收藏夹 media 的 `link` 字段解析出 (external_id, source_url)
