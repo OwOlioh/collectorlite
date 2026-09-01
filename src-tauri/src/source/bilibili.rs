@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE, COOKIE, REFERER, USER_AGENT};
+use reqwest::Proxy;
 use serde_json::{json, Value};
 use url::Url;
 
@@ -25,15 +26,80 @@ pub struct BilibiliClient {
 
 impl BilibiliClient {
     pub fn new() -> Result<Self, AppError> {
-        let http = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
-            .redirect(reqwest::redirect::Policy::limited(5))
-            .build()?;
+            .redirect(reqwest::redirect::Policy::limited(5));
+        // reqwest 默认不读 Windows 注册表代理；中国大陆用户常靠本地代理（如 Clash）出网，
+        // 直连出口易被 B 站风控返回 -400。这里优先用环境变量代理，否则回退到注册表代理。
+        let env_proxy = std::env::var_os("HTTPS_PROXY")
+            .or_else(|| std::env::var_os("HTTP_PROXY"))
+            .or_else(|| std::env::var_os("https_proxy"))
+            .or_else(|| std::env::var_os("http_proxy"));
+        if let Some(value) = env_proxy {
+            if let Ok(url) = value.into_string() {
+                if !url.is_empty() {
+                    if let Ok(proxy) = Proxy::all(&url) {
+                        builder = builder.proxy(proxy);
+                    }
+                }
+            }
+        } else {
+            #[cfg(windows)]
+            if let Some(proxy) = Self::windows_registry_proxy() {
+                builder = builder.proxy(proxy);
+            }
+        }
+        let http = builder.build()?;
         Ok(Self {
             http,
             cookie: RwLock::new(None),
             wbi_keys: RwLock::new(None),
         })
+    }
+
+    /// 读取 Windows 注册表中的系统代理（HKCU\...\Internet Settings\ProxyServer）。
+    /// 仅当 ProxyEnable=1 时返回代理；格式兼容 `http=host:port;https=host:port` 或裸 `host:port`。
+    #[cfg(windows)]
+    fn windows_registry_proxy() -> Option<Proxy> {
+        use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
+        let hkcu = winreg::RegKey::predef(HKEY_CURRENT_USER);
+        let settings = hkcu
+            .open_subkey_with_flags(
+                "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+                KEY_READ,
+            )
+            .ok()?;
+        let enabled: u32 = settings.get_value("ProxyEnable").ok()?;
+        if enabled == 0 {
+            return None;
+        }
+        let server: String = settings.get_value("ProxyServer").ok()?;
+        let url = Self::parse_proxy_server(&server)?;
+        Proxy::all(&url).ok()
+    }
+
+    #[cfg(windows)]
+    fn parse_proxy_server(server: &str) -> Option<String> {
+        let mut http: Option<String> = None;
+        let mut https: Option<String> = None;
+        for part in server.split(';') {
+            if let Some((scheme, addr)) = part.split_once('=') {
+                match scheme.to_lowercase().as_str() {
+                    "http" => http = Some(addr.to_string()),
+                    "https" => https = Some(addr.to_string()),
+                    _ => {}
+                }
+            } else if !part.is_empty() {
+                http = Some(part.to_string());
+                https = Some(part.to_string());
+            }
+        }
+        let addr = http.or(https)?;
+        if addr.starts_with("http://") || addr.starts_with("https://") {
+            Some(addr)
+        } else {
+            Some(format!("http://{addr}"))
+        }
     }
 
     pub fn set_cookie(&self, cookie: Option<String>) {
