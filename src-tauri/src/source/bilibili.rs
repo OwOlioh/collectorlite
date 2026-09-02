@@ -827,6 +827,7 @@ impl BilibiliClient {
     ) -> Result<Vec<ExternalItem>, AppError> {
         let mut items = Vec::new();
         let mut page = 1;
+        let mut fetched = 0usize;
         loop {
             let value = self
                 .get_json(
@@ -950,11 +951,21 @@ impl BilibiliClient {
                     });
                 }
             }
-            if medias.len() < 20 {
+            fetched += medias.len();
+            // 终止条件：返回空页，或已拉取到接口声明的 media_count 上限。
+            // 注意首屏可能少于 ps 条（实测某 946 项收藏夹第一页仅返回 18 条），
+            // 不能用「< ps 即末页」判断，否则会静默漏掉后续所有页（大量项丢失）。
+            let media_count = data
+                .get("info")
+                .and_then(Value::as_object)
+                .and_then(|info| info.get("media_count"))
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            if media_count > 0 && (fetched as i64) >= media_count {
                 break;
             }
             page += 1;
-            if page > 100 {
+            if page > 1000 {
                 break;
             }
         }
@@ -1035,11 +1046,10 @@ impl BilibiliClient {
                     extra: json!({ "avid": aid, "page": 1 }),
                 });
             }
-            if archives.len() < 20 {
-                break;
-            }
+            // 不再用「< ps 即末页」判断（首屏可能少于 ps 条导致漏页）；
+            // 改为遇到空页才终止，并在页码上限处兜底，避免合集/系列大列表静默截断。
             page += 1;
-            if page > 100 {
+            if page > 200 {
                 break;
             }
         }
@@ -1457,5 +1467,153 @@ mod tests {
         assert!(parse_opus_pub_time(Some(&json!("2024-11-14"))).is_some());
         // 空值 → None
         assert_eq!(parse_opus_pub_time(None), None);
+    }
+
+    /// 真实环境性能基准（默认忽略，需 `--ignored` 才运行）：
+    /// 对当前登录用户**最大的视频收藏夹**实跑优化后的 fetch_collection + enrich_items + 封面下载，
+    /// 分相计时，并打印「串行旧版」在同样数据上的实测对照，用于校准 perf 估算。
+    #[tokio::test]
+    #[ignore]
+    async fn bench_real_import() {
+        use std::time::Instant;
+        use futures::future::join_all;
+        use crate::source::SourceAdapter;
+
+        // 1) 读取本机登录 cookie（与 app 共用同一文件）
+        let app_data = std::env::var("APPDATA").expect("APPDATA 未设置");
+        let cookie_path = std::path::Path::new(&app_data)
+            .join("com.local.bili-collector")
+            .join("bilibili_cookie.txt");
+        let cookie = std::fs::read_to_string(&cookie_path)
+            .expect("读取 bilibili_cookie.txt 失败（请先在 app 内登录）");
+        let cookie = cookie.trim().to_string();
+
+        let client = BilibiliClient::new().expect("BilibiliClient::new 失败");
+        client.set_cookie(Some(cookie));
+
+        // 2) 列出收藏夹，挑 count 最大的普通视频收藏夹
+        let collections = client.list_own_favorites().await.expect("列出收藏夹失败");
+        assert!(!collections.is_empty(), "当前账号没有收藏夹");
+        eprintln!("[bench] 收藏夹列表（按条数降序）：");
+        let mut sorted = collections.clone();
+        sorted.sort_by(|a, b| b.count.cmp(&a.count));
+        for c in &sorted {
+            eprintln!("[bench]   - id={} count={} title={:?}", c.id, c.count, c.title);
+        }
+        let target = sorted
+            .iter()
+            .find(|c| c.count > 0)
+            .expect("没有非空收藏夹")
+            .clone();
+        eprintln!(
+            "[bench] 选中测试收藏夹：id={} count={} title={:?}",
+            target.id, target.count, target.title
+        );
+
+        // 3) fetch_collection（分页拉取）
+        let t0 = Instant::now();
+        let items = client
+            .fetch_collection(&target)
+            .await
+            .expect("fetch_collection 失败");
+        let fetch_dur = t0.elapsed();
+        eprintln!(
+            "[bench] fetch_collection: {} 条, 用时 {:?}",
+            items.len(),
+            fetch_dur
+        );
+
+        // 4) enrich_items（优化后：有界并发 ENRICH_CONCURRENCY=6，无 180ms 硬等）
+        let t1 = Instant::now();
+        let _enriched = client
+            .enrich_items(&items)
+            .await
+            .expect("enrich_items 失败");
+        let enrich_dur = t1.elapsed();
+        let bv_count = items
+            .iter()
+            .filter(|i| i.external_id.starts_with("BV"))
+            .count();
+        eprintln!(
+            "[bench] enrich_items: 视频项 {}（总 {}）, 用时 {:?}",
+            bv_count,
+            items.len(),
+            enrich_dur
+        );
+
+        // 5) 封面下载（并发 COVER_CONCURRENCY=8，保留离线 covers/ 行为）
+        let cover_items: Vec<_> = _enriched
+            .iter()
+            .filter(|i| i.cover_url.as_deref().filter(|u| !u.is_empty()).is_some())
+            .collect();
+        let t2 = Instant::now();
+        let mut downloaded = 0u32;
+        for chunk in cover_items.chunks(8) {
+            let futs: Vec<_> = chunk
+                .iter()
+                .map(|item| async {
+                    client
+                        .download_cover(item.cover_url.as_deref().unwrap())
+                        .await
+                        .is_ok()
+                })
+                .collect();
+            for ok in join_all(futs).await {
+                if ok {
+                    downloaded += 1;
+                }
+            }
+        }
+        let cover_dur = t2.elapsed();
+        eprintln!(
+            "[bench] 封面下载：成功 {} / 需下载 {}, 用时 {:?}",
+            downloaded,
+            cover_items.len(),
+            cover_dur
+        );
+
+        let total = fetch_dur + enrich_dur + cover_dur;
+        eprintln!(
+            "[bench] 优化后单趟（fetch+enrich+cover）合计 {:?}（{} 条）",
+            total,
+            items.len()
+        );
+
+        // 6) 串行旧版对照：取前 50 个视频项，串行 + 每条约 180ms 硬等，测真实耗时并外推
+        let sample: Vec<_> = items
+            .iter()
+            .filter(|i| i.external_id.starts_with("BV"))
+            .take(50)
+            .collect();
+        let t3 = Instant::now();
+        for item in &sample {
+            let _ = client
+                .get_json(
+                    "https://api.bilibili.com/x/web-interface/view",
+                    vec![("bvid".into(), item.external_id.clone())],
+                    true,
+                )
+                .await;
+            tokio::time::sleep(std::time::Duration::from_millis(180)).await;
+        }
+        let serial_sample_dur = t3.elapsed();
+        let per_item_serial = serial_sample_dur / sample.len() as u32;
+        let old_enrich_est = per_item_serial * bv_count as u32;
+        eprintln!(
+            "[bench] 串行旧版样本：{} 条用时 {:?} → 单项 ~{:?}；外推全量 {} 视频项约 {:?}",
+            sample.len(),
+            serial_sample_dur,
+            per_item_serial,
+            bv_count,
+            old_enrich_est
+        );
+
+        eprintln!(
+            "[bench] 结论：优化后 enrich 单项约 {:?}（并发6，无硬等），旧版约 {:?}（含180ms硬等 + 串行）；\
+             满收藏夹经缓存复用后 execute 阶段可省掉一整趟 fetch+enrich（约 {:?}）",
+            enrich_dur / bv_count.max(1) as u32,
+            per_item_serial,
+            fetch_dur + enrich_dur
+        );
     }
 }
