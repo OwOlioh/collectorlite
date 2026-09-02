@@ -41,6 +41,8 @@ export const api = {
   logout: () => call<null>("logout"),
   listBilibiliFavorites: () =>
     call<CollectionInfo[]>("list_bilibili_favorites"),
+  listBilibiliOpusFavorite: () =>
+    call<CollectionInfo>("list_bilibili_opus_favorite"),
   parsePublicFavoriteUrl: (url: string) =>
     call<CollectionInfo>("parse_public_favorite_url", { url }),
   previewImport: (request: ImportRequest) =>
@@ -218,6 +220,15 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
       return null as T;
     case "list_bilibili_favorites":
       return mockCollections as T;
+    case "list_bilibili_opus_favorite":
+      return {
+        source: "bilibili",
+        id: "bili_opus_fav",
+        title: "图文收藏",
+        owner: "测试用户",
+        count: 3,
+        url: "https://space.bilibili.com/0/favlist?fid=opus&ftype=opus"
+      } as T;
     case "parse_public_favorite_url": {
       const url = String(args?.url ?? "");
       return {

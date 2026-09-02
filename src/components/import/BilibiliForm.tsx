@@ -26,13 +26,15 @@ interface BilibiliFormProps {
   parsePublic: () => Promise<void>;
   onPreviewFavorites: () => Promise<void>;
   onPreviewPublic: () => Promise<void>;
+  onPreviewOpus: () => Promise<void>;
+  opusFavorite: CollectionInfo | null;
 }
 
 export function BilibiliForm({
   busy, profile, setProfile, collections, setCollections,
   selectedCollectionId, setSelectedCollectionId, publicUrl, setPublicUrl,
   parsedCollection, qr, loginBusy, startQr, parsePublic, loadCollections,
-  onPreviewFavorites, onPreviewPublic,
+  onPreviewFavorites, onPreviewPublic, onPreviewOpus, opusFavorite,
 }: BilibiliFormProps) {
   return (
     <div className="login-block">
@@ -85,12 +87,24 @@ export function BilibiliForm({
           <RefreshCcw size={15} /> 刷新收藏夹
         </button>
       )}
-      {profile?.isLogin && (
-        <button className="primary-button wide" type="button" onClick={onPreviewFavorites}
-          disabled={busy || !selectedCollectionId}>
-          {busy ? <LoaderCircle className="spin" size={17} /> : <FolderDown size={17} />}
-          预览并配置标签（登录收藏夹）
-        </button>
+
+      <button className="primary-button wide" type="button" onClick={onPreviewFavorites}
+        disabled={!profile?.isLogin || !selectedCollectionId || busy}>
+        {busy ? <LoaderCircle className="spin" size={17} /> : <FolderDown size={17} />}
+        预览并配置标签（登录收藏夹）
+      </button>
+
+      {profile?.isLogin && opusFavorite && opusFavorite.count > 0 && (
+        <div className="opus-fav-block">
+          <div className="opus-fav-line">
+            <span className="opus-fav-title">图文收藏</span>
+            <span className="opus-fav-count">{opusFavorite.count} 条</span>
+          </div>
+          <button className="primary-button wide" type="button" onClick={onPreviewOpus} disabled={busy}>
+            {busy ? <LoaderCircle className="spin" size={17} /> : <FolderDown size={17} />}
+            预览并配置标签（图文收藏）
+          </button>
+        </div>
       )}
 
       <div className="import-section-divider" />
@@ -107,12 +121,14 @@ export function BilibiliForm({
           <strong>{parsedCollection.title}</strong>
           <span>{parsedCollection.owner || "公开用户"}</span>
           <span>{parsedCollection.count} 条</span>
-          <button className="primary-button wide" type="button" onClick={onPreviewPublic} disabled={busy}>
-            {busy ? <LoaderCircle className="spin" size={17} /> : <FolderDown size={17} />}
-            预览并配置标签（公开链接）
-          </button>
         </div>
       )}
+
+      <button className="primary-button wide" type="button" onClick={onPreviewPublic}
+        disabled={!parsedCollection || busy}>
+        {busy ? <LoaderCircle className="spin" size={17} /> : <FolderDown size={17} />}
+        预览并配置标签（收藏夹链接）
+      </button>
     </div>
   );
 }

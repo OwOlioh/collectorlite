@@ -14,7 +14,7 @@ import { TagEditor } from "./import/TagEditor";
 import { ResultCard } from "./import/ResultCard";
 import { useToast } from "./Toast";
 
-type ImportMode = "login" | "public" | "browser" | "zhihu" | "zhihu_public" | "csdn" | "csdn_public" | "github" | "file";
+type ImportMode = "login" | "browser" | "zhihu" | "csdn" | "github" | "file";
 type ImportStep = "source" | "tags" | "done";
 // 预览时固化的导入方式（登录/用户名收藏夹 vs 公开链接），执行时只认这个选择，
 // 避免两种方式都填了的情况下被「解析了链接就永远走链接」这种推导互相串味。
@@ -46,6 +46,8 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
   const [selectedCollectionId, setSelectedCollectionId] = useState("");
   const [publicUrl, setPublicUrl] = useState("");
   const [parsedCollection, setParsedCollection] = useState<CollectionInfo | null>(null);
+  // 图文收藏（opus）是独立入口，不混入收藏夹下拉。
+  const [opusFavorite, setOpusFavorite] = useState<CollectionInfo | null>(null);
   // 记录当前预览用的是「登录收藏夹/用户名收藏夹」还是「公开链接」，执行时只认这个选择，
   // 避免在两种方式都填了的情况下互相串味（解析了链接就永远走链接的问题）。
   const [biliImportInput, setBiliImportInput] = useState<ImportChoice | null>(null);
@@ -78,7 +80,12 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
   // ── B站 ──
   const loadCollections = useCallback(async () => {
     setBusy(true); setError("");
-    try { setCollections(await api.listBilibiliFavorites()); }
+    try {
+      setCollections(await api.listBilibiliFavorites());
+      // 图文收藏独立加载，失败不阻断（未登录/无图文时静默置空）。
+      try { setOpusFavorite(await api.listBilibiliOpusFavorite()); }
+      catch { setOpusFavorite(null); }
+    }
     catch (err) { setError(String(err)); }
     finally { setBusy(false); }
   }, []);
@@ -150,46 +157,6 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
 
   useEffect(() => { void refreshZhihuProfile(); }, [refreshZhihuProfile]);
 
-  // ── 知乎：登录收藏夹预览（独立按钮，固化选择）──
-  const startZhihuFavoritesPreview = async () => {
-    if (!zhihuProfile?.isLogin) { setError("请先登录知乎。"); return; }
-    if (!zhihuSelectedCollectionId) { setError("请先在上方选择一个收藏夹。"); return; }
-    setBusy(true); setError("");
-    try {
-      const next = await api.previewZhihuImport({
-        kind: "favorites",
-        mediaId: zhihuSelectedCollectionId,
-        url: undefined,
-        tagSpecs: [],
-        itemTagAssignments: [],
-      });
-      setZhihuImportInput({ kind: "favorites", mediaId: zhihuSelectedCollectionId, url: undefined });
-      setPreview(next);
-      setStep("tags");
-    } catch (err) { const msg = String(err); setError(msg); toast("error", msg); }
-    finally { setBusy(false); }
-  };
-
-  // ── 知乎：公开链接预览（独立按钮，固化选择）──
-  const startZhihuPublicPreview = async () => {
-    if (!zhihuParsedCollection) { setError("请先解析知乎收藏夹链接。"); return; }
-    if (!zhihuPublicUrl.trim()) { setError("请先粘贴知乎收藏夹链接。"); return; }
-    setBusy(true); setError("");
-    try {
-      const next = await api.previewZhihuImport({
-        kind: "public_url",
-        mediaId: undefined,
-        url: zhihuPublicUrl.trim(),
-        tagSpecs: [],
-        itemTagAssignments: [],
-      });
-      setZhihuImportInput({ kind: "public_url", mediaId: undefined, url: zhihuPublicUrl.trim() });
-      setPreview(next);
-      setStep("tags");
-    } catch (err) { const msg = String(err); setError(msg); toast("error", msg); }
-    finally { setBusy(false); }
-  };
-
   // ── CSDN ──
   const loadCsdnCollections = async () => {
     setBusy(true); setError(""); setCsdnSelectedCollectionId("");
@@ -203,46 +170,6 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
     setBusy(true); setError("");
     try { setCsdnParsedCollection(await api.parseCsdnCollectionUrl(csdnPublicUrl.trim())); }
     catch (err) { setError(String(err)); }
-    finally { setBusy(false); }
-  };
-
-  // ── CSDN：用户名收藏夹预览（独立按钮，固化选择）──
-  const startCsdnFavoritesPreview = async () => {
-    if (!csdnUsername.trim()) { setError("请先输入 CSDN 用户名。"); return; }
-    if (!csdnSelectedCollectionId) { setError("请先在上方选择一个收藏夹。"); return; }
-    setBusy(true); setError("");
-    try {
-      const next = await api.previewCsdnImport({
-        kind: "favorites",
-        mediaId: csdnSelectedCollectionId,
-        url: undefined,
-        tagSpecs: [],
-        itemTagAssignments: [],
-      });
-      setCsdnImportInput({ kind: "favorites", mediaId: csdnSelectedCollectionId, url: undefined });
-      setPreview(next);
-      setStep("tags");
-    } catch (err) { const msg = String(err); setError(msg); toast("error", msg); }
-    finally { setBusy(false); }
-  };
-
-  // ── CSDN：公开链接预览（独立按钮，固化选择）──
-  const startCsdnPublicPreview = async () => {
-    if (!csdnParsedCollection) { setError("请先解析 CSDN 收藏夹链接。"); return; }
-    if (!csdnPublicUrl.trim()) { setError("请先粘贴 CSDN 收藏夹链接。"); return; }
-    setBusy(true); setError("");
-    try {
-      const next = await api.previewCsdnImport({
-        kind: "public_url",
-        mediaId: undefined,
-        url: csdnPublicUrl.trim(),
-        tagSpecs: [],
-        itemTagAssignments: [],
-      });
-      setCsdnImportInput({ kind: "public_url", mediaId: undefined, url: csdnPublicUrl.trim() });
-      setPreview(next);
-      setStep("tags");
-    } catch (err) { const msg = String(err); setError(msg); toast("error", msg); }
     finally { setBusy(false); }
   };
 
@@ -312,11 +239,11 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
 
   // ── currentCollection ──
   const currentCollection = useMemo(() => {
-    if (mode === "public" || mode === "login")
+    if (mode === "login")
       return parsedCollection || collections.find((c) => c.id === selectedCollectionId) || null;
-    if (mode === "zhihu_public" || mode === "zhihu")
+    if (mode === "zhihu")
       return zhihuParsedCollection || zhihuCollections.find((c) => c.id === zhihuSelectedCollectionId) || null;
-    if (mode === "csdn_public" || mode === "csdn")
+    if (mode === "csdn")
       return csdnParsedCollection || csdnCollections.find((c) => c.id === csdnSelectedCollectionId) || null;
     if (mode === "github") return githubCollections[0] || null;
     if (mode === "browser" && browserItems.length > 0)
@@ -324,18 +251,43 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
     return null;
   }, [mode, parsedCollection, zhihuParsedCollection, csdnParsedCollection, collections, zhihuCollections, csdnCollections, githubCollections, selectedCollectionId, zhihuSelectedCollectionId, csdnSelectedCollectionId, browserItems, browserFileName]);
 
-  // ── B站：登录收藏夹预览 ──
+  // 底部统一「预览并配置标签」按钮仅用于单入口来源（GitHub / 浏览器）；
+  // 双入口来源（B站/知乎/CSDN）各自在表单内有两个独立按钮，不在此处显示。
+  const bottomPreviewReady = useMemo(() => {
+    if (mode === "github") return githubUsername.trim().length > 0;
+    if (mode === "browser") return browserItems.length > 0;
+    return false;
+  }, [mode, githubUsername, browserItems]);
+
+  // ── B站：图文收藏预览（独立入口，无 media_id，走哨兵 id）──
+  const startBiliOpusPreview = async () => {
+    if (!profile?.isLogin) { setError("请先扫码登录 B 站。"); return; }
+    if (!opusFavorite) { setError("当前账号没有图文收藏。"); return; }
+    setBusy(true); setError("");
+    try {
+      const next = await api.previewImport({
+        kind: "favorites",
+        mediaId: opusFavorite.id,
+        url: undefined,
+        tagSpecs: [],
+        itemTagAssignments: [],
+      });
+      setBiliImportInput({ kind: "favorites", mediaId: opusFavorite.id, url: undefined });
+      setPreview(next);
+      setStep("tags");
+    } catch (err) { const msg = String(err); setError(msg); toast("error", msg); }
+    finally { setBusy(false); }
+  };
+
+  // ── B站：登录收藏夹预览（独立按钮，固化选择）──
   const startBiliFavoritesPreview = async () => {
     if (!profile?.isLogin) { setError("请先扫码登录 B 站。"); return; }
     if (!selectedCollectionId) { setError("请先在上方选择一个收藏夹。"); return; }
     setBusy(true); setError("");
     try {
       const next = await api.previewImport({
-        kind: "favorites",
-        mediaId: selectedCollectionId,
-        url: undefined,
-        tagSpecs: [],
-        itemTagAssignments: [],
+        kind: "favorites", mediaId: selectedCollectionId, url: undefined,
+        tagSpecs: [], itemTagAssignments: [],
       });
       setBiliImportInput({ kind: "favorites", mediaId: selectedCollectionId, url: undefined });
       setPreview(next);
@@ -344,18 +296,15 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
     finally { setBusy(false); }
   };
 
-  // ── B站：公开链接预览 ──
+  // ── B站：公开链接预览（独立按钮，固化选择）──
   const startBiliPublicPreview = async () => {
     if (!parsedCollection) { setError("请先解析公开收藏夹链接。"); return; }
     if (!publicUrl.trim()) { setError("请先粘贴公开收藏夹链接。"); return; }
     setBusy(true); setError("");
     try {
       const next = await api.previewImport({
-        kind: "public_url",
-        mediaId: undefined,
-        url: publicUrl.trim(),
-        tagSpecs: [],
-        itemTagAssignments: [],
+        kind: "public_url", mediaId: undefined, url: publicUrl.trim(),
+        tagSpecs: [], itemTagAssignments: [],
       });
       setBiliImportInput({ kind: "public_url", mediaId: undefined, url: publicUrl.trim() });
       setPreview(next);
@@ -364,34 +313,91 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
     finally { setBusy(false); }
   };
 
-  // ── 预览 ──
-  const startPreview = async () => {
-    if (!currentCollection) { setError("请先选择或解析一个收藏夹。"); return; }
+  // ── 知乎：登录收藏夹预览（独立按钮，固化选择）──
+  const startZhihuFavoritesPreview = async () => {
+    if (!zhihuProfile?.isLogin) { setError("请先登录知乎。"); return; }
+    if (!zhihuSelectedCollectionId) { setError("请先在上方选择一个收藏夹。"); return; }
     setBusy(true); setError("");
-
-    if (mode === "browser") {
-      setPreview({ collection: currentCollection, items: browserItems, partitionSuggestions: [] });
+    try {
+      const next = await api.previewZhihuImport({
+        kind: "favorites", mediaId: zhihuSelectedCollectionId, url: undefined,
+        tagSpecs: [], itemTagAssignments: [],
+      });
+      setZhihuImportInput({ kind: "favorites", mediaId: zhihuSelectedCollectionId, url: undefined });
+      setPreview(next);
       setStep("tags");
-      setBusy(false);
+    } catch (err) { const msg = String(err); setError(msg); toast("error", msg); }
+    finally { setBusy(false); }
+  };
+
+  // ── 知乎：公开链接预览（独立按钮，固化选择）──
+  const startZhihuPublicPreview = async () => {
+    if (!zhihuParsedCollection) { setError("请先解析知乎收藏夹链接。"); return; }
+    if (!zhihuPublicUrl.trim()) { setError("请先粘贴知乎收藏夹链接。"); return; }
+    setBusy(true); setError("");
+    try {
+      const next = await api.previewZhihuImport({
+        kind: "public_url", mediaId: undefined, url: zhihuPublicUrl.trim(),
+        tagSpecs: [], itemTagAssignments: [],
+      });
+      setZhihuImportInput({ kind: "public_url", mediaId: undefined, url: zhihuPublicUrl.trim() });
+      setPreview(next);
+      setStep("tags");
+    } catch (err) { const msg = String(err); setError(msg); toast("error", msg); }
+    finally { setBusy(false); }
+  };
+
+  // ── CSDN：用户名收藏夹预览（独立按钮，固化选择）──
+  const startCsdnFavoritesPreview = async () => {
+    if (!csdnUsername.trim()) { setError("请先输入 CSDN 用户名。"); return; }
+    if (!csdnSelectedCollectionId) { setError("请先在上方选择一个收藏夹。"); return; }
+    setBusy(true); setError("");
+    try {
+      const next = await api.previewCsdnImport({
+        kind: "favorites", mediaId: csdnSelectedCollectionId, url: undefined,
+        tagSpecs: [], itemTagAssignments: [],
+      });
+      setCsdnImportInput({ kind: "favorites", mediaId: csdnSelectedCollectionId, url: undefined });
+      setPreview(next);
+      setStep("tags");
+    } catch (err) { const msg = String(err); setError(msg); toast("error", msg); }
+    finally { setBusy(false); }
+  };
+
+  // ── CSDN：公开链接预览（独立按钮，固化选择）──
+  const startCsdnPublicPreview = async () => {
+    if (!csdnParsedCollection) { setError("请先解析 CSDN 收藏夹链接。"); return; }
+    if (!csdnPublicUrl.trim()) { setError("请先粘贴 CSDN 收藏夹链接。"); return; }
+    setBusy(true); setError("");
+    try {
+      const next = await api.previewCsdnImport({
+        kind: "public_url", mediaId: undefined, url: csdnPublicUrl.trim(),
+        tagSpecs: [], itemTagAssignments: [],
+      });
+      setCsdnImportInput({ kind: "public_url", mediaId: undefined, url: csdnPublicUrl.trim() });
+      setPreview(next);
+      setStep("tags");
+    } catch (err) { const msg = String(err); setError(msg); toast("error", msg); }
+    finally { setBusy(false); }
+  };
+
+  // ── 预览（GitHub / 浏览器 这类单入口来源使用底部统一按钮）──
+  const startPreview = async () => {
+    if (mode === "browser") {
+      if (browserItems.length === 0) { setError("请先选择浏览器书签文件。"); return; }
+      setPreview({ collection: currentCollection!, items: browserItems, partitionSuggestions: [] });
+      setStep("tags");
       return;
     }
-
+    if (mode !== "github") return;
+    if (!githubUsername.trim()) { setError("请先输入 GitHub 用户名。"); return; }
+    setBusy(true); setError("");
     try {
-      const isZhihu = mode === "zhihu" || mode === "zhihu_public";
-      const isCsdn = mode === "csdn" || mode === "csdn_public";
-      const isGithub = mode === "github";
-      const isBili = mode === "login" || mode === "public";
-      const input = {
-        kind: (isBili || isZhihu || isCsdn) && currentCollection?.id && !parsedCollection && !zhihuParsedCollection && !csdnParsedCollection ? ("favorites" as const) : ("public_url" as const),
-        mediaId: (isBili || isZhihu || isCsdn) && currentCollection?.id && !parsedCollection && !zhihuParsedCollection && !csdnParsedCollection ? currentCollection.id : undefined,
-        url: isBili ? (publicUrl.trim() || undefined) : isZhihu ? (zhihuPublicUrl.trim() || undefined) : isCsdn ? (csdnPublicUrl.trim() || csdnUsername.trim() || undefined) : isGithub ? (githubUsername.trim() || undefined) : undefined,
-        tagSpecs: [], itemTagAssignments: []
+      const input: ImportRequest = {
+        kind: "public_url", mediaId: undefined, url: githubUsername.trim(),
+        tagSpecs: [], itemTagAssignments: [],
       };
-      let next: ImportPreview;
-      if (isZhihu) next = await api.previewZhihuImport(input);
-      else if (isCsdn) next = await api.previewCsdnImport(input);
-      else if (isGithub) next = await api.previewGithubImport(input);
-      else next = await api.previewImport(input);
+      const next = await api.previewGithubImport(input);
       setPreview(next);
       setStep("tags");
     } catch (err) { const msg = String(err); setError(msg); toast("error", msg); }
@@ -400,10 +406,10 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
 
   // ── 执行 ──
   const buildImportInput = (assignments: ItemTagAssignment[]) => {
-    const isZhihu = mode === "zhihu" || mode === "zhihu_public";
-    const isCsdn = mode === "csdn" || mode === "csdn_public";
+    const isZhihu = mode === "zhihu";
+    const isCsdn = mode === "csdn";
     const isGithub = mode === "github";
-    const isBili = mode === "login" || mode === "public";
+    const isBili = mode === "login";
 
     // B站：优先用预览时确定的导入方式（登录收藏夹 / 公开链接），不再重新推导，避免两种方式互相串味
     if (isBili && biliImportInput) {
@@ -532,13 +538,13 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
         <div className="import-source-grid">
           <div className="import-modes">
             <SourceCard icon={<LogIn size={20} />} title="B 站收藏" desc="扫码登录读取收藏夹，或粘贴公开链接导入。"
-              active={mode === "login" || mode === "public"} onClick={() => setMode(mode === "login" ? "public" : "login")} />
+              active={mode === "login"} onClick={() => setMode("login")} />
             <SourceCard icon={<Globe size={20} />} title="浏览器书签" desc="从浏览器导出的书签 HTML 文件中导入链接。"
               active={mode === "browser"} onClick={() => setMode("browser")} />
             <SourceCard icon={<LogIn size={20} />} title="知乎收藏" desc="登录知乎读取收藏夹，或粘贴链接导入。"
-              active={mode === "zhihu" || mode === "zhihu_public"} onClick={() => setMode(mode === "zhihu" ? "zhihu_public" : "zhihu")} />
+              active={mode === "zhihu"} onClick={() => setMode("zhihu")} />
             <SourceCard icon={<Code2 size={20} />} title="CSDN 收藏" desc="输入用户名读取收藏夹，或粘贴链接导入。"
-              active={mode === "csdn" || mode === "csdn_public"} onClick={() => setMode(mode === "csdn" ? "csdn_public" : "csdn")} />
+              active={mode === "csdn"} onClick={() => setMode("csdn")} />
             <SourceCard icon={<Github size={20} />} title="GitHub Stars" desc="输入 GitHub 用户名即可导入 Star 仓库列表。"
               active={mode === "github"} onClick={() => setMode("github")} />
             <SourceCard icon={<Upload size={20} />} title="从文件导入" desc="导入此前导出的收藏 JSON 文件，仅新增不覆盖。"
@@ -546,7 +552,7 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
           </div>
 
           <div className="import-form-panel">
-            {mode === "login" || mode === "public" ? (
+            {mode === "login" ? (
               <BilibiliForm busy={busy} setBusy={setBusy} setError={setError}
                 profile={profile} setProfile={setProfile} collections={collections} setCollections={setCollections}
                 selectedCollectionId={selectedCollectionId} setSelectedCollectionId={setSelectedCollectionId}
@@ -554,9 +560,10 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
                 setParsedCollection={setParsedCollection} qr={qr} setQr={setQr}
                 loginBusy={loginBusy} setLoginBusy={setLoginBusy}
                 loadCollections={loadCollections} startQr={startQr} parsePublic={parsePublic}
-                onPreviewFavorites={startBiliFavoritesPreview} onPreviewPublic={startBiliPublicPreview} />
-            ) : mode === "zhihu" || mode === "zhihu_public" ? (
-              <ZhihuForm busy={busy} setBusy={setBusy} setError={setError} setLoginBusy={setLoginBusy}
+                onPreviewFavorites={startBiliFavoritesPreview} onPreviewPublic={startBiliPublicPreview}
+                onPreviewOpus={startBiliOpusPreview} opusFavorite={opusFavorite} />
+            ) : mode === "zhihu" ? (
+              <ZhihuForm busy={busy} setError={setError} setLoginBusy={setLoginBusy}
                 profile={zhihuProfile} setProfile={setZhihuProfile} collections={zhihuCollections}
                 setCollections={setZhihuCollections} selectedCollectionId={zhihuSelectedCollectionId}
                 setSelectedCollectionId={setZhihuSelectedCollectionId} publicUrl={zhihuPublicUrl}
@@ -564,11 +571,11 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
                 setParsedCollection={setZhihuParsedCollection} loadCollections={loadZhihuCollections}
                 parseUrl={parseZhihu}
                 onPreviewFavorites={startZhihuFavoritesPreview} onPreviewPublic={startZhihuPublicPreview} />
-            ) : mode === "csdn" || mode === "csdn_public" ? (
+            ) : mode === "csdn" ? (
               <CsdnForm busy={busy} username={csdnUsername} setUsername={setCsdnUsername}
                 collections={csdnCollections} selectedCollectionId={csdnSelectedCollectionId}
                 setSelectedCollectionId={setCsdnSelectedCollectionId} publicUrl={csdnPublicUrl}
-                setPublicUrl={setCsdnPublicUrl} parsedCollection={csdnParsedCollection}
+                setPublicUrl={setCsdnPublicUrl}                 parsedCollection={csdnParsedCollection}
                 onLoadCollections={loadCsdnCollections} onParseUrl={parseCsdnUrl}
                 onPreviewFavorites={startCsdnFavoritesPreview} onPreviewPublic={startCsdnPublicPreview} />
             ) : mode === "github" ? (
@@ -582,9 +589,9 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
                 onFileInput={(e) => { const f = e.target.files?.[0]; if (f) handleBrowserFile(f); }} />
             )}
 
-            {mode !== "file" && mode !== "login" && mode !== "public" && mode !== "zhihu" && mode !== "zhihu_public" && mode !== "csdn" && mode !== "csdn_public" && (
+            {(mode === "github" || mode === "browser") && (
               <button className="primary-button wide" type="button" onClick={startPreview}
-                disabled={!currentCollection || busy}>
+                disabled={!bottomPreviewReady || busy}>
                 {busy ? <LoaderCircle className="spin" size={17} /> : <FolderDown size={17} />}
                 预览并配置标签
               </button>

@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
-use reqwest::Proxy;
 use serde_json::Value;
 use tokio::time::sleep;
 
@@ -10,49 +9,6 @@ use crate::source::SourceAdapter;
 
 const USER_AGENT_STR: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-/// 读取 Windows 注册表系统代理地址（仅 Windows）。无代理或读取失败返回 None。
-#[cfg(windows)]
-fn windows_registry_proxy_url() -> Option<String> {
-    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
-    let hkcu = winreg::RegKey::predef(HKEY_CURRENT_USER);
-    let settings = hkcu
-        .open_subkey_with_flags(
-            "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
-            KEY_READ,
-        )
-        .ok()?;
-    let enabled: u32 = settings.get_value("ProxyEnable").ok()?;
-    if enabled == 0 {
-        return None;
-    }
-    let server: String = settings.get_value("ProxyServer").ok()?;
-    let mut http: Option<String> = None;
-    let mut https: Option<String> = None;
-    for part in server.split(';') {
-        if let Some((scheme, addr)) = part.split_once('=') {
-            match scheme.to_lowercase().as_str() {
-                "http" => http = Some(addr.to_string()),
-                "https" => https = Some(addr.to_string()),
-                _ => {}
-            }
-        } else if !part.is_empty() {
-            http = Some(part.to_string());
-            https = Some(part.to_string());
-        }
-    }
-    let addr = http.or(https)?;
-    if addr.starts_with("http://") || addr.starts_with("https://") {
-        Some(addr)
-    } else {
-        Some(format!("http://{addr}"))
-    }
-}
-
-#[cfg(not(windows))]
-fn windows_registry_proxy_url() -> Option<String> {
-    None
-}
-
 pub struct GithubClient {
     client: reqwest::Client,
 }
@@ -60,21 +16,10 @@ pub struct GithubClient {
 impl GithubClient {
     pub fn new() -> Result<Self, AppError> {
         let mut builder = reqwest::Client::builder();
-        // 与 B站客户端一致：优先环境变量代理，否则回退到 Windows 注册表代理，
-        // 避免中国大陆直连 GitHub 受限；无代理配置时为空操作。
-        let env_proxy = std::env::var_os("HTTPS_PROXY")
-            .or_else(|| std::env::var_os("HTTP_PROXY"))
-            .or_else(|| std::env::var_os("https_proxy"))
-            .or_else(|| std::env::var_os("http_proxy"));
-        let proxy = if let Some(value) = env_proxy {
-            value.into_string().ok().filter(|u| !u.is_empty())
-        } else {
-            windows_registry_proxy_url()
-        };
-        if let Some(url) = proxy {
-            if let Ok(p) = Proxy::all(&url) {
-                builder = builder.proxy(p);
-            }
+        // 与 B站客户端一致：复用统一代理解析（环境变量 → 注册表 → 本机端口兜底），
+        // 保证无论以何种方式启动 app 都能经代理出网，避免中国大陆直连 GitHub 受限。
+        if let Some(proxy) = crate::source::proxy::resolve_system_proxy() {
+            builder = builder.proxy(proxy);
         }
         let client = builder.build().map_err(|e| AppError::Http(e))?;
         Ok(Self { client })

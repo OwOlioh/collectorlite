@@ -236,13 +236,13 @@ const [zhihuCollections, setZhihuCollections] = useState(...);
 
 `AppError::AuthRequired` 的 Display 消息已改为通用 `"需要登录后才能获取内容，请先登录"`，不再写死"B站"。
 
-### 3.11 双入口来源的「预览并配置标签」按钮必须拆分
+### 3.11 双入口来源（B站/知乎/CSDN）每个都要有两个独立按钮
 
-**问题背景**：B站、知乎、CSDN 都有两种导入入口——「登录/用户名收藏夹」和「粘贴公开链接」。某来源同时实现了这两种入口时，若共用同一个「预览并配置标签」按钮，前端只能用 `!parsedCollection` 这类布尔去**推导**本次该走 favorites 还是 public_url。一旦用户既登录又解析了链接，`parsedCollection` 为真，推导永远倒向公开链接，登录收藏夹的选择被覆盖，两种方式互相串味、无法独立切换。
+**问题背景**：B站、知乎、CSDN 都有两种导入入口——「登录/用户名收藏夹」和「粘贴公开链接」。用户要求这三个平台**各自分别有**两个「预览并配置标签」按钮（登录收藏夹 / 收藏夹链接），且三平台按钮的**文案、位置、样式保持一致**（统一化）；不要合并成底部那一个按钮。「统一」指的是三平台之间一致，不是合并。
 
-**正确做法**：在用户**点击预览的那一刻就把选择固化下来**，执行阶段只认这个固化值。
+**正确做法**：每个来源在表单内放两个独立按钮，点击瞬间固化 `ImportChoice`，执行阶段只认固化值，不互相串味。
 
-1. **定义共享类型**（放在 `ImportPage.tsx` 顶部）：
+1. **共享类型**（放在 `ImportPage.tsx` 顶部）：
    ```ts
    type ImportChoice = {
      kind: "favorites" | "public_url";
@@ -250,24 +250,27 @@ const [zhihuCollections, setZhihuCollections] = useState(...);
      url?: string;
    };
    ```
-2. **每个来源一个 stored-choice 状态**（B站/知乎/CSDN 各一个，互不复用，避免状态串味）：
+2. **每个来源一个 stored-choice 状态**（B站/知乎/CSDN 各一个，互不复用）：
    ```ts
    const [biliImportInput, setBiliImportInput] = useState<ImportChoice | null>(null);
    const [zhihuImportInput, setZhihuImportInput] = useState<ImportChoice | null>(null);
    const [csdnImportInput, setCsdnImportInput] = useState<ImportChoice | null>(null);
    ```
-3. **每个来源两个独立预览入口**（固化选择后进入 tags 步骤）：
-   - `startXxxFavoritesPreview`：`kind: "favorites"`、`mediaId: selectedCollectionId`、`url: undefined`。
-   - `startXxxPublicPreview`：`kind: "public_url"`、`mediaId: undefined`、`url: publicUrl.trim()`。
-   - 两个函数都先 `setXxxImportInput({...})` 再 `setPreview(next)`、`setStep("tags")`，并对空输入做 `setError` 兜底。
-4. **`buildImportInput` 优先用 stored choice**：对每个来源，先 `if (isXxx && xxxImportInput) { return { apiCall: () => api.executeXxxImport({kind, mediaId, url, itemTagAssignments: assignments}) }; }`；只在无 stored choice 时（如 GitHub、浏览器）才回退到旧推导逻辑。
-5. **返回/完成时清空**：在 `TagEditor` 的 `onBack` 和导入完成 `handleResult` 的 `setTimeout` 里，把三个 `setXxxImportInput(null)`，防止上一次选择残留串到下一次导入。
-6. **隐藏通用按钮**：渲染处通用「预览并配置标签」按钮的显示条件要排除已拆分的来源（B站、知乎、CSDN 各 mode），仅保留给 GitHub、浏览器这类单入口来源。
-7. **表单组件加两个 prop**：`{Source}Form.tsx` 接收 `onPreviewFavorites` / `onPreviewPublic`，分别在「登录/用户名收藏夹」区（已选收藏夹时）和「公开链接」解析卡片内各放一个**独立**的 `预览并配置标签（xxx 收藏夹）` / `（公开链接）` 按钮，文案与 B站保持一致；公开链接按钮无需登录即可用。
+3. **每个表单两个按钮**（文案统一为 `预览并配置标签（登录收藏夹）` / `预览并配置标签（收藏夹链接）`，都用 `primary-button wide`，置于各自小节末尾）：
+   - `onPreviewFavorites` → `startXxxFavoritesPreview`：`kind: "favorites"`、`mediaId: selectedCollectionId`、`url: undefined`。
+   - `onPreviewPublic` → `startXxxPublicPreview`：`kind: "public_url"`、`mediaId: undefined`、`url: xxxPublicUrl.trim()`。
+   - 两个函数都先 `setXxxImportInput({...})` 再 `setPreview(next)`、`setStep("tags")`，并对空/未选输入做 `setError` 兜底。
+4. **按钮可见性**：
+   - **B站/知乎**：按钮始终渲染，未满足前置条件（未登录 / 未选收藏夹 / 未解析链接）时 `disabled`，而非隐藏。
+   - **CSDN**：按钮**始终渲染**（即使还没输入用户名、还没拉到收藏夹），未选收藏夹 / 未解析链接时 `disabled`——这是修复「CSDN 缺失默认导入按钮」的关键：不要再让按钮依赖 `collections.length > 0` 才出现。
+5. **B站图文收藏是第三条独立入口**（不走上面两个按钮）：`BilibiliForm` 内单独的「图文收藏 N 条」按钮 → `startBiliOpusPreview`，走哨兵 id `bili_opus_fav`。知乎/CSDN 没有这一条。
+6. **底部统一按钮只留给单入口来源**：ImportPage 底部「预览并配置标签」按钮仅在 `mode === "github" | "browser"` 时显示（`bottomPreviewReady` 控制可点状态）；`mode` 用基础值（`"login"`=B站、`"zhihu"`、`"csdn"`、`"github"`、`"browser"`、`"file"`），点击来源卡片即选定。
+7. **`buildImportInput` 优先用 stored choice**：对每个来源，先 `if (isXxx && xxxImportInput) { return { apiCall: () => api.executeXxxImport({kind, mediaId, url, itemTagAssignments: assignments}) }; }`；只在无 stored choice 时（GitHub、浏览器）才回退到推导逻辑。
+8. **返回/完成时清空**：在 `TagEditor` 的 `onBack` 和导入完成 `handleResult` 的 `setTimeout` 里，把三个 `setXxxImportInput(null)`，防止上一次选择残留串到下一次导入。
 
-**适用范围**：以后新增来源若同样有「登录 + 公开链接」双入口（例如网易云音乐收藏可能既有登录歌单也有公开歌单链接），务必沿用上述模式，不要回到「单按钮 + 布尔推导」的旧做法。
+**适用范围**：以后新增来源若同样有「登录 + 公开链接」双入口（例如网易云音乐收藏可能既有登录歌单也有公开歌单链接），务必沿用上述模式——表单内两个独立按钮 + 预览时固化 `ImportChoice`，并保持与 B站/知乎/CSDN 一致的按钮文案与样式。
 
-**验证**：`tsc --noEmit` 通过、`vite build` 成功即可；真机 `cargo run` + `npm run dev`，两种入口各点各的按钮验证互不干扰。
+**验证**：`tsc --noEmit` 通过、`vite build` 成功即可；真机 `cargo run` + `npm run dev`，分别确认 B站/知乎/CSDN 的「登录收藏夹」与「收藏夹链接」两个按钮都出现、置灰逻辑正确、点击后都走对 `kind`。
 
 ---
 

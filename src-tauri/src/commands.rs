@@ -133,11 +133,15 @@ async fn resolve_collection(
 ) -> Result<CollectionInfo, AppError> {
     match input.kind {
         crate::models::ImportKind::Favorites => {
-            let collections = state.bili.list_collections().await?;
             let media_id = input
                 .media_id
                 .as_deref()
                 .ok_or_else(|| AppError::InvalidInput("请选择要导入的收藏夹".into()))?;
+            // 图文收藏不是收藏夹、没有 media_id，用哨兵 id 走独立的动态流接口。
+            if media_id == crate::source::bilibili::OPUS_FAV_COLLECTION_ID {
+                return state.bili.opus_favorite_info().await;
+            }
+            let collections = state.bili.list_collections().await?;
             collections
                 .into_iter()
                 .find(|item| item.id == media_id)
@@ -206,6 +210,19 @@ pub async fn list_bilibili_favorites(
     state
         .bili
         .list_collections()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// 图文收藏的元信息（标题 + 条数）。图文收藏不是收藏夹，走独立动态流接口，
+/// 因此单独成入口、不混入 `list_bilibili_favorites` 的视频收藏夹下拉。
+#[tauri::command]
+pub async fn list_bilibili_opus_favorite(
+    state: State<'_, AppState>,
+) -> Result<CollectionInfo, String> {
+    state
+        .bili
+        .opus_favorite_info()
         .await
         .map_err(|error| error.to_string())
 }

@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE, COOKIE, REFERER, USER_AGENT};
-use reqwest::Proxy;
 use serde_json::{json, Value};
 use url::Url;
 
@@ -18,6 +17,23 @@ const BILIBILI_REFERER: &str = "https://www.bilibili.com/";
 const USER_AGENT_STR: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36";
 
+/// 图文收藏（opus）在 `CollectionInfo.id` 中使用的哨兵值。
+///
+/// 图文收藏**不是收藏夹**：它没有 `media_id`，也永远不会出现在
+/// `x/v3/fav/folder/created/list-all` 里（该接口会忽略 `type` 参数，
+/// 恒返回全部视频收藏夹——已用 type=0..25 全量穷举验证）。
+/// 它走的是独立的动态流接口，因此用一个不可能与数字 media_id 冲突的哨兵 id 承载。
+pub const OPUS_FAV_COLLECTION_ID: &str = "bili_opus_fav";
+
+/// 当前登录用户的图文收藏列表（**逆向自 B站空间页前端 bundle**，未见于公开文档）：
+/// `GET /x/polymer/web-dynamic/v1/opus/feed/fav?page=&page_size=&timezone_offset=`
+///
+/// 注意**没有 `mid` 参数**——只返回当前登录用户自己的图文收藏，必须带 cookie。
+const OPUS_FAV_URL: &str = "https://api.bilibili.com/x/polymer/web-dynamic/v1/opus/feed/fav";
+
+/// 收藏夹导航栏，`data.opus` 为图文收藏条数（该接口免登录可读）。
+const SPACE_FAV_NAV_URL: &str = "https://api.bilibili.com/x/space/fav/nav";
+
 pub struct BilibiliClient {
     http: reqwest::Client,
     cookie: RwLock<Option<String>>,
@@ -29,25 +45,10 @@ impl BilibiliClient {
         let mut builder = reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
             .redirect(reqwest::redirect::Policy::limited(5));
-        // reqwest 默认不读 Windows 注册表代理；中国大陆用户常靠本地代理（如 Clash）出网，
-        // 直连出口易被 B 站风控返回 -400。这里优先用环境变量代理，否则回退到注册表代理。
-        let env_proxy = std::env::var_os("HTTPS_PROXY")
-            .or_else(|| std::env::var_os("HTTP_PROXY"))
-            .or_else(|| std::env::var_os("https_proxy"))
-            .or_else(|| std::env::var_os("http_proxy"));
-        if let Some(value) = env_proxy {
-            if let Ok(url) = value.into_string() {
-                if !url.is_empty() {
-                    if let Ok(proxy) = Proxy::all(&url) {
-                        builder = builder.proxy(proxy);
-                    }
-                }
-            }
-        } else {
-            #[cfg(windows)]
-            if let Some(proxy) = Self::windows_registry_proxy() {
-                builder = builder.proxy(proxy);
-            }
+        // 复用统一代理解析（环境变量 → 注册表 → 本机端口兜底），
+        // 保证中国大陆用户无论以何种方式启动 app 都能经代理出网，避免直连被风控 -400。
+        if let Some(proxy) = crate::source::proxy::resolve_system_proxy() {
+            builder = builder.proxy(proxy);
         }
         let http = builder.build()?;
         Ok(Self {
@@ -55,51 +56,6 @@ impl BilibiliClient {
             cookie: RwLock::new(None),
             wbi_keys: RwLock::new(None),
         })
-    }
-
-    /// 读取 Windows 注册表中的系统代理（HKCU\...\Internet Settings\ProxyServer）。
-    /// 仅当 ProxyEnable=1 时返回代理；格式兼容 `http=host:port;https=host:port` 或裸 `host:port`。
-    #[cfg(windows)]
-    fn windows_registry_proxy() -> Option<Proxy> {
-        use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
-        let hkcu = winreg::RegKey::predef(HKEY_CURRENT_USER);
-        let settings = hkcu
-            .open_subkey_with_flags(
-                "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
-                KEY_READ,
-            )
-            .ok()?;
-        let enabled: u32 = settings.get_value("ProxyEnable").ok()?;
-        if enabled == 0 {
-            return None;
-        }
-        let server: String = settings.get_value("ProxyServer").ok()?;
-        let url = Self::parse_proxy_server(&server)?;
-        Proxy::all(&url).ok()
-    }
-
-    #[cfg(windows)]
-    fn parse_proxy_server(server: &str) -> Option<String> {
-        let mut http: Option<String> = None;
-        let mut https: Option<String> = None;
-        for part in server.split(';') {
-            if let Some((scheme, addr)) = part.split_once('=') {
-                match scheme.to_lowercase().as_str() {
-                    "http" => http = Some(addr.to_string()),
-                    "https" => https = Some(addr.to_string()),
-                    _ => {}
-                }
-            } else if !part.is_empty() {
-                http = Some(part.to_string());
-                https = Some(part.to_string());
-            }
-        }
-        let addr = http.or(https)?;
-        if addr.starts_with("http://") || addr.starts_with("https://") {
-            Some(addr)
-        } else {
-            Some(format!("http://{addr}"))
-        }
     }
 
     pub fn set_cookie(&self, cookie: Option<String>) {
@@ -150,39 +106,57 @@ impl BilibiliClient {
         } else {
             format!("{url}?{query}")
         };
-        let mut request = self
-            .http
-            .get(&full_url)
-            .header(USER_AGENT, USER_AGENT_STR)
-            .header(REFERER, BILIBILI_REFERER);
-        let cookie_headers = self.cookie_header()?;
-        request = request.headers(cookie_headers);
-        self.parse_response(request.send().await?).await
-    }
-
-    async fn parse_response(&self, response: reqwest::Response) -> Result<Value, AppError> {
-        let status = response.status();
-        let text = response.text().await?;
-        let value: Value = serde_json::from_str(&text)
-            .map_err(|_| AppError::Other(format!("B 站返回了无法解析的数据（HTTP {status}）")))?;
-        let code = value.get("code").and_then(Value::as_i64).unwrap_or(-1);
-        if code == 0 {
-            return Ok(value);
+        // 本地代理（如 Clash）上游偶发抖动会导致 CONNECT 隧道失败（TunnelUnsuccessful），
+        // 仅对传输层错误重试；B站业务错误（如 -400）立即返回、不重试。
+        let mut last_err: Option<reqwest::Error> = None;
+        for attempt in 0..3 {
+            let mut request = self
+                .http
+                .get(&full_url)
+                .header(USER_AGENT, USER_AGENT_STR)
+                .header(REFERER, BILIBILI_REFERER);
+            let cookie_headers = self.cookie_header()?;
+            request = request.headers(cookie_headers);
+            let response = match request.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("[bili] 网络层错误（第{}次，将重试）: {}", attempt + 1, e);
+                    last_err = Some(e);
+                    continue;
+                }
+            };
+            let status = response.status();
+            let text = response.text().await?;
+            let value: Value = serde_json::from_str(&text).map_err(|_| {
+                // 非 JSON（如代理拦截页）：把原始响应打到 stderr 便于排查网络/代理问题
+                eprintln!("[bili] 非 JSON 响应 {full_url} -> HTTP {status} body={}", &text[..text.len().min(300)]);
+                AppError::Other(format!("B 站返回了无法解析的数据（HTTP {status}）"))
+            })?;
+            let code = value.get("code").and_then(Value::as_i64).unwrap_or(-1);
+            if code == 0 {
+                return Ok(value);
+            }
+            let message = value
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("未知错误")
+                .to_string();
+            // 出错时打印真实请求与 B 站原始响应，便于定位（空 season_id / 代理未生效 等）
+            eprintln!("[bili] 接口错误 {full_url} -> HTTP {status} code={code} msg={message}");
+            if code == -352 {
+                return Err(AppError::RiskControl(
+                    "B 站触发了风控验证，请稍后重试或重新登录。".into(),
+                ));
+            } else if code == -101 {
+                return Err(AppError::AuthRequired);
+            } else {
+                return Err(AppError::Bili(code, message));
+            }
         }
-        let message = value
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("未知错误")
-            .to_string();
-        if code == -352 {
-            Err(AppError::RiskControl(
-                "B 站触发了风控验证，请稍后重试或重新登录。".into(),
-            ))
-        } else if code == -101 {
-            Err(AppError::AuthRequired)
-        } else {
-            Err(AppError::Bili(code, message))
-        }
+        Err(AppError::Other(format!(
+            "B 站网络请求失败（重试 3 次仍失败）：{}",
+            last_err.map(|e| e.to_string()).unwrap_or_default()
+        )))
     }
 
     async fn ensure_wbi_keys(&self) -> Result<WbiKeys, AppError> {
@@ -328,6 +302,87 @@ impl BilibiliClient {
         parse_favorite_folder_list(&value)
     }
 
+    /// 图文收藏的元信息（标题 + 条数）。
+    ///
+    /// 条数取自 `/x/space/fav/nav` 的 `data.opus`。为 0 表示当前账号没有图文收藏，
+    /// 前端据此隐藏入口——避免给没有图文收藏的用户一个点了就空的按钮。
+    pub async fn opus_favorite_info(&self) -> Result<CollectionInfo, AppError> {
+        let profile = self.profile().await?;
+        let mid = profile
+            .mid
+            .ok_or_else(|| AppError::Other("无法获取当前用户 MID".into()))?;
+        let value = self
+            .get_json(
+                SPACE_FAV_NAV_URL,
+                vec![("mid".into(), mid.to_string())],
+                false,
+            )
+            .await?;
+        let count = value
+            .get("data")
+            .and_then(|data| data.get("opus"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        Ok(CollectionInfo {
+            source: "bilibili".into(),
+            id: OPUS_FAV_COLLECTION_ID.into(),
+            title: "图文收藏".into(),
+            owner: profile.name.clone(),
+            count,
+            url: Some(format!(
+                "https://space.bilibili.com/{mid}/favlist?fid=opus&ftype=opus"
+            )),
+        })
+    }
+
+    /// 拉取当前登录用户的全部图文收藏（自动翻页直到取完）。
+    pub async fn fetch_opus_favorites(&self) -> Result<Vec<ExternalItem>, AppError> {
+        let mut items = Vec::new();
+        let mut page = 1;
+        loop {
+            let value = self
+                .get_json(
+                    OPUS_FAV_URL,
+                    vec![
+                        ("page".into(), page.to_string()),
+                        ("page_size".into(), "20".into()),
+                        ("timezone_offset".into(), "-480".into()),
+                    ],
+                    false,
+                )
+                .await?;
+            let list = value
+                .get("data")
+                .and_then(|data| data.get("items"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            if list.is_empty() {
+                break;
+            }
+            let parsed = list.iter().filter_map(parse_opus_item).collect::<Vec<_>>();
+            if parsed.is_empty() {
+                // B站改版导致字段形状变化时，落盘原始响应便于定位，而不是静默返回空列表。
+                let path = std::env::temp_dir().join("bilibili_opus_fav_raw.json");
+                if let Ok(text) = serde_json::to_string_pretty(&value) {
+                    let _ = std::fs::write(&path, text);
+                }
+                eprintln!(
+                    "[bili] 图文收藏第 {page} 页解析为空，原始响应已写入 {}",
+                    path.display()
+                );
+                break;
+            }
+            items.extend(parsed);
+            page += 1;
+            // 安全上限：图文收藏一般最多几百条，2000 条足够且能兜住接口异常翻页。
+            if page > 100 {
+                break;
+            }
+        }
+        Ok(items)
+    }
+
     pub async fn download_cover(&self, url: &str) -> Result<(Vec<u8>, String), AppError> {
         let response = self
             .http
@@ -449,6 +504,155 @@ impl BilibiliClient {
     }
 }
 
+/// 合集/系列 collection.id 的前缀约定：`bili_heji_{season_id}` / `bili_series_{season_id}`。
+/// 须与 `resolve_heji` 生成的 id 格式保持一致，否则 `fetch_collection` 会把合集错路由成普通收藏夹。
+fn is_heji_collection_id(id: &str) -> bool {
+    id.starts_with("bili_heji_") || id.starts_with("bili_series_")
+}
+
+/// 从合集/系列 collection.id 中提取 season_id（去掉 `bili_heji_` / `bili_series_` 前缀）。
+fn heji_season_id(id: &str) -> String {
+    id.strip_prefix("bili_heji_")
+        .or_else(|| id.strip_prefix("bili_series_"))
+        .map(|rest| rest.to_string())
+        .unwrap_or_else(|| id.to_string())
+}
+
+/// 把 `/opus/feed/fav` 返回的单条图文项转成统一 `ExternalItem`。
+///
+/// 字段形状（逆向自 B站空间页前端 bundle，非公开文档）：
+/// - `jump_url`：图文详情页链接，形如 `https://www.bilibili.com/opus/<id>`
+/// - `content`：正文文本（前端直接当标题渲染）
+/// - `cover.url` / `cover.width` / `cover.height`：封面
+/// - `author.name` / `author.mid`：作者
+/// - `pub_time`：发布时间（时间戳数字或 `YYYY-MM-DD` 字符串）
+/// - `stat.view` / `stat.like`：浏览、点赞
+///
+/// `external_id` 取不到时返回 `None`（该项被跳过），因为 `(source, external_id)`
+/// 是去重主键，编造 id 会导致重复导入。
+fn parse_opus_item(value: &Value) -> Option<ExternalItem> {
+    let jump_url = value
+        .get("jump_url")
+        .and_then(Value::as_str)
+        .map(normalize_opus_url);
+    let external_id = value
+        .get("id_str")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(|text| format!("opus_{text}"))
+        .or_else(|| {
+            value
+                .get("id")
+                .and_then(Value::as_i64)
+                .map(|id| format!("opus_{id}"))
+        })
+        .or_else(|| jump_url.as_deref().and_then(opus_id_from_url))?;
+    let content = value
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let title = truncate_chars(&content, 80);
+    let url = jump_url.unwrap_or_else(|| {
+        format!(
+            "https://www.bilibili.com/opus/{}",
+            external_id.trim_start_matches("opus_")
+        )
+    });
+    Some(ExternalItem {
+        source: "bilibili".into(),
+        external_id,
+        source_url: url,
+        title: if title.is_empty() {
+            "未命名图文".into()
+        } else {
+            title
+        },
+        description: content,
+        cover_url: value
+            .pointer("/cover/url")
+            .and_then(Value::as_str)
+            .map(normalize_opus_url),
+        cover_local_path: None,
+        author_name: value
+            .pointer("/author/name")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        author_id: value
+            .pointer("/author/mid")
+            .and_then(Value::as_i64)
+            .map(|mid| mid.to_string()),
+        // 图文没有 B站分区，统一归入「图文」，便于在标签编辑器里整体打标签。
+        partition_name: Some("图文".into()),
+        published_at: parse_opus_pub_time(value.get("pub_time")),
+        duration: None,
+        favorite_time: None,
+        extra: value.clone(),
+    })
+}
+
+/// 图文的封面/链接可能是 `//host/path` 形式，补齐 scheme 供前端直接加载。
+fn normalize_opus_url(url: &str) -> String {
+    if url.starts_with("//") {
+        format!("https:{url}")
+    } else {
+        url.to_string()
+    }
+}
+
+/// 从图文链接里抠出 opus id：`https://www.bilibili.com/opus/123` → `opus_123`。
+/// 与 `parse_media_link` 的 `opus/<数字>` 分支保持同一命名，确保跨入口去重一致。
+fn opus_id_from_url(url: &str) -> Option<String> {
+    let path = url.split('?').next().unwrap_or(url);
+    let last = path.trim_end_matches('/').rsplit('/').next()?;
+    if last.is_empty() || !last.chars().all(|char| char.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!("opus_{last}"))
+}
+
+/// `pub_time` 可能是秒/毫秒时间戳，也可能是 `YYYY-MM-DD[ HH:MM:SS]` 字符串。
+fn parse_opus_pub_time(value: Option<&Value>) -> Option<i64> {
+    let value = value?;
+    if let Some(number) = value.as_i64() {
+        return Some(if number > 1_000_000_000_000 {
+            number / 1000
+        } else {
+            number
+        });
+    }
+    let text = value.as_str()?.trim();
+    let date_part = text.split(' ').next()?;
+    let mut parts = date_part.split('-');
+    let year: i64 = parts.next()?.parse().ok()?;
+    let month: i64 = parts.next()?.parse().ok()?;
+    let day: i64 = parts.next()?.parse().ok()?;
+    if !(1970..=2200).contains(&year) || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    Some(days_from_civil(year, month, day) * 86_400)
+}
+
+/// 公历日期 → 距 Unix 纪元的天数（Howard Hinnant 算法，避免为此引入 chrono 依赖）。
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// 按**字符数**截断（按字节切会切坏中文）。超出部分以省略号结尾。
+fn truncate_chars(text: &str, limit: usize) -> String {
+    let mut result: String = text.chars().take(limit).collect();
+    if text.chars().count() > limit {
+        result.push('…');
+    }
+    result
+}
+
 #[async_trait]
 impl SourceAdapter for BilibiliClient {
     async fn list_collections(&self) -> Result<Vec<CollectionInfo>, AppError> {
@@ -463,11 +667,28 @@ impl SourceAdapter for BilibiliClient {
         &self,
         collection: &CollectionInfo,
     ) -> Result<Vec<ExternalItem>, AppError> {
-        // collection.id 前缀编码了类型（fav 无前缀；合集 `heji_`、系列 `series_`）
-        if collection.id.starts_with("heji_") || collection.id.starts_with("series_") {
-            self.fetch_heji_collection(collection).await
+        // collection.id 前缀编码了类型：
+        // - `bili_heji_` / `bili_series_` → 合集/系列（走 seasons_archives_list）
+        // - `bili_opus_fav`             → 图文收藏（走 opus/feed/fav，无 media_id）
+        // - 其余（裸数字 media_id）      → 普通收藏夹
+        // 注意：此前曾误用 `heji_`/`series_` 前缀判断，而 resolve_heji 实际生成的是
+        // `bili_heji_{season_id}` / `bili_series_{season_id}`，导致合集被错路由到
+        // fetch_fav_collection，把整串当成 media_id 去调 fav/folder/info → B站返回 -400。
+        let route = if collection.id == OPUS_FAV_COLLECTION_ID {
+            "图文收藏"
+        } else if is_heji_collection_id(&collection.id) {
+            "合集/系列"
         } else {
-            self.fetch_fav_collection(collection).await
+            "普通收藏夹"
+        };
+        eprintln!(
+            "[bili] fetch_collection 路由：collection.id={} -> {route}",
+            collection.id
+        );
+        match route {
+            "图文收藏" => self.fetch_opus_favorites().await,
+            "合集/系列" => self.fetch_heji_collection(collection).await,
+            _ => self.fetch_fav_collection(collection).await,
         }
     }
 
@@ -689,12 +910,9 @@ impl BilibiliClient {
         &self,
         collection: &CollectionInfo,
     ) -> Result<Vec<ExternalItem>, AppError> {
-        // collection.id 形如 `heji_587216` / `series_587216`，去掉前缀得到 season_id
-        let season_id = collection
-            .id
-            .split_once('_')
-            .map(|(_, rest)| rest.to_string())
-            .unwrap_or_else(|| collection.id.clone());
+        // collection.id 形如 `bili_heji_587216` / `bili_series_587216`，去掉前缀得到 season_id
+        let season_id = heji_season_id(&collection.id);
+        eprintln!("[bili] fetch_heji_collection season_id={season_id}");
         let mut items = Vec::new();
         let mut page = 1;
         loop {
@@ -1076,5 +1294,84 @@ mod tests {
             parse_media_link("bilibili://some/unknown/format", 7788, 11).unwrap();
         assert_eq!(external_id, "bili_11_7788");
         assert_eq!(url, "https://www.bilibili.com/");
+    }
+
+    // ---- 回归测试：fetch_collection 的合集/系列路由（曾因前缀 `heji_` 误判导致 -400）----
+
+    #[test]
+    fn routing_recognizes_heji_and_series_prefix() {
+        // resolve_heji 实际生成的是 `bili_heji_<season_id>` / `bili_series_<season_id>`，
+        // 路由判断必须匹配这个前缀，否则会错进 fetch_fav_collection → -400。
+        assert!(is_heji_collection_id("bili_heji_429082"));
+        assert!(is_heji_collection_id("bili_series_587216"));
+        // 普通收藏夹是裸 media_id（无前缀），不应被识别为合集
+        assert!(!is_heji_collection_id("12345"));
+        assert!(!is_heji_collection_id("bili_fav_12345"));
+    }
+
+    #[test]
+    fn routing_extracts_season_id_from_prefixed_id() {
+        assert_eq!(heji_season_id("bili_heji_429082"), "429082");
+        assert_eq!(heji_season_id("bili_series_587216"), "587216");
+        // 兜底：无前缀时原样返回，避免 panic
+        assert_eq!(heji_season_id("12345"), "12345");
+    }
+
+    // ---- 回归测试：图文收藏（opus）项解析（字段形状逆向自空间页 bundle，无公开文档）----
+
+    #[test]
+    fn parses_opus_item_from_bundle_shape() {
+        let value = json!({
+            "id_str": "953619104940425225",
+            "jump_url": "https://www.bilibili.com/opus/953619104940425225",
+            "content": "一张练习用的图",
+            "cover": { "url": "//i0.hdslb.com/bfs/opus/abc.jpg", "width": 1200, "height": 800 },
+            "author": { "name": "UP主", "mid": 12345 },
+            "pub_time": 1700000000,
+            "stat": { "view": 1000, "like": 20 }
+        });
+        let item = parse_opus_item(&value).expect("应能解析出图文项");
+        assert_eq!(item.external_id, "opus_953619104940425225");
+        assert_eq!(item.source_url, "https://www.bilibili.com/opus/953619104940425225");
+        assert_eq!(item.title, "一张练习用的图");
+        assert_eq!(item.cover_url.as_deref(), Some("https://i0.hdslb.com/bfs/opus/abc.jpg"));
+        assert_eq!(item.author_name.as_deref(), Some("UP主"));
+        assert_eq!(item.author_id.as_deref(), Some("12345"));
+        assert_eq!(item.partition_name.as_deref(), Some("图文"));
+        assert_eq!(item.published_at, Some(1700000000));
+    }
+
+    #[test]
+    fn parses_opus_item_numeric_id_fallback() {
+        // 老版本/边界返回里可能只有数字 id，没有 id_str
+        let value = json!({ "id": 947531371067211815_u64, "content": "无 id_str" });
+        let item = parse_opus_item(&value).expect("应能回退到数字 id");
+        assert_eq!(item.external_id, "opus_947531371067211815");
+    }
+
+    #[test]
+    fn parses_opus_item_jump_url_fallback() {
+        // id_str 与 id 都缺失时，从 jump_url 里抠 id
+        let value = json!({ "jump_url": "https://www.bilibili.com/opus/953619104940425225?share_source=copy_web", "content": "仅链接" });
+        let item = parse_opus_item(&value).expect("应能从 jump_url 抠出 id");
+        assert_eq!(item.external_id, "opus_953619104940425225");
+    }
+
+    #[test]
+    fn opus_item_without_any_id_is_skipped() {
+        // 三处 id 都取不到时返回 None，避免编造 id 破坏 (source, external_id) 去重
+        assert!(parse_opus_item(&json!({ "content": "没有 id" })).is_none());
+    }
+
+    #[test]
+    fn parses_opus_pub_time_millis_and_string() {
+        // 毫秒时间戳 → 转秒
+        assert_eq!(parse_opus_pub_time(Some(&json!(1700000000000_i64))), Some(1700000000));
+        // 秒时间戳原样返回
+        assert_eq!(parse_opus_pub_time(Some(&json!(1700000000_i64))), Some(1700000000));
+        // 字符串日期也能解析
+        assert!(parse_opus_pub_time(Some(&json!("2024-11-14"))).is_some());
+        // 空值 → None
+        assert_eq!(parse_opus_pub_time(None), None);
     }
 }
