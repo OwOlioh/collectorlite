@@ -530,6 +530,18 @@ fn heji_season_id(id: &str) -> String {
 ///
 /// `external_id` 取不到时返回 `None`（该项被跳过），因为 `(source, external_id)`
 /// 是去重主键，编造 id 会导致重复导入。
+/// 把 opus 响应里的 `author.mid` 统一成字符串 id。
+///
+/// 实测 B站「图文收藏」动态流接口返回的作者 mid 是**字符串**（`"3824575"`），
+/// 而 `Value::as_i64` 对字符串返回 `None`。为兼容以后可能改成数字的情形，这里两种形态都认。
+fn opus_mid_to_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => n.as_i64().map(|mid| mid.to_string()),
+        _ => None,
+    }
+}
+
 fn parse_opus_item(value: &Value) -> Option<ExternalItem> {
     let jump_url = value
         .get("jump_url")
@@ -579,10 +591,11 @@ fn parse_opus_item(value: &Value) -> Option<ExternalItem> {
             .pointer("/author/name")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
+        // opus 响应里 `author.mid` 是**字符串**（实测为 `"3824575"` 而非数字），
+        // 用 `as_i64` 会直接返回 None 导致作者 id 丢失、链接失效，所以这里兼容字符串/数字两种形态。
         author_id: value
             .pointer("/author/mid")
-            .and_then(Value::as_i64)
-            .map(|mid| mid.to_string()),
+            .and_then(opus_mid_to_string),
         // 图文没有 B站分区，统一归入「图文」，便于在标签编辑器里整体打标签。
         partition_name: Some("图文".into()),
         published_at: parse_opus_pub_time(value.get("pub_time")),
@@ -964,8 +977,14 @@ impl BilibiliClient {
                         .and_then(Value::as_str)
                         .map(ToOwned::to_owned),
                     cover_local_path: None,
-                    author_name: None,
-                    author_id: None,
+                    author_name: archive
+                        .pointer("/owner/name")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    author_id: archive
+                        .pointer("/owner/mid")
+                        .and_then(Value::as_i64)
+                        .map(|mid| mid.to_string()),
                     partition_name: None,
                     published_at: archive.get("pubdate").and_then(Value::as_i64),
                     duration: archive.get("duration").and_then(Value::as_i64),
@@ -1339,6 +1358,22 @@ mod tests {
         assert_eq!(item.author_id.as_deref(), Some("12345"));
         assert_eq!(item.partition_name.as_deref(), Some("图文"));
         assert_eq!(item.published_at, Some(1700000000));
+    }
+
+    #[test]
+    fn parses_opus_item_string_mid_like_real_api() {
+        // 真实「图文收藏」动态流接口返回的 author.mid 是字符串（如 "3824575"），
+        // 早期用 as_i64 解析会丢 id。此测试固化该修复。
+        let value = json!({
+            "id_str": "666479495887192082",
+            "jump_url": "https://www.bilibili.com/opus/666479495887192082",
+            "content": "批量自动采集b站收藏夹内容",
+            "author": { "name": "綾濑千早", "mid": "3824575" },
+            "pub_time": "2024-11-14"
+        });
+        let item = parse_opus_item(&value).expect("应能解析出图文项");
+        assert_eq!(item.author_name.as_deref(), Some("綾濑千早"));
+        assert_eq!(item.author_id.as_deref(), Some("3824575"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import { FileText, Globe, Pencil, Trash2 } from "lucide-react";
 import { resolveCoverUrl } from "../lib/api";
-import { formatDate, formatDuration } from "../lib/format";
+import { authorProfileUrl, formatDate, formatDuration } from "../lib/format";
 import type { VideoItem } from "../types";
 import { TagBadge } from "./TagBadge";
 import { CoverImage } from "./CoverImage";
@@ -26,6 +26,7 @@ export function VideoCard({
 }: VideoCardProps) {
   const isBrowser = item.source === "browser";
   const cover = resolveCoverUrl(item.coverUrl, item.coverLocalPath);
+  const authorUrl = authorProfileUrl(item.source, item.authorId);
 
   return (
     <article className="video-card">
@@ -77,7 +78,18 @@ export function VideoCard({
             <span>{formatDate(item.favoriteTime || item.publishedAt)}</span>
           ) : (
             <>
-              <span>{item.authorName || "未知作者"}</span>
+              {authorUrl && item.authorName ? (
+                <button
+                  type="button"
+                  className="author-link"
+                  onClick={() => onOpen(authorUrl)}
+                  title="在浏览器打开作者主页"
+                >
+                  {item.authorName}
+                </button>
+              ) : (
+                <span>{item.authorName || "未知作者"}</span>
+              )}
               {item.partitionName && <span>{item.partitionName}</span>}
               <span>{formatDate(item.favoriteTime || item.publishedAt)}</span>
             </>

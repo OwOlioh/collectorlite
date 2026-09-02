@@ -54,7 +54,113 @@ pub async fn connect(path: &std::path::Path) -> Result<SqlitePool, AppError> {
         .run(&pool)
         .await
         .map_err(|error| AppError::Other(error.to_string()))?;
+    // 幂等回填历史 GitHub 项的 author_id / author_name（早期版本未写入），
+    // 失败仅打印告警、不阻断启动。
+    if let Err(error) = backfill_github_author_ids(&pool).await {
+        eprintln!("[db] GitHub author_id 回填失败（已忽略）：{error}");
+    }
+    // 幂等回填历史 B站图文（opus）项的 author_id（早期版本把 mid 当数字解析，
+    // 而真实响应里 mid 是字符串导致全部丢失）。失败仅打印告警、不阻断启动。
+    if let Err(error) = backfill_opus_author_ids(&pool).await {
+        eprintln!("[db] B站图文 author_id 回填失败（已忽略）：{error}");
+    }
     Ok(pool)
+}
+
+/// 一次性回填：为历史 GitHub 收藏项补全 `author_id` / `author_name`。
+///
+/// 早期版本的 GitHub 适配器未写入 `author_id`（恒为 NULL），导致卡片「作者」栏无法跳转
+/// 到原作者主页。这里从 `source_url`（`https://github.com/{owner}/{repo}`）解析出仓库 owner
+/// 作为 `author_id`，并在 `author_name` 为空时同样补上（保证前端作者链接可点）。
+/// 幂等：仅更新 `author_id` 为空、来源为 github、且 URL 形如 github.com 的行。
+pub async fn backfill_github_author_ids(pool: &SqlitePool) -> Result<u64, AppError> {
+    let rows = sqlx::query(
+        "SELECT id, source_url FROM items \
+         WHERE source = 'github' AND author_id IS NULL AND source_url LIKE '%github.com/%'",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut updated = 0u64;
+    for row in rows {
+        let id: i64 = row.try_get("id")?;
+        let url: String = row.try_get("source_url")?;
+        if let Some(owner) = github_owner_from_url(&url) {
+            sqlx::query(
+                "UPDATE items SET author_id = ?, author_name = COALESCE(author_name, ?) WHERE id = ?",
+            )
+            .bind(&owner)
+            .bind(&owner)
+            .bind(id)
+            .execute(pool)
+            .await?;
+            updated += 1;
+        }
+    }
+    if updated > 0 {
+        eprintln!("[db] 回填 GitHub author_id / author_name 完成，更新 {updated} 条");
+    }
+    Ok(updated)
+}
+
+/// 从 GitHub 仓库 URL 解析 owner：`https://github.com/{owner}/{repo}` → `{owner}`。
+/// 仅接受 `github.com/<owner>/<repo>` 形态（owner 后必有 `/`），避免误解析裸域名。
+fn github_owner_from_url(url: &str) -> Option<String> {
+    let marker = "github.com/";
+    let start = url.find(marker)? + marker.len();
+    let rest = &url[start..];
+    let slash = rest.find('/')?;
+    let owner = &rest[..slash];
+    if owner.is_empty() {
+        None
+    } else {
+        Some(owner.to_string())
+    }
+}
+
+/// 一次性回填：为历史 B站图文（opus）收藏项补全 `author_id`。
+///
+/// 早期版本的 `parse_opus_item` 用 `Value::as_i64` 解析 `author.mid`，
+/// 而「图文收藏」动态流接口返回的 mid 实际是**字符串**（`"3824575"`），
+/// 导致 `author_id` 恒为 NULL、卡片「作者」栏无法跳转作者空间。
+/// 这里从 `extra_json`（保留了完整原始响应）里重新取出 `author.mid` 回填。
+/// 幂等：仅更新 `author_id` 为空、来源为 bilibili、且 external_id 以 `opus_` 开头的行。
+pub async fn backfill_opus_author_ids(pool: &SqlitePool) -> Result<u64, AppError> {
+    let rows = sqlx::query(
+        "SELECT id, extra_json FROM items \
+         WHERE source = 'bilibili' AND external_id LIKE 'opus_%' AND author_id IS NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut updated = 0u64;
+    for row in rows {
+        let id: i64 = row.try_get("id")?;
+        let extra: String = row.try_get("extra_json")?;
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&extra) {
+            if let Some(mid) = json.pointer("/author/mid").and_then(opus_mid_to_string) {
+                sqlx::query("UPDATE items SET author_id = ? WHERE id = ?")
+                    .bind(&mid)
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+                updated += 1;
+            }
+        }
+    }
+    if updated > 0 {
+        eprintln!("[db] 回填 B站图文 author_id 完成，更新 {updated} 条");
+    }
+    Ok(updated)
+}
+
+/// 把 opus 响应里的 `author.mid` 统一成字符串 id（兼容字符串/数字两种形态）。
+fn opus_mid_to_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => n.as_i64().map(|mid| mid.to_string()),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -1213,4 +1319,53 @@ pub async fn import_collection(
     finish_import_run(pool, run_id, imported, skipped, failed, &errors).await?;
     let result = build_import_result(pool, run_id).await?;
     Ok((result, new_items))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{github_owner_from_url, opus_mid_to_string};
+    use serde_json::json;
+
+    #[test]
+    fn parses_github_owner_from_repo_url() {
+        assert_eq!(
+            github_owner_from_url("https://github.com/torvalds/linux"),
+            Some("torvalds".to_string())
+        );
+        assert_eq!(
+            github_owner_from_url("http://github.com/rust-lang/rust"),
+            Some("rust-lang".to_string())
+        );
+        // owner 含点号也正常
+        assert_eq!(
+            github_owner_from_url("https://github.com/foo.bar/repo"),
+            Some("foo.bar".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_non_repo_github_urls() {
+        // 裸域名（owner 后无 `/`）解析不出 owner
+        assert_eq!(github_owner_from_url("https://github.com/torvalds"), None);
+        // 非 github 域名
+        assert_eq!(github_owner_from_url("https://gitlab.com/a/b"), None);
+        assert_eq!(github_owner_from_url("not a url"), None);
+    }
+
+    #[test]
+    fn parses_opus_mid_as_string_and_number() {
+        // 图文收藏接口实测返回字符串形态的 mid
+        assert_eq!(
+            opus_mid_to_string(&json!("3824575")),
+            Some("3824575".to_string())
+        );
+        // 兼容以后可能改为数字的情形
+        assert_eq!(
+            opus_mid_to_string(&json!(3824575)),
+            Some("3824575".to_string())
+        );
+        // 缺失 / 非标量应返回 None，避免编造 id
+        assert_eq!(opus_mid_to_string(&json!(null)), None);
+        assert_eq!(opus_mid_to_string(&json!({ "x": 1 })), None);
+    }
 }

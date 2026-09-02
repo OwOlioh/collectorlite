@@ -924,6 +924,21 @@ button,
   font-size: 12px;
 }
 
+/* 作者栏：可点击跳转到原作者个人空间 */
+.author-link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent, #3b82f6);
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.author-link:hover {
+  text-decoration: underline;
+}
+
 /* ── 从文件导入 ── */
 .file-import-form {
   display: flex;
