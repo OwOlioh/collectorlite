@@ -38,10 +38,12 @@ Multi-platform local desktop app for collecting favorites (Bilibili, browser boo
 | `src/components/TagEditorModal.tsx` | Edit tag name/color |
 | `src/components/SettingsPage.tsx` | Account status, privacy info, **appearance (theme) selector** |
 | `src/components/Sidebar.tsx` | Navigation sidebar |
+| `src/components/TrashPage.tsx` | 回收站页面：列出已删除项，支持单条/批量恢复与永久删除/清空，显示保留期倒计时 |
 | `src/lib/api.ts` | Tauri invoke wrapper with mock fallback |
 | `src/lib/format.ts` | Shared `formatDuration` / `formatDate` helpers |
 | `src/lib/theme.ts` | Theme persistence (localStorage + system preference) and `applyTheme` |
 | `src/lib/tagUtils.ts` | Tag match/merge helpers |
+| `src/lib/retention.ts` | 回收站保留天数配置（默认 7 天，localStorage 持久化） |
 | `src/types.ts` | Shared TypeScript types |
 
 ### Backend
@@ -50,7 +52,7 @@ Multi-platform local desktop app for collecting favorites (Bilibili, browser boo
 |------|---------|
 | `src-tauri/src/lib.rs` | Tauri setup and command registration |
 | `src-tauri/src/commands.rs` | All Tauri command handlers (B站 / browser / Zhihu / CSDN / GitHub) |
-| `src-tauri/src/db.rs` | SQLite queries, upsert, tag operations, FTS, search |
+| `src-tauri/src/db.rs` | SQLite queries, upsert, tag operations, FTS, search, trash (soft-delete) ops |
 | `src-tauri/src/models.rs` | Backend request/response types, `ExternalItem`, `CollectionInfo` |
 | `src-tauri/src/source/mod.rs` | `SourceAdapter` trait definition |
 | `src-tauri/src/source/bilibili.rs` | Bilibili client: QR login, favorites API |
@@ -70,6 +72,7 @@ Multi-platform local desktop app for collecting favorites (Bilibili, browser boo
 - `src-tauri/migrations/0004_rebuild_items_fts.sql`
 - `src-tauri/migrations/0005_cover_local_path.sql`
 - `src-tauri/migrations/0006_video_notes.sql`
+- `src-tauri/migrations/0007_soft_delete.sql` — items 表新增 `deleted_at` 列（软删除 / 回收站）
 
 ## Implemented Features
 
@@ -88,6 +91,7 @@ Multi-platform local desktop app for collecting favorites (Bilibili, browser boo
 - Partial-match text search (title, description, author, tags)
 - FTS5 full-text search index
 - Website favicon service for browser bookmarks (`favicon.im`)
+- **Trash / 回收站**: 单条 / 批量 / 按标签删除均为软删除，先进入回收站，保留期内可恢复；超期在应用启动时自动清除；永久删除才真正删库并清理封面文件
 
 ## Frontend Features (added later)
 
@@ -98,6 +102,7 @@ Multi-platform local desktop app for collecting favorites (Bilibili, browser boo
 - **Batch operations**: multi-select cards → batch tag editor (`BatchTagEditorModal`) + batch delete + JSON export; `⌘A` select all, `Esc` clear (input focused = no-op)
 - **Performance**: library list uses `VirtuosoGrid` virtual scrolling; covers use blur-up lazy loading (`CoverImage`)
 - **Micro-animations**: card hover lift, tag scale, sidebar transitions, modal/toast entrance, shimmer skeletons — all gated by `prefers-reduced-motion`
+- **回收站（Trash）**: 侧边栏「回收站」入口带未读计数角标；独立页面列出已删除项，支持单条恢复 / 永久删除、全部恢复 / 清空，并显示保留期倒计时；设置页可配置保留期（7 / 15 / 30 天，默认 7）；应用启动时按保留期自动清理过期项。LibraryPage 的批量删除与按标签删除均走软删除进入回收站。
 
 ## Key Implementation Notes
 
@@ -114,6 +119,14 @@ Multi-platform local desktop app for collecting favorites (Bilibili, browser boo
 - QR poll returns top-level `code: 0`; real status in `data.code`
 - Cookie: `bilibili_cookie.txt` + Windows Credential Manager
 - WBI signing required for some API calls
+
+### Bilibili Import Performance
+
+- Pipeline: `fetch_collection` (paginated `ps=20`) → `enrich_items` (per-BV `x/web-interface/view`) → `cache_item_covers` (download to `covers/`) → upsert loop.
+- **Preview→execute cache (Plan A)**: `preview_import` stores the enriched items in `AppState.import_cache` (keyed `{source}:{id}`); `execute_import` reuses them via `take_cached_enriched` (consumes the cache to avoid stale reuse). Cache miss (e.g. app restarted) falls back to fetch+enrich. This removes the second full enrich pass that previously doubled import time for a 1000-item folder.
+- **Concurrent enrich (Plan B)**: `enrich_items` runs bounded-concurrency chunks (`ENRICH_CONCURRENCY = 6`) over the per-BV view calls, replacing the old serial loop + fixed 180 ms sleep between items (~3 min pure wait per 1000 items). Non-BV items (opus/audio/cv) are skipped; order is preserved; a `RiskControl` error aborts immediately.
+- **Concurrent covers**: `cache_item_covers` downloads covers in bounded chunks (`COVER_CONCURRENCY = 8`) instead of serially, keeping the offline `covers/` copy.
+- Net effect for a full 1000-video folder: ~15 min → ~1.5 min (rough estimate; depends on network/rate-limit).
 
 ### Browser Bookmarks Specifics
 
@@ -168,6 +181,16 @@ Multi-platform local desktop app for collecting favorites (Bilibili, browser boo
 - `search_items` supports `sources: Vec<String>` filter (AND logic)
 - `camelCase` serde for all JSON models
 - FTS index rebuilt after every tag change
+
+### Trash / Soft-delete
+
+- 所有"删除"都是**软删除**：后端 `db::soft_delete_item` 仅置 `items.deleted_at` 并移除 FTS 行，保留 `item_tags` / `import_run_items` 关联与封面文件，恢复时零成本重建 FTS。
+- `items.deleted_at` 为 `NULL` = 正常在库，非 `NULL` = 在回收站（值为删除时间戳，秒）。schema 由迁移 `0007_soft_delete.sql` 添加。
+- `VideoItem` 增加 `deleted_at: Option<i64>`；`ItemFilters` 增加 `trash: Option<bool>`（`None`/`false` = 仅正常项，`Some(true)` = 仅回收站），`search_items` 已支持该过滤。
+- 永久删除（`purge_*` / `empty_trash`）才真正删库行 + FTS 行，并通过 `remove_cover_files` 仅删除 `covers/` 目录下的封面文件（带路径前缀校验防误删）。
+- 前端入口：LibraryPage 的批量删除 / 按标签删除调 `deleteItems` / `deleteItemsByTag`（后端软删除）；TrashPage 提供恢复 / 永久删除 / 清空；`App.tsx` 启动调 `autoPurgeTrash(retentionDays)` 自动清理过期项。
+- 保留期配置在 `src/lib/retention.ts`（`DEFAULT_RETENTION_DAYS = 7`，选项 7 / 15 / 30，localStorage 持久化），设置页可改。
+- **注意**：新增来源时不要引入硬删除逻辑，复用现有 `soft_delete_*` 即可，回收站 UI / 自动清理 / 封面清理会一并覆盖。
 
 ## Run Commands
 

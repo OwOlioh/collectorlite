@@ -13,6 +13,10 @@ use crate::source::browser::BrowserBookmarkClient;
 use crate::source::SourceAdapter;
 use crate::state::AppState;
 
+/// 封面下载并发度：导入时仍把远程封面存到本地 `covers/`（保留离线查看能力），
+/// 但把原来逐条串行改为有界并发，缩短满收藏夹的导入等待时间。
+const COVER_CONCURRENCY: usize = 8;
+
 fn to_video_item(item: &crate::models::ExternalItem, local_id: i64) -> VideoItem {
     VideoItem {
         id: local_id,
@@ -32,6 +36,27 @@ fn to_video_item(item: &crate::models::ExternalItem, local_id: i64) -> VideoItem
         favorite_time: item.favorite_time,
         deleted_at: None,
         tags: vec![],
+    }
+}
+
+/// 预览缓存的 key：来源 + 收藏夹 id，用于 execute 阶段判断是否可复用预览算好的 enriched items。
+fn preview_cache_key(collection: &CollectionInfo) -> String {
+    format!("{}:{}", collection.source, collection.id)
+}
+
+/// 若缓存命中当前收藏夹，取出并返回 enriched items（同时销毁缓存，避免误用过期/切换后的数据）。
+/// 命中即可跳过 fetch_collection + enrich_items 二次开销（满收藏夹约省 5–7 分钟）。
+fn take_cached_enriched(
+    state: &AppState,
+    collection: &CollectionInfo,
+) -> Option<Vec<crate::models::ExternalItem>> {
+    let mut guard = state.import_cache.lock().ok()?;
+    let taken = guard.take()?;
+    if taken.key == preview_cache_key(collection) {
+        Some(taken.items)
+    } else {
+        *guard = Some(taken);
+        None
     }
 }
 
@@ -65,21 +90,38 @@ async fn cache_item_covers(
     state: &AppState,
     items: &[crate::models::ExternalItem],
 ) -> Vec<crate::models::ExternalItem> {
-    let mut cached = Vec::with_capacity(items.len());
-    for item in items {
-        let mut next = item.clone();
-        if let Some(url) = item.cover_url.as_deref().filter(|value| !value.is_empty()) {
-            if let Ok((bytes, extension)) = state.bili.download_cover(url).await {
-                if let Ok(path) =
-                    save_cover_file(state, &item.source, &item.external_id, &bytes, &extension)
-                {
-                    next.cover_local_path = Some(path);
+    // 保留「导入时下载到本地 covers/ 以便离线查看」的行为，但把串行逐条改为有界并发。
+    let mut out = items.to_vec();
+    for chunk_start in (0..items.len()).step_by(COVER_CONCURRENCY) {
+        let end = (chunk_start + COVER_CONCURRENCY).min(items.len());
+        let futures: Vec<_> = (chunk_start..end)
+            .map(|i| {
+                let item = &items[i];
+                async move {
+                    let mut next = item.clone();
+                    if let Some(url) = item.cover_url.as_deref().filter(|value| !value.is_empty()) {
+                        if let Ok((bytes, extension)) = state.bili.download_cover(url).await {
+                            if let Ok(path) = save_cover_file(
+                                state,
+                                &item.source,
+                                &item.external_id,
+                                &bytes,
+                                &extension,
+                            ) {
+                                next.cover_local_path = Some(path);
+                            }
+                        }
+                    }
+                    (i, next)
                 }
-            }
+            })
+            .collect();
+        let results = futures::future::join_all(futures).await;
+        for (i, next) in results {
+            out[i] = next;
         }
-        cached.push(next);
     }
-    cached
+    out
 }
 
 async fn cache_csdn_covers(
@@ -257,6 +299,13 @@ pub async fn preview_import(
         .enrich_items(&items)
         .await
         .map_err(|error| error.to_string())?;
+    // 缓存本轮 enriched items，供 execute 阶段复用，跳过重复 fetch + enrich
+    if let Ok(mut guard) = state.import_cache.lock() {
+        *guard = Some(crate::state::PreviewCache {
+            key: preview_cache_key(&collection),
+            items: enriched.clone(),
+        });
+    }
     let preview_items = enriched
         .iter()
         .enumerate()
@@ -292,16 +341,22 @@ pub async fn execute_import(
     let collection = resolve_collection(&state, &input)
         .await
         .map_err(|error| error.to_string())?;
-    let items = state
-        .bili
-        .fetch_collection(&collection)
-        .await
-        .map_err(|error| error.to_string())?;
-    let enriched = state
-        .bili
-        .enrich_items(&items)
-        .await
-        .map_err(|error| error.to_string())?;
+    // 预览阶段若已算好同一收藏夹的 enriched items，直接复用，跳过 fetch + enrich（满收藏夹约省 5–7 分钟）
+    let enriched = match take_cached_enriched(&state, &collection) {
+        Some(cached) => cached,
+        None => {
+            let items = state
+                .bili
+                .fetch_collection(&collection)
+                .await
+                .map_err(|error| error.to_string())?;
+            state
+                .bili
+                .enrich_items(&items)
+                .await
+                .map_err(|error| error.to_string())?
+        }
+    };
     let enriched = cache_item_covers(&state, &enriched).await;
     let assignments = input
         .item_tag_assignments
@@ -402,7 +457,10 @@ pub async fn restore_item(state: State<'_, AppState>, item_id: i64) -> Result<()
 }
 
 #[tauri::command]
-pub async fn restore_items(state: State<'_, AppState>, item_ids: Vec<i64>) -> Result<usize, String> {
+pub async fn restore_items(
+    state: State<'_, AppState>,
+    item_ids: Vec<i64>,
+) -> Result<usize, String> {
     let count = item_ids.len();
     db::restore_items(&state.pool, &item_ids)
         .await

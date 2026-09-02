@@ -1,14 +1,23 @@
 use keyring::Entry;
 use sqlx::SqlitePool;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use tauri::Manager;
 
 use crate::db;
 use crate::error::AppError;
+use crate::models::ExternalItem;
 use crate::source::bilibili::BilibiliClient;
 use crate::source::csdn::CsdnClient;
 use crate::source::github::GithubClient;
 use crate::source::zhihu::ZhihuClient;
+
+/// 预览阶段算好的 enriched items 缓存，供执行阶段复用，避免重复 fetch + enrich。
+/// key 为 `{source}:{collection.id}`，命中即跳过二次抓取与逐条补全。
+pub struct PreviewCache {
+    pub key: String,
+    pub items: Vec<ExternalItem>,
+}
 
 const KEYRING_SERVICE: &str = "bili-collector";
 const KEYRING_USER: &str = "bilibili-cookie";
@@ -21,6 +30,7 @@ pub struct AppState {
     pub github: GithubClient,
     pub zhihu: ZhihuClient,
     pub data_dir: PathBuf,
+    pub import_cache: Mutex<Option<PreviewCache>>,
 }
 
 impl AppState {
@@ -59,6 +69,7 @@ impl AppState {
             github,
             zhihu,
             data_dir,
+            import_cache: Mutex::new(None),
         })
     }
 

@@ -29,6 +29,7 @@ webbrowser = "1"
 scraper = "0.20"
 sha2 = "0.10"
 regex = "1"
+futures = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"

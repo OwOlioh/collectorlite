@@ -17,6 +17,10 @@ const BILIBILI_REFERER: &str = "https://www.bilibili.com/";
 const USER_AGENT_STR: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36";
 
+/// enrich_items 并发度：用有界并发替代原来的「串行 + 每条 180ms 固定等待」，
+/// 既提速又把对 B站接口的瞬时压力限制在一个保守值，降低触发风控的概率。
+const ENRICH_CONCURRENCY: usize = 6;
+
 /// 图文收藏（opus）在 `CollectionInfo.id` 中使用的哨兵值。
 ///
 /// 图文收藏**不是收藏夹**：它没有 `media_id`，也永远不会出现在
@@ -129,7 +133,10 @@ impl BilibiliClient {
             let text = response.text().await?;
             let value: Value = serde_json::from_str(&text).map_err(|_| {
                 // 非 JSON（如代理拦截页）：把原始响应打到 stderr 便于排查网络/代理问题
-                eprintln!("[bili] 非 JSON 响应 {full_url} -> HTTP {status} body={}", &text[..text.len().min(300)]);
+                eprintln!(
+                    "[bili] 非 JSON 响应 {full_url} -> HTTP {status} body={}",
+                    &text[..text.len().min(300)]
+                );
                 AppError::Other(format!("B 站返回了无法解析的数据（HTTP {status}）"))
             })?;
             let code = value.get("code").and_then(Value::as_i64).unwrap_or(-1);
@@ -423,8 +430,15 @@ impl BilibiliClient {
     }
 
     /// 解析普通收藏夹（/favlist?fid=）：`fid` 即 media_id，个别旧链接需拼接 `mid % 100` 再混淆。
-    async fn resolve_fav(&self, parsed: &ParsedBiliUrl, url: &str) -> Result<CollectionInfo, AppError> {
-        let candidates = vec![parsed.id.clone(), format!("{}{:02}", parsed.id, parsed.mid % 100)];
+    async fn resolve_fav(
+        &self,
+        parsed: &ParsedBiliUrl,
+        url: &str,
+    ) -> Result<CollectionInfo, AppError> {
+        let candidates = vec![
+            parsed.id.clone(),
+            format!("{}{:02}", parsed.id, parsed.mid % 100),
+        ];
         let mut last_error = AppError::NotFound("没有找到这个公开收藏夹".into());
         for candidate in &candidates {
             let info = self
@@ -469,7 +483,11 @@ impl BilibiliClient {
     }
 
     /// 解析合集/系列（/channel/collectiondetail 或 /channel/seriesdetail）：用 seasons_archives_list 取元信息。
-    async fn resolve_heji(&self, parsed: &ParsedBiliUrl, url: &str) -> Result<CollectionInfo, AppError> {
+    async fn resolve_heji(
+        &self,
+        parsed: &ParsedBiliUrl,
+        url: &str,
+    ) -> Result<CollectionInfo, AppError> {
         let value = self
             .get_json(
                 "https://api.bilibili.com/x/polymer/web-space/seasons_archives_list",
@@ -486,7 +504,11 @@ impl BilibiliClient {
             .and_then(Value::as_object)
             .ok_or_else(|| AppError::NotFound("没有找到这个合集/系列".into()))?;
         let is_series = parsed.collection_type == "bili_series";
-        let fallback_title = if is_series { "公开系列" } else { "公开合集" };
+        let fallback_title = if is_series {
+            "公开系列"
+        } else {
+            "公开合集"
+        };
         Ok(CollectionInfo {
             source: "bilibili".into(),
             // 用前缀编码类型，fetch_collection 据此分支（避免给共享结构体加字段而改动其它来源）
@@ -593,9 +615,7 @@ fn parse_opus_item(value: &Value) -> Option<ExternalItem> {
             .map(ToOwned::to_owned),
         // opus 响应里 `author.mid` 是**字符串**（实测为 `"3824575"` 而非数字），
         // 用 `as_i64` 会直接返回 None 导致作者 id 丢失、链接失效，所以这里兼容字符串/数字两种形态。
-        author_id: value
-            .pointer("/author/mid")
-            .and_then(opus_mid_to_string),
+        author_id: value.pointer("/author/mid").and_then(opus_mid_to_string),
         // 图文没有 B站分区，统一归入「图文」，便于在标签编辑器里整体打标签。
         partition_name: Some("图文".into()),
         published_at: parse_opus_pub_time(value.get("pub_time")),
@@ -666,6 +686,42 @@ fn truncate_chars(text: &str, limit: usize) -> String {
     result
 }
 
+/// 把 `web-interface/view` 返回的 `data` 合并进已存在的 `ExternalItem`（只覆盖有值字段）。
+/// 抽成独立函数，便于 enrich_items 并发化后复用，保持与旧逻辑一致的字段映射。
+fn apply_view_data(item: &mut ExternalItem, data: &serde_json::Map<String, Value>) {
+    item.title = data
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| item.title.clone());
+    item.description = data
+        .get("desc")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| item.description.clone());
+    if let Some(pic) = data.get("pic").and_then(Value::as_str) {
+        item.cover_url = Some(pic.to_string());
+    }
+    if let Some(owner) = data.get("owner").and_then(Value::as_object) {
+        if let Some(name) = owner.get("name").and_then(Value::as_str) {
+            item.author_name = Some(name.to_string());
+        }
+        if let Some(mid) = owner.get("mid").and_then(Value::as_i64) {
+            item.author_id = Some(mid.to_string());
+        }
+    }
+    item.partition_name = data
+        .get("tname")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if let Some(pubdate) = data.get("pubdate").and_then(Value::as_i64) {
+        item.published_at = Some(pubdate);
+    }
+    if let Some(duration) = data.get("duration").and_then(Value::as_i64) {
+        item.duration = Some(duration);
+    }
+}
+
 #[async_trait]
 impl SourceAdapter for BilibiliClient {
     async fn list_collections(&self) -> Result<Vec<CollectionInfo>, AppError> {
@@ -706,74 +762,58 @@ impl SourceAdapter for BilibiliClient {
     }
 
     async fn enrich_items(&self, items: &[ExternalItem]) -> Result<Vec<ExternalItem>, AppError> {
-        let mut enriched = Vec::with_capacity(items.len());
-        for (index, item) in items.iter().enumerate() {
-            // 图文 / 音频 / 专栏等非视频项没有 bvid，跳过 web-interface/view 详情补全
-            if !item.external_id.starts_with("BV") {
-                enriched.push(item.clone());
-                continue;
-            }
-            if index > 0 {
-                tokio::time::sleep(Duration::from_millis(180)).await;
-            }
-            let mut next = item.clone();
-            match self
-                .get_json(
-                    "https://api.bilibili.com/x/web-interface/view",
-                    vec![("bvid".into(), item.external_id.clone())],
-                    true,
-                )
-                .await
-            {
-                Ok(value) => {
-                    if let Some(data) = value.get("data").and_then(Value::as_object) {
-                        next.title = data
-                            .get("title")
-                            .and_then(Value::as_str)
-                            .unwrap_or(&next.title)
-                            .to_string();
-                        next.description = data
-                            .get("desc")
-                            .and_then(Value::as_str)
-                            .unwrap_or(&next.description)
-                            .to_string();
-                        next.cover_url = data
-                            .get("pic")
-                            .and_then(Value::as_str)
-                            .map(ToOwned::to_owned)
-                            .or_else(|| next.cover_url.clone());
-                        next.author_name = data
-                            .get("owner")
-                            .and_then(Value::as_object)
-                            .and_then(|owner| owner.get("name"))
-                            .and_then(Value::as_str)
-                            .map(ToOwned::to_owned)
-                            .or_else(|| next.author_name.clone());
-                        next.author_id = data
-                            .get("owner")
-                            .and_then(Value::as_object)
-                            .and_then(|owner| owner.get("mid"))
-                            .and_then(Value::as_i64)
-                            .map(|value| value.to_string())
-                            .or_else(|| next.author_id.clone());
-                        next.partition_name = data
-                            .get("tname")
-                            .and_then(Value::as_str)
-                            .map(ToOwned::to_owned);
-                        next.published_at = data
-                            .get("pubdate")
-                            .and_then(Value::as_i64)
-                            .or(next.published_at);
-                        next.duration = data
-                            .get("duration")
-                            .and_then(Value::as_i64)
-                            .or(next.duration);
+        // 有界并发：每批最多 ENRICH_CONCURRENCY 条同时请求 web-interface/view，
+        // 替代原先「串行 + 每条 180ms 固定等待」的模式（1000 条原需 ~3 分钟纯等待）。
+        // 非视频项（opus/audio/cv，无 bvid）直接跳过补全，保持原顺序。
+        let mut enriched: Vec<ExternalItem> = items.to_vec();
+        let mut risk_error: Option<AppError> = None;
+        for chunk_start in (0..items.len()).step_by(ENRICH_CONCURRENCY) {
+            let end = (chunk_start + ENRICH_CONCURRENCY).min(items.len());
+            let futures: Vec<_> = (chunk_start..end)
+                .map(|i| {
+                    let item = &items[i];
+                    async move {
+                        if !item.external_id.starts_with("BV") {
+                            return Ok((i, None));
+                        }
+                        match self
+                            .get_json(
+                                "https://api.bilibili.com/x/web-interface/view",
+                                vec![("bvid".into(), item.external_id.clone())],
+                                true,
+                            )
+                            .await
+                        {
+                            Ok(value) => Ok((i, Some(value))),
+                            Err(AppError::RiskControl(message)) => {
+                                Err(AppError::RiskControl(message))
+                            }
+                            Err(_) => Ok((i, None)),
+                        }
                     }
+                })
+                .collect();
+            let results = futures::future::join_all(futures).await;
+            for result in results {
+                match result {
+                    Ok((i, Some(value))) => {
+                        if let Some(data) = value.get("data").and_then(Value::as_object) {
+                            apply_view_data(&mut enriched[i], data);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(AppError::RiskControl(message)) => {
+                        risk_error = Some(AppError::RiskControl(message));
+                    }
+                    Err(_) => {}
                 }
-                Err(AppError::RiskControl(message)) => return Err(AppError::RiskControl(message)),
-                Err(_) => {}
             }
-            enriched.push(next);
+            if risk_error.is_some() {
+                break;
+            }
+        }
+        if let Some(error) = risk_error {
+            return Err(error);
         }
         Ok(enriched)
     }
@@ -865,7 +905,10 @@ impl BilibiliClient {
                 } else {
                     // 图文 / 音频 / 专栏等非视频项：用 link 跳转 uri 解析出 id 与地址
                     let id = media.get("id").and_then(Value::as_i64).unwrap_or(0);
-                    let link = media.get("link").and_then(Value::as_str).unwrap_or_default();
+                    let link = media
+                        .get("link")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
                     let Some((external_id, source_url)) = parse_media_link(link, id, mtype) else {
                         continue;
                     };
@@ -1002,7 +1045,6 @@ impl BilibiliClient {
         }
         Ok(items)
     }
-
 }
 
 fn parse_favorite_folder_list(value: &Value) -> Result<Vec<CollectionInfo>, AppError> {
@@ -1096,8 +1138,7 @@ fn parse_public_favorite_url(value: &str) -> Result<ParsedBiliUrl, AppError> {
 
     // 2) 旧版合集/系列：channel/collectiondetail?sid= | channel/seriesdetail?sid=
     if path.contains("collectiondetail") {
-        let id = get("sid")
-            .ok_or_else(|| AppError::InvalidInput("链接中缺少合集 sid".into()))?;
+        let id = get("sid").ok_or_else(|| AppError::InvalidInput("链接中缺少合集 sid".into()))?;
         return Ok(ParsedBiliUrl {
             mid,
             id,
@@ -1105,8 +1146,7 @@ fn parse_public_favorite_url(value: &str) -> Result<ParsedBiliUrl, AppError> {
         });
     }
     if path.contains("seriesdetail") {
-        let id = get("sid")
-            .ok_or_else(|| AppError::InvalidInput("链接中缺少系列 sid".into()))?;
+        let id = get("sid").ok_or_else(|| AppError::InvalidInput("链接中缺少系列 sid".into()))?;
         return Ok(ParsedBiliUrl {
             mid,
             id,
@@ -1118,8 +1158,7 @@ fn parse_public_favorite_url(value: &str) -> Result<ParsedBiliUrl, AppError> {
     if path.contains("favlist") {
         let is_collected_heji =
             get("ftype").as_deref() == Some("collect") || get("ctype").as_deref() == Some("21");
-        let id = get("fid")
-            .ok_or_else(|| AppError::InvalidInput("链接中缺少收藏夹 fid".into()))?;
+        let id = get("fid").ok_or_else(|| AppError::InvalidInput("链接中缺少收藏夹 fid".into()))?;
         // 「被收藏的合集」其 fid 实为底层合集的 season_id，须走 heji 路径而非普通收藏夹
         // （B站 season_id 与 media_id 是两套独立命名空间，同名数字指向不同内容）
         let collection_type = if is_collected_heji {
@@ -1180,14 +1219,14 @@ fn parse_media_link(link: &str, fallback_id: i64, item_type: i64) -> Option<(Str
                     return Some((
                         format!("au_{id}"),
                         format!("https://www.bilibili.com/audio/{raw}"),
-                    ))
+                    ));
                 }
                 "read" => {
                     let id = raw.strip_prefix("cv").unwrap_or(raw);
                     return Some((
                         format!("cv_{id}"),
                         format!("https://www.bilibili.com/read/{raw}"),
-                    ))
+                    ));
                 }
                 _ => {}
             }
@@ -1295,13 +1334,11 @@ mod tests {
 
     #[test]
     fn parses_media_link_audio_and_read() {
-        let (au_id, au_url) =
-            parse_media_link("//www.bilibili.com/audio/au12345", 0, 12).unwrap();
+        let (au_id, au_url) = parse_media_link("//www.bilibili.com/audio/au12345", 0, 12).unwrap();
         assert_eq!(au_id, "au_12345");
         assert_eq!(au_url, "https://www.bilibili.com/audio/au12345");
 
-        let (cv_id, cv_url) =
-            parse_media_link("//www.bilibili.com/read/cv67890", 0, 99).unwrap();
+        let (cv_id, cv_url) = parse_media_link("//www.bilibili.com/read/cv67890", 0, 99).unwrap();
         assert_eq!(cv_id, "cv_67890");
         assert_eq!(cv_url, "https://www.bilibili.com/read/cv67890");
     }
@@ -1351,9 +1388,15 @@ mod tests {
         });
         let item = parse_opus_item(&value).expect("应能解析出图文项");
         assert_eq!(item.external_id, "opus_953619104940425225");
-        assert_eq!(item.source_url, "https://www.bilibili.com/opus/953619104940425225");
+        assert_eq!(
+            item.source_url,
+            "https://www.bilibili.com/opus/953619104940425225"
+        );
         assert_eq!(item.title, "一张练习用的图");
-        assert_eq!(item.cover_url.as_deref(), Some("https://i0.hdslb.com/bfs/opus/abc.jpg"));
+        assert_eq!(
+            item.cover_url.as_deref(),
+            Some("https://i0.hdslb.com/bfs/opus/abc.jpg")
+        );
         assert_eq!(item.author_name.as_deref(), Some("UP主"));
         assert_eq!(item.author_id.as_deref(), Some("12345"));
         assert_eq!(item.partition_name.as_deref(), Some("图文"));
@@ -1401,9 +1444,15 @@ mod tests {
     #[test]
     fn parses_opus_pub_time_millis_and_string() {
         // 毫秒时间戳 → 转秒
-        assert_eq!(parse_opus_pub_time(Some(&json!(1700000000000_i64))), Some(1700000000));
+        assert_eq!(
+            parse_opus_pub_time(Some(&json!(1700000000000_i64))),
+            Some(1700000000)
+        );
         // 秒时间戳原样返回
-        assert_eq!(parse_opus_pub_time(Some(&json!(1700000000_i64))), Some(1700000000));
+        assert_eq!(
+            parse_opus_pub_time(Some(&json!(1700000000_i64))),
+            Some(1700000000)
+        );
         // 字符串日期也能解析
         assert!(parse_opus_pub_time(Some(&json!("2024-11-14"))).is_some());
         // 空值 → None

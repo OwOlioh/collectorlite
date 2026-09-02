@@ -272,6 +272,19 @@ const [zhihuCollections, setZhihuCollections] = useState(...);
 
 **验证**：`tsc --noEmit` 通过、`vite build` 成功即可；真机 `cargo run` + `npm run dev`，分别确认 B站/知乎/CSDN 的「登录收藏夹」与「收藏夹链接」两个按钮都出现、置灰逻辑正确、点击后都走对 `kind`。
 
+### 3.12 删除一律走软删除（回收站）
+
+本应用没有"硬删除用户收藏"的概念——所有删除都先进入回收站，保留期内可恢复。**新增来源时不要新写硬删除逻辑**，复用现有机制即可。
+
+- **软删除（进回收站）**：`delete_items`（批量）、`delete_items_by_tag`（按标签）在后端都是 `db::soft_delete_*`，仅置 `items.deleted_at` 时间戳 + 移除 FTS 行，保留 `item_tags` / `import_run_items` 关联与封面文件，恢复时零成本重建 FTS。
+- **恢复**：`restore_item` / `restore_items` 把 `deleted_at` 置 `NULL` 并重建 FTS 行。
+- **永久删除**：`purge_item` / `purge_items` / `empty_trash` 才真正删库行 + FTS 行，并通过 `remove_cover_files` 仅删 `covers/` 目录下的封面文件（带路径前缀校验，防误删）。
+- **自动清理**：`auto_purge_trash(retention_days)` 删除超过保留期的回收站项；`App.tsx` 在应用启动时按当前保留期触发一次。
+- **保留期**：`src/lib/retention.ts` 配置，`DEFAULT_RETENTION_DAYS = 7`，可选 7 / 15 / 30 天，设置页可改（已与用户确认默认 7 天）。
+- **schema**：迁移 `0007_soft_delete.sql` 为 `items` 表加 `deleted_at INTEGER`（NULL = 在库，非 NULL = 在回收站）。
+- **筛选**：`ItemFilters.trash: Option<bool>`（`None`/`false` = 仅正常项，`Some(true)` = 仅回收站），`search_items` 已支持。
+- **前端**：侧边栏「回收站」入口带未读计数角标；`TrashPage` 提供单条/批量恢复、永久删除、清空，并显示保留期倒计时；`api.ts` 的 `listTrash` / `restoreItem` / `restoreItems` / `purgeItem` / `purgeItems` / `emptyTrash` / `getTrashCount` / `autoPurgeTrash` 均有 mock 兜底。
+
 ---
 
 ## 四、新增来源检查清单
@@ -290,6 +303,7 @@ const [zhihuCollections, setZhihuCollections] = useState(...);
 - [ ] 测试标签分配（每个 item 只获得自己的标签）
 - [ ] 测试去重（同一 URL 导入两次不会重复）
 - [ ] 测试 source_url 链接正确性
+- [ ] 若来源涉及删除/清理，复用 `db::soft_delete_*`（进回收站），不要引入硬删除逻辑（见 3.12）
 - [ ] 新增 UI 颜色一律用 CSS 变量（`:root` 浅色 + `[data-theme="dark"]` 深色 + 侧边栏 `--side-*`），不要硬编码 hex（深浅色主题已支持）
 - [ ] 跨源反馈用 `useToast()`，不要 `window.alert`
 - [ ] 提交 + 打 tag
