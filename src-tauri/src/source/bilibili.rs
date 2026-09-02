@@ -111,7 +111,8 @@ impl BilibiliClient {
             format!("{url}?{query}")
         };
         // 本地代理（如 Clash）上游偶发抖动会导致 CONNECT 隧道失败（TunnelUnsuccessful），
-        // 仅对传输层错误重试；B站业务错误（如 -400）立即返回、不重试。
+        // 或对 WBI 请求偶发返回 HTTP 412 的 HTML 拦截页。这两类都表现为「传输层错误 / 非 JSON 响应」，
+        // 统一重试；B站业务错误（返回 JSON 且 code!=0，如 -400/-352/-101）立即返回、不重试。
         let mut last_err: Option<reqwest::Error> = None;
         for attempt in 0..3 {
             let mut request = self
@@ -131,14 +132,18 @@ impl BilibiliClient {
             };
             let status = response.status();
             let text = response.text().await?;
-            let value: Value = serde_json::from_str(&text).map_err(|_| {
-                // 非 JSON（如代理拦截页）：把原始响应打到 stderr 便于排查网络/代理问题
-                eprintln!(
-                    "[bili] 非 JSON 响应 {full_url} -> HTTP {status} body={}",
-                    &text[..text.len().min(300)]
-                );
-                AppError::Other(format!("B 站返回了无法解析的数据（HTTP {status}）"))
-            })?;
+            let value = match serde_json::from_str::<Value>(&text) {
+                Ok(v) => v,
+                Err(_) => {
+                    // 非 JSON（如代理拦截页 / 代理偶发返回的 HTTP 412 HTML）：属传输层抖动，
+                    // 与 B站业务错误（返回 JSON 且 code!=0）区分开，按可重试错误处理。
+                    eprintln!(
+                        "[bili] 非 JSON 响应 {full_url} -> HTTP {status} body={}",
+                        &text[..text.len().min(300)]
+                    );
+                    continue;
+                }
+            };
             let code = value.get("code").and_then(Value::as_i64).unwrap_or(-1);
             if code == 0 {
                 return Ok(value);
@@ -1615,5 +1620,71 @@ mod tests {
             per_item_serial,
             fetch_dur + enrich_dur
         );
+    }
+
+    /// 诊断：串行低速率调用 web-interface/view，区分 412 是「WBI 签名被拒（系统性）」
+    /// 还是「基准并发压测触发的限流（仅压测假象）」。每条约 1s 间隔，成功返回 code=0 即说明
+    /// 正常用法下 enrich 元数据能补全；若仍 412/ERR 则说明签名本身有问题。
+    #[tokio::test]
+    #[ignore]
+    async fn diag_view_serial() {
+        use crate::source::SourceAdapter;
+        let app_data = std::env::var("APPDATA").expect("APPDATA 未设置");
+        let cookie = std::fs::read_to_string(
+            std::path::Path::new(&app_data)
+                .join("com.local.bili-collector")
+                .join("bilibili_cookie.txt"),
+        )
+        .expect("读取 cookie 失败")
+        .trim()
+        .to_string();
+        let client = BilibiliClient::new().expect("new failed");
+        client.set_cookie(Some(cookie));
+
+        let cols = client.list_own_favorites().await.expect("list failed");
+        let target = cols.iter().find(|c| c.count > 0).expect("no folder").clone();
+        let items = client.fetch_collection(&target).await.expect("fetch failed");
+        let bvs: Vec<_> = items
+            .iter()
+            .filter(|i| i.external_id.starts_with("BV"))
+            .take(5)
+            .collect();
+
+        eprintln!("[diag] 串行低速率 web-interface/view（每条约 1s 间隔），共 {} 个样本；每个样本分别试 signed / unsigned 以隔离 412 根因", bvs.len());
+        for bv in &bvs {
+            let t = std::time::Instant::now();
+            let signed = client
+                .get_json(
+                    "https://api.bilibili.com/x/web-interface/view",
+                    vec![("bvid".into(), bv.external_id.clone())],
+                    true,
+                )
+                .await;
+            let signed_msg = match &signed {
+                Ok(v) => format!("OK code={}", v.get("code").and_then(Value::as_i64).unwrap_or(-1)),
+                Err(e) => format!("ERR {e}"),
+            };
+            let u = std::time::Instant::now();
+            let unsigned = client
+                .get_json(
+                    "https://api.bilibili.com/x/web-interface/view",
+                    vec![("bvid".into(), bv.external_id.clone())],
+                    false,
+                )
+                .await;
+            let unsigned_msg = match &unsigned {
+                Ok(v) => format!("OK code={}", v.get("code").and_then(Value::as_i64).unwrap_or(-1)),
+                Err(e) => format!("ERR {e}"),
+            };
+            eprintln!(
+                "[diag] {} -> signed: {} ({:?}) | unsigned: {} ({:?})",
+                bv.external_id,
+                signed_msg,
+                t.elapsed(),
+                unsigned_msg,
+                u.elapsed()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        }
     }
 }
