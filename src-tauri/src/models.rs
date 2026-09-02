@@ -123,6 +123,11 @@ pub struct ImportRequest {
     pub kind: ImportKind,
     pub media_id: Option<String>,
     pub url: Option<String>,
+    /// 前端已解析好的收藏夹信息（下拉选中项 / 公开链接首次解析结果）。
+    /// 提供时 preview/execute 直接复用，跳过服务端的重复 resolve_collection 网络调用；
+    /// 未提供时回退到 resolve_collection（深链接等场景）。
+    #[serde(default)]
+    pub collection: Option<CollectionInfo>,
     #[serde(default)]
     pub tag_specs: Vec<TagInput>,
     #[serde(default)]

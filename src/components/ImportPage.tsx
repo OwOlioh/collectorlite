@@ -22,6 +22,7 @@ type ImportChoice = {
   kind: "favorites" | "public_url";
   mediaId?: string;
   url?: string;
+  collection?: CollectionInfo;
 };
 
 interface ImportPageProps {
@@ -269,10 +270,11 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
         kind: "favorites",
         mediaId: opusFavorite.id,
         url: undefined,
+        collection: opusFavorite ?? undefined,
         tagSpecs: [],
         itemTagAssignments: [],
       });
-      setBiliImportInput({ kind: "favorites", mediaId: opusFavorite.id, url: undefined });
+      setBiliImportInput({ kind: "favorites", mediaId: opusFavorite.id, url: undefined, collection: opusFavorite ?? undefined });
       setPreview(next);
       setStep("tags");
     } catch (err) { const msg = String(err); setError(msg); toast("error", msg); }
@@ -284,12 +286,14 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
     if (!profile?.isLogin) { setError("请先扫码登录 B 站。"); return; }
     if (!selectedCollectionId) { setError("请先在上方选择一个收藏夹。"); return; }
     setBusy(true); setError("");
+    // 前端下拉已有该收藏夹的 CollectionInfo，直接复用，省去后端重复拉全量列表
+    const collection = collections.find((c) => c.id === selectedCollectionId) ?? undefined;
     try {
       const next = await api.previewImport({
         kind: "favorites", mediaId: selectedCollectionId, url: undefined,
-        tagSpecs: [], itemTagAssignments: [],
+        collection, tagSpecs: [], itemTagAssignments: [],
       });
-      setBiliImportInput({ kind: "favorites", mediaId: selectedCollectionId, url: undefined });
+      setBiliImportInput({ kind: "favorites", mediaId: selectedCollectionId, url: undefined, collection });
       setPreview(next);
       setStep("tags");
     } catch (err) { const msg = String(err); setError(msg); toast("error", msg); }
@@ -304,9 +308,11 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
     try {
       const next = await api.previewImport({
         kind: "public_url", mediaId: undefined, url: publicUrl.trim(),
+        // 复用「解析」步骤已拿到的 CollectionInfo，避免后端对同一 URL 二次解析
+        collection: parsedCollection ?? undefined,
         tagSpecs: [], itemTagAssignments: [],
       });
-      setBiliImportInput({ kind: "public_url", mediaId: undefined, url: publicUrl.trim() });
+      setBiliImportInput({ kind: "public_url", mediaId: undefined, url: publicUrl.trim(), collection: parsedCollection ?? undefined });
       setPreview(next);
       setStep("tags");
     } catch (err) { const msg = String(err); setError(msg); toast("error", msg); }
@@ -417,6 +423,7 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
         kind: biliImportInput.kind,
         mediaId: biliImportInput.mediaId,
         url: biliImportInput.url,
+        collection: biliImportInput.collection,
         tagSpecs: [],
         itemTagAssignments: assignments,
       };

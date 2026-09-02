@@ -199,6 +199,18 @@ async fn resolve_collection(
     }
 }
 
+/// 优先复用前端已解析的 `collection`（识别结果），省去服务端重复的 resolve 网络调用；
+/// 未提供时回退到 `resolve_collection`（深链接等场景）。
+async fn resolve_collection_or_use(
+    state: &AppState,
+    input: &ImportRequest,
+) -> Result<CollectionInfo, AppError> {
+    if let Some(c) = &input.collection {
+        return Ok(c.clone());
+    }
+    resolve_collection(state, input).await
+}
+
 #[tauri::command]
 pub async fn bilibili_start_qr_login(state: State<'_, AppState>) -> Result<QrSession, String> {
     state
@@ -286,7 +298,7 @@ pub async fn preview_import(
     state: State<'_, AppState>,
     input: ImportRequest,
 ) -> Result<ImportPreview, String> {
-    let collection = resolve_collection(&state, &input)
+    let collection = resolve_collection_or_use(&state, &input)
         .await
         .map_err(|error| error.to_string())?;
     let items = state
@@ -338,7 +350,7 @@ pub async fn execute_import(
     state: State<'_, AppState>,
     input: ImportRequest,
 ) -> Result<ImportResult, String> {
-    let collection = resolve_collection(&state, &input)
+    let collection = resolve_collection_or_use(&state, &input)
         .await
         .map_err(|error| error.to_string())?;
     // 预览阶段若已算好同一收藏夹的 enriched items，直接复用，跳过 fetch + enrich（满收藏夹约省 5–7 分钟）

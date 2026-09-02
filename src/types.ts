@@ -77,6 +77,9 @@ export interface ImportRequest {
   kind: "favorites" | "public_url";
   mediaId?: string;
   url?: string;
+  // 前端已解析好的收藏夹信息（下拉选中项 / 公开链接首次解析结果）。
+  // 提供时后端跳过重复的 resolve_collection 网络调用，直接复用。
+  collection?: CollectionInfo;
   tagSpecs: TagInput[];
   itemTagAssignments: ItemTagAssignment[];
 }

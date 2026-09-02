@@ -128,6 +128,12 @@ Multi-platform local desktop app for collecting favorites (Bilibili, browser boo
 - **Concurrent covers**: `cache_item_covers` downloads covers in bounded chunks (`COVER_CONCURRENCY = 8`) instead of serially, keeping the offline `covers/` copy.
 - Net effect for a full 1000-video folder: ~15 min → ~1.5 min (rough estimate; depends on network/rate-limit).
 
+### Recognition reuse (识别结果复用)
+
+- `ImportRequest` carries an optional `collection: Option<CollectionInfo>`. When the frontend already holds the resolved `CollectionInfo` (the favorites dropdown entry, or the `parsedCollection` from the public-URL "解析" step), it passes it along; `preview_import` / `execute_import` use it directly via `resolve_collection_or_use` and **skip the redundant server-side `resolve_collection` network call**. When absent (e.g. deep links), it falls back to `resolve_collection` as before.
+- This removes two redundant round-trips that previously happened on every import: (1) logged-in favorites re-fetched the **entire** favorites list (`list_collections()`) just to re-find the chosen folder, and (2) public URLs were `resolve_collection(url)`-parsed **twice** (once for the preview card, once for the actual preview).
+- Frontend wiring: `ImportPage.startBiliFavoritesPreview` / `startBiliPublicPreview` / `startBiliOpusPreview` each attach the already-known `CollectionInfo`; `buildImportInput` propagates it into the execute request so the preview/execute cache key stays consistent. `ImportChoice` and the shared `ImportRequest` type both gained the `collection?` field.
+
 ### Browser Bookmarks Specifics
 
 - Frontend and backend both compute `SHA256(URL)` → `bk_` + first 16 hex chars as `external_id`
