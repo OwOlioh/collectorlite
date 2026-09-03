@@ -1991,6 +1991,16 @@ textarea {
   margin-top: 2px;
 }
 
+/* 管理标签页：收藏库整页是 height:100% + overflow:hidden（为了让视频列表内部滚动），
+   标签一多就会被裁掉且没有滚动条。这里让面板成为唯一的滚动容器，整块一起滑动。 */
+.library-page > .tag-manager-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
 .category-create-row {
   display: flex;
   gap: 8px;
@@ -2124,6 +2134,60 @@ textarea {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+/* 标签管理页：跨分类检索标签 */
+.tag-manager-search {
+  margin-bottom: 12px;
+}
+
+.tag-manager-search input {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+}
+
+.tag-manager-search input:focus {
+  outline: 0;
+}
+
+.tag-search-clear {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background var(--transition-base), color var(--transition-base);
+}
+
+.tag-search-clear:hover {
+  background: var(--surface-soft);
+  color: var(--text);
+}
+
+.tag-search-category {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.empty-state .ghost-button {
+  margin-top: 10px;
 }
 
 .category-zone,

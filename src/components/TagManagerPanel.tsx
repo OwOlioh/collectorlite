@@ -6,6 +6,7 @@ import {
   GripVertical,
   Pencil,
   Save,
+  Search,
   Trash2,
   X
 } from "lucide-react";
@@ -34,9 +35,13 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
   const [editingName, setEditingName] = useState("");
   const [renamingCategoryId, setRenamingCategoryId] = useState<number | null>(null);
   const [renamingCategoryName, setRenamingCategoryName] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
   const suppressCategoryClick = useRef(false);
   const draggedTagRef = useRef<number | null>(null);
   const activePointerIdRef = useRef<number | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const autoScrollFrameRef = useRef<number | null>(null);
+  const autoScrollVelocityRef = useRef(0);
   const dragTargetRef = useRef<{ categoryId: number | null } | null>(null);
   const dragListenersAttachedRef = useRef(false);
   const attachedPointerMoveRef = useRef<((event: PointerEvent) => void) | null>(null);
@@ -138,7 +143,45 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
     return { categoryId };
   };
 
+  // 面板现在可滚动，拖动标签到屏幕外的分类时需要边缘自动滚动，
+  // 否则「拖到分类归类」在标签多的情况下会变得不可用。
+  const stopAutoScroll = () => {
+    autoScrollVelocityRef.current = 0;
+    if (autoScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(autoScrollFrameRef.current);
+      autoScrollFrameRef.current = null;
+    }
+  };
+
+  const updateAutoScroll = (clientY: number) => {
+    const panel = panelRef.current;
+    const rect = panel?.getBoundingClientRect();
+    if (!panel || !rect) return;
+    const edge = 56;
+    const maxSpeed = 18;
+    let velocity = 0;
+    if (clientY < rect.top + edge) {
+      velocity = -maxSpeed * Math.min(1, (rect.top + edge - clientY) / edge);
+    } else if (clientY > rect.bottom - edge) {
+      velocity = maxSpeed * Math.min(1, (clientY - (rect.bottom - edge)) / edge);
+    }
+    autoScrollVelocityRef.current = velocity;
+    if (velocity === 0 || autoScrollFrameRef.current !== null) return;
+    const step = () => {
+      const element = panelRef.current;
+      const current = autoScrollVelocityRef.current;
+      if (!element || current === 0) {
+        autoScrollFrameRef.current = null;
+        return;
+      }
+      element.scrollTop += current;
+      autoScrollFrameRef.current = window.requestAnimationFrame(step);
+    };
+    autoScrollFrameRef.current = window.requestAnimationFrame(step);
+  };
+
   const removePointerListeners = () => {
+    stopAutoScroll();
     if (attachedPointerMoveRef.current) {
       window.removeEventListener("pointermove", attachedPointerMoveRef.current);
     }
@@ -162,6 +205,7 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
       return;
     }
     event.preventDefault();
+    updateAutoScroll(event.clientY);
     const target = dropTargetFromPoint(event.clientX, event.clientY);
     if (!target) {
       clearDragTarget();
@@ -208,6 +252,7 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
 
   useEffect(() => {
     return () => {
+      stopAutoScroll();
       if (dragListenersAttachedRef.current) {
         removePointerListeners();
       }
@@ -269,9 +314,26 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
 
   const uncategorized = tags.filter((tag) => !tag.categoryId);
   const activeCategory = categories.find((category) => category.id === expandedCategoryId) || null;
-  const visibleTags = activeCategory
-    ? tags.filter((tag) => tag.categoryId === activeCategory.id)
-    : uncategorized;
+  const categoryById = new Map(categories.map((category) => [category.id, category]));
+
+  // 标签检索：跨全部分类匹配标签名（大小写不敏感），搜到即可直接操作，
+  // 不必先记住它属于哪个分类。
+  const trimmedQuery = searchQuery.trim().toLowerCase();
+  const isSearching = trimmedQuery.length > 0;
+  const searchResults = isSearching
+    ? tags.filter(
+        (tag) =>
+          tag.name.toLowerCase().includes(trimmedQuery) ||
+          tag.normalized.toLowerCase().includes(trimmedQuery)
+      )
+    : [];
+  const visibleTags = isSearching
+    ? searchResults
+    : activeCategory
+      ? tags.filter((tag) => tag.categoryId === activeCategory.id)
+      : uncategorized;
+
+  const clearSearch = () => setSearchQuery("");
 
   const renderTagRow = (tag: Tag) => (
     <div
@@ -281,7 +343,7 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
     >
       <span
         className="tag-drag-handle"
-        title="拖动到分类"
+        title={isSearching ? "拖到左侧分类即可归位" : "拖动到分类"}
       >
         <GripVertical size={15} />
       </span>
@@ -302,6 +364,19 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
         </div>
       ) : (
         <TagBadge tag={tag} />
+      )}
+      {isSearching && (
+        <span className="tag-search-category" title="所属分类">
+          <span
+            className="category-color"
+            style={{
+              background:
+                (tag.categoryId ? categoryById.get(tag.categoryId)?.color : null) ||
+                "#64748b"
+            }}
+          />
+          {(tag.categoryId ? categoryById.get(tag.categoryId)?.name : null) || "未分类"}
+        </span>
       )}
       <button
         className="ghost-button small"
@@ -325,7 +400,7 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
   );
 
   return (
-    <div className="tag-manager-panel">
+    <div className="tag-manager-panel" ref={panelRef}>
       <div className="category-manager-layout">
         <aside className="category-sidebar">
           <div className="new-tag-card">
@@ -366,10 +441,12 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
               }`}
               onClick={() => {
                 if (suppressCategoryClick.current) return;
+                clearSearch();
                 setExpandedCategoryId(null);
               }}
               onKeyDown={(event) => {
                 if (event.key === "Enter" || event.key === " ") {
+                  clearSearch();
                   setExpandedCategoryId(null);
                 }
               }}
@@ -393,10 +470,12 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
                   key={category.id}
                   onClick={() => {
                     if (suppressCategoryClick.current) return;
+                    clearSearch();
                     setExpandedCategoryId(expanded ? null : category.id);
                   }}
                   onKeyDown={(event) => {
                     if (event.key === "Enter" || event.key === " ") {
+                      clearSearch();
                       setExpandedCategoryId(expanded ? null : category.id);
                     }
                   }}
@@ -416,12 +495,40 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
 
         <section
           className="category-detail"
-          data-drop-target="detail"
-          data-category-id={activeCategory ? String(activeCategory.id) : ""}
+          // 检索态下右侧不作为放置目标：避免把搜索结果误拖到右侧而意外改分类，
+          // 拖到左侧分类归类仍然有效。
+          data-drop-target={isSearching ? undefined : "detail"}
+          data-category-id={
+            isSearching ? undefined : activeCategory ? String(activeCategory.id) : ""
+          }
         >
+          <label className="tag-search-box tag-manager-search">
+            <Search size={16} />
+            <input
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") clearSearch();
+              }}
+              placeholder="检索标签（跨全部分类）"
+              aria-label="检索标签"
+            />
+            {isSearching && (
+              <button
+                className="tag-search-clear"
+                type="button"
+                onClick={clearSearch}
+                title="清空检索（Esc）"
+                aria-label="清空检索"
+              >
+                <X size={14} />
+              </button>
+            )}
+          </label>
+
           <div className="category-detail-head">
             <div>
-              {activeCategory && renamingCategoryId === activeCategory.id ? (
+              {activeCategory && renamingCategoryId === activeCategory.id && !isSearching ? (
                 <div className="category-rename-line">
                   <input
                     autoFocus
@@ -456,11 +563,15 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
                   </button>
                 </div>
               ) : (
-                <h2>{activeCategory?.name || "未分类标签"}</h2>
+                <h2>{isSearching ? "检索结果" : activeCategory?.name || "未分类标签"}</h2>
               )}
-              <p>{visibleTags.length} 个标签</p>
+              <p>
+                {isSearching
+                  ? `匹配到 ${visibleTags.length} 个标签`
+                  : `${visibleTags.length} 个标签`}
+              </p>
             </div>
-            {activeCategory && (
+            {activeCategory && !isSearching && (
               <div className="category-detail-actions">
                 <button
                   className="ghost-button"
@@ -484,7 +595,22 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
           <div className="category-detail-tags">
             {visibleTags.length === 0 ? (
               <div className="empty-state">
-                {activeCategory ? "这个分类还没有标签，把未分类标签拖进来。" : "没有未分类标签。"}
+                {isSearching ? (
+                  <>
+                    没有匹配「{searchQuery.trim()}」的标签。
+                    <button
+                      className="ghost-button small"
+                      type="button"
+                      onClick={clearSearch}
+                    >
+                      清空检索
+                    </button>
+                  </>
+                ) : activeCategory ? (
+                  "这个分类还没有标签，把未分类标签拖进来。"
+                ) : (
+                  "没有未分类标签。"
+                )}
               </div>
             ) : (
               visibleTags.map(renderTagRow)
