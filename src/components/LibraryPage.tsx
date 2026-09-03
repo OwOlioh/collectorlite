@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import { api } from "../lib/api";
 import { getRetentionDays } from "../lib/retention";
-import type { ItemFilters, Tag, VideoItem } from "../types";
+import type { ItemFilters, ObsidianSettings, Tag, VideoItem } from "../types";
 import { TagBadge } from "./TagBadge";
 import { TagManagerPanel } from "./TagManagerPanel";
 import { TagPoolInput } from "./TagPoolInput";
@@ -66,6 +66,14 @@ export function LibraryPage({
   const [deleting, setDeleting] = useState(false);
   const { toast } = useToast();
   const [batchTagging, setBatchTagging] = useState(false);
+  const [obsidianEnabled, setObsidianEnabled] = useState(false);
+
+  useEffect(() => {
+    void api
+      .getObsidianSettings()
+      .then((s: ObsidianSettings) => setObsidianEnabled(s.enabled))
+      .catch(() => setObsidianEnabled(false));
+  }, []);
 
   const loadItems = useCallback(async () => {
     setLoading(true);
@@ -83,6 +91,25 @@ export function LibraryPage({
   }, [loadItems, section, refreshToken]);
 
   const selectedFilterTags = tags.filter((tag) => filters.tagIds.includes(tag.id));
+
+  const exportToObsidian = async (item: VideoItem) => {
+    try {
+      const n = await api.exportItemsToObsidian([item.id]);
+      toast("success", n > 0 ? "已导出到 Obsidian" : "该收藏暂无批注，未导出");
+    } catch (e) {
+      toast("error", `导出失败: ${String(e)}`);
+    }
+  };
+
+  const exportSelectedToObsidian = async () => {
+    if (selectedIds.length === 0) return;
+    try {
+      const n = await api.exportItemsToObsidian(selectedIds);
+      toast("success", `已导出 ${n} 条到 Obsidian`);
+    } catch (e) {
+      toast("error", `批量导出失败: ${String(e)}`);
+    }
+  };
 
   useEffect(() => {
     setSelectedIds([]);
@@ -479,6 +506,16 @@ export function LibraryPage({
                       <Download size={16} />
                       导出（{selectedIds.length}）
                     </button>
+                    {obsidianEnabled && (
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        onClick={exportSelectedToObsidian}
+                      >
+                        <Code2 size={16} />
+                        导出到 Obsidian（{selectedIds.length}）
+                      </button>
+                    )}
                     <button
                       className="secondary-button danger-action"
                       type="button"
@@ -509,6 +546,8 @@ export function LibraryPage({
                       onEditTags={setEditingVideo}
                       onEditNote={setNoteVideo}
                       onDelete={deleteVideo}
+                      obsidianEnabled={obsidianEnabled}
+                      onExportObsidian={exportToObsidian}
                     />
                   )}
                 />

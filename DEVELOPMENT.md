@@ -357,3 +357,223 @@ WorkBuddy 会自动读取文档并按照其中的模板和检查清单进行开�
 - 跨源反馈统一用 `useToast()`（`src/components/Toast.tsx`），不要用 `window.alert`；导入执行阶段的错误原先被 `catch` 静默吞掉，现已改为 toast 提示。
 - **深浅色主题**：所有颜色必须写成 CSS 变量（`:root` 浅色、`[data-theme="dark"]` 深色、侧边栏用 `--side-*`），新增 UI 禁止硬编码 hex，否则深色模式下会"开盲盒"。
 - 微动效统一用 CSS 变量 + `transition`，并已纳入 `@media (prefers-reduced-motion: reduce)` 无障碍降级。
+
+---
+
+## 七、批注 × Obsidian 联动（方案已定稿，**尚未实施**）
+
+> 状态：仅完成方案设计与决策，代码未动。按 3.13，实施后不得自动 commit。
+
+### 7.1 背景与现状
+
+批注目前是 **app 内的孤岛**：
+
+- 存储：`items.notes TEXT`（迁移 `0006_video_notes.sql`），单字段，无标题、无 Markdown 渲染
+- 命令：只有 `update_item_notes`（`commands.rs:645` → `db.rs:495`）
+- 前端：`VideoCard` 的 `card-note-button` → `LibraryPage.noteVideo` → `VideoNoteEditorModal`（编辑 / 预览两态，预览态只做 `LinkifiedText` URL 转链）
+- `notes` 已进 FTS 索引，app 内可搜
+
+联动目标：让批注沉淀进 Obsidian vault，同时**不牺牲不用 Obsidian 的用户**。
+
+### 7.2 设计决策（已拍板）
+
+| 项 | 决定 | 理由 |
+|---|---|---|
+| 联动深度 | **L1 跳转 + L2 单向导出**，不做 L3 回读 | 回读会引入双向冲突 / 改名 / 删除等分布式同步问题，收益小。收藏是"输入流"，vault 是"知识库"，单向流最自然 |
+| 笔记粒度 | 一篇收藏一个 md | 最利于 Obsidian 检索、双链、Dataview 查询 |
+| 创建时机 | **保存批注时自动创建 / 更新** | 用户原话「只对做批注的页面进行笔记的创建」，无需惦记手动导出 |
+| 创建范围 | 仅写了批注的收藏，**不做全量** | 全量一万条会淹没 `Ctrl+O` 切换器与全局搜索，信噪比才是真代价；且 app 内已有 FTS，重复建设 |
+| 兼容要求 | 联动为**默认关闭的开关**，未启用则纯本地批注、零副作用 | 必须兼容不使用 Obsidian 的用户 |
+| 封面 | **不复制进 vault** | 封面平均 ~278 KB/张，一万条约 2.7 GB，是唯一真正的空间炸弹 |
+| vault 同步 | 用户 vault 纯本地、无任何同步 | 故文件数量对性能无硬约束（若有同步则必须严格控制写入量） |
+
+**性能实测结论**：md 本身极小（frontmatter + 短批注约 300~500 字节，一万条约 4 MB 文件大小 / 40 MB 磁盘占用）。Obsidian 扛得住文件数，真正的成本是**搜索噪音**与**首次索引**，不是磁盘。
+
+### 7.3 数据契约：一篇笔记长这样
+
+```markdown
+---
+collector_id: bilibili:BV1xx411c7mD
+title: "视频标题"
+url: https://www.bilibili.com/video/BV1xx411c7mD
+source: bilibili
+author: UP主名
+tags: [前端, 性能优化]
+favorited_at: 2026-09-03
+---
+
+<!-- collector:notes:start -->
+这里是你写的批注，app 每次保存只替换这一块
+<!-- collector:notes:end -->
+
+（以下区域 app 永不触碰，用户在 Obsidian 里自由扩充）
+```
+
+三个关键点：
+
+1. **`collector_id` 复用现有 `(source, external_id)` 复合键**——天然唯一、天然幂等。**绝不用路径或标题做匹配**：用户在 Obsidian 里改标题或移动文件夹，映射就断了。将来若要回读，也是扫描 vault 内所有含 `collector_id` 的 md 重建映射。
+2. **`tags` 映射成 Obsidian 原生标签**，标签面板与 Dataview 可直接用。
+3. **分区托管**：HTML 注释在 Obsidian 阅读视图下不显示（无视觉污染），但圈定了 app 的责任边界。**这是防"用户在 Obsidian 扩充的内容被覆盖"的唯一保险**；检测到标记被手动删除则说明用户不愿被托管，跳过同步并提示。
+
+**存放位置（已定）**：笔记写入**用户已有的 vault** 根目录下的一个子目录（默认 `收藏/`，设置页可改名），app 只在该子目录内读写，**绝不触及 vault 中其他任何位置**——实现上要在 Rust 端做路径前缀校验（与 `remove_cover_files` 的前缀校验同一思路）。
+
+- **不新建独立 vault**：独立 vault 会切断双链与统一搜索，收藏卡片无法与既有笔记互相链接，联动价值减半。
+- 若用户确实想要独立库：把 vault 路径指向一个空文件夹，再在 Obsidian 里「打开文件夹作为仓库」即可，方案天然支持，只是无法与主库双链。
+- 目录选择复用已有的 `tauri-plugin-dialog`；选中后温和校验该目录下是否存在 `.obsidian/`（不存在只提示、不阻止，避免误伤用其他工具管理 md 的场景）。
+- 子目录名留空则直接写到 vault 根目录——**不推荐**，会污染根目录，UI 上应给出提示。
+
+文件名：默认 `{标题}.md`；重名且已有文件的 `collector_id` 不是自己时，追加 `[{source}-{id前6}]` 消歧。
+
+### 7.4 实施清单
+
+| 文件 | 改动 |
+|---|---|
+| `src-tauri/migrations/0008_obsidian_sync.sql` | 新建：`ALTER TABLE items ADD COLUMN obsidian_path TEXT` |
+| `src-tauri/src/obsidian.rs` | **新建**：`ObsidianSettings` 读写、文件名 sanitize、frontmatter 生成（serde_yaml）、分区托管替换、写文件、构造并打开 `obsidian://` |
+| `src-tauri/src/commands.rs` | 改 `update_item_notes`（写库成功后触发同步并回写 `obsidian_path`）；新增 `get/set_obsidian_settings`、`open_note_in_obsidian`、`export_items_to_obsidian`、`pick_obsidian_vault` |
+| `src-tauri/src/lib.rs` | 注册 `obsidian` 模块与新命令（复用既有 `dialog` + `webbrowser`，**未引入新插件**） |
+| `src-tauri/Cargo.toml` | 仅加 `serde_yaml`（生成 frontmatter）；打开 `obsidian://` 复用既有 `webbrowser`，不引入 `tauri-plugin-opener` |
+| `src/components/SettingsPage.tsx` | 新增 Obsidian 分区：开关 + vault 目录选择（**复用既有 `tauri-plugin-dialog`**）+ 子目录名 |
+| `src/components/VideoNoteEditorModal.tsx` | 加「在 Obsidian 中打开」（有 `obsidian_path` 时可用）；保存成功时提示已同步 |
+| `src/components/VideoCard.tsx` | hover 菜单加「导出到 Obsidian」（开关开启时显示） |
+| `src/components/LibraryPage.tsx` | 加载联动开关状态并透传给 `VideoCard`；批量工具栏加「导出到 Obsidian」 |
+
+**依赖现状（实施修正）**：打开 `obsidian://` 深链直接复用既有 `webbrowser` 依赖（即 `open_url` 命令用的那个），**未引入 `tauri-plugin-opener`**；目录选择器用既有 `tauri-plugin-dialog` 的 Rust 端 `blocking::FileDialog`（新增 `pick_obsidian_vault` 命令），**未新增前端 npm 依赖**。因此 `Cargo.toml` 只新增了 `serde_yaml`。理由：深链 scheme 用 `webbrowser::open` 在 Windows 上经 ShellExecute 分发即可可靠唤起 Obsidian，无需额外插件；保持依赖面最小、编译更快。
+
+**为什么同步逻辑放 Rust 端**：Tauri 前端 fs 插件有 scope 限制，写不了 app 数据目录外的路径；Rust 端 `std::fs` 无此限制。
+
+### 7.5 核心流程（保存批注）
+
+```
+用户点保存
+  → ① 写库 items.notes                ← 必须先成功
+  → ② 检查：开关开启？vault 已配置？notes 非空？
+        ├─ 任一不满足 → 静默返回，零副作用
+        └─ 满足 → ③
+  → ③ 生成 / 更新 md（只替换托管区）
+  → ④ 落库 items.obsidian_path
+  → ⑤ toast「已同步到 Obsidian」
+```
+
+**顺序是关键**：先写库再写文件。同步失败只 toast，**绝不能影响批注已保存**——这是整个功能的健壮性底线。
+
+### 7.6 降级与兼容（不用 Obsidian 的用户）
+
+1. 联动开关**默认关闭**
+2. 未开启 / 未配置 vault → 完全不触发文件系统操作，行为与现状完全一致
+3. vault 路径失效（目录被删、无写权限）→ toast 提示一次，批注照常保存
+4. 开关关闭时，同步相关 UI（打开按钮、导出入口）**不显示**，避免干扰
+
+### 7.7 ⚠️ 必须避开的坑
+
+| 坑 | 后果 | 对策 |
+|---|---|---|
+| 标题含 `:` `#` `[` `"` | **YAML 直接崩掉**，Obsidian 解析不出 frontmatter | 用 `serde_yaml` 序列化，**禁止字符串拼接** |
+| Windows 非法字符 `\ / : * ? " < > \|` | 写入失败或静默丢文件 | 白名单 sanitize + 255 长度截断（中文按字符算） |
+| 写文件带 BOM | Obsidian 里中文乱码 | 强制 UTF-8 无 BOM |
+| 标签含空格或 `#` | Obsidian tags 非法 | 空格转 `-`，剔除非法字符 |
+| 用户在 Obsidian 里扩充后被覆盖 | **丢数据，且悄无声息** | 分区托管（见 7.3） |
+| 批注被清空 | 文件要不要删？ | **只清托管区，不删文件**（可能已有用户笔记） |
+| 收藏进回收站 | 笔记怎么办？ | **不动 md**，沿用 3.12 软删除哲学——只做加法 |
+| `obsidian_path` 存成绝对路径 | 换机后 vault 路径一变，映射全部失效 | **必须存相对 vault 根目录的路径**（见 7.11） |
+
+### 7.8 分阶段
+
+- **P0（约 1 天）**：设置项 + `obsidian.rs` + 保存批注自动创建 / 更新笔记 + `obsidian_path` 落库 + 分区托管。核心闭环可用。
+- **P1（半天）**：`obsidian://` 打开跳转 + 手动导出单条 / 批量。
+- **P2（可选）**：批注编辑器支持 Markdown 渲染。
+
+> P2 在分区托管方案下是**可选**的：app 批注保持纯文本也完全可用，用户在 Obsidian 里扩充时自己用 Markdown 即可，不影响主流程。
+
+### 7.9 性能影响评估
+
+前提：**仅批注触发生成**，量级是几百篇（不是一万条），vault 纯本地无同步。
+
+**Obsidian 侧**
+
+| 场景 | 影响 |
+|---|---|
+| 磁盘占用 | 约 400 B/篇，几百篇合计 < 200 KB |
+| 启动 / 搜索索引 | 几百个小文件的增量索引，毫秒级 |
+| 保存批注触发写入 | 单文件增量重索引，几毫秒，**不会全库重扫** |
+| 批量导出几百条 | 连续写入时 Obsidian 会集中处理，可能短暂占 CPU（数秒）→ 分批写入 + 完成后统一 toast |
+
+**app 侧**
+
+| 场景 | 影响 |
+|---|---|
+| 单次保存批注 | 多一次 <1 KB 的本地文件写入，约 1~5 ms，UI 无感 |
+| 数据库 | 新增 `obsidian_path` 一列，每行几十字节，万条约几百 KB |
+| 启动开销 | **零**——不做回读（L3），启动时不扫描 vault |
+
+**真正会拖慢的两条**（故方案明确回避）：
+
+1. **全量同步一万条** → Obsidian 搜索噪音 + 首次索引变慢（见 7.2）
+2. **做 L3 回读** → 每次启动都要遍历 vault 全文比对 mtime，那才是真正的性能负担
+
+换言之，放弃回读不仅省掉了冲突处理，也顺带换来了**零启动开销**。
+
+### 7.10 删除语义：笔记如何处置
+
+沿用 3.12「只做加法」的软删除哲学——**app 在任何情况下都不删除 vault 里的文件**。
+
+| 操作 | 笔记处置 | 理由 |
+|---|---|---|
+| 软删除（进回收站） | **不动** | 可能只是误删，保留期内会恢复；笔记里也可能已有用户内容 |
+| 从回收站恢复 | 不动，映射原样生效 | `obsidian_path` 一直在，恢复后继续同步 |
+| 永久删除 / 清空回收站 / 超期清理 | **默认不动**；可选移到 `收藏/已归档/`（**移动而非删除**） | 笔记可能已成长为用户自己的内容，删掉是灾难 |
+| 批注被清空 | 只清托管区，**不删文件** | 同上 |
+
+永久删除时的分级提示（不静默）：
+
+- 检测到托管区之外还有用户内容 → **一定不动**，toast「该笔记含你自己的内容，已保留」
+- 若纯粹由 app 生成（只有 frontmatter + 托管区）→ 提示「这篇笔记可以安全删除」，但**让用户在 Obsidian 里自己删**，app 不动手
+
+**重新导入能自动接回原笔记**：锚点是 `collector_id`（`source:external_id`），**不是 `item.id`**。即使数据库行被永久删除、之后重新导入生成了新的 `item.id`，只要 `collector_id` 不变，写入时就能找到已有 md 并复用（只更新托管区），不会新建重复文件。查找顺序：
+
+1. `obsidian_path` 非空且文件存在 → 直接用
+2. 否则按预期文件名 `{标题}.md` 找，并校验 frontmatter 的 `collector_id` 是否匹配 → 匹配则复用
+3. 都没有 → 新建
+
+> 边界：若源站改了标题，第 2 步会落空，会新建一篇、旧的成为孤儿。可加「重新关联」扫描功能（P2，扫描目录按 `collector_id` 匹配）兜底。
+
+### 7.11 换机迁移
+
+迁移的是**两样彼此独立的东西**，互不影响：
+
+**① 收藏数据（app 侧）** —— 现有 JSON 导出 / 导入链路可用，但**需要补一处**
+
+- ✅ **批注本身能迁移**：`export_items` 的 SELECT 已含 `notes`（`db.rs:1098`），`ExportItem` 已带 `notes`（`db.rs:1155`），`import_collection` 会写回（`db.rs:1326`）
+- ❌ **`obsidian_path` 不在导出链路里**：`export_items` 的 SELECT 与 `import_collection` 的 INSERT 都还没有这一列 → **实施时必须两处都补上**，否则新电脑上 app 不知道笔记在哪，映射全丢
+- 导入是增量模式（`db.rs:1290`：已存在则跳过，绝不覆盖原库），空库导入不受影响
+- 封面无需手动拷贝：`import_collection` 会调 `cache_imported_covers` 重新下载
+
+**② 笔记（vault 侧）** —— 与 app 无关
+
+- 就是一堆 md 文件，自己拷到新电脑（U 盘 / 移动硬盘 / 网盘），Obsidian 打开即可
+- app 不参与，也不需要参与
+
+**③ 恢复联动**
+
+- **`obsidian_path` 必须存「相对 vault 根目录」的路径**（如 `收藏/视频标题.md`），**绝不能存绝对路径**——新电脑的 vault 路径大概率不同，存绝对路径会导致全部失效
+- 新电脑上只需在设置里重新指定 vault 根目录，所有映射自动生效
+
+**迁移清单**：
+
+1. 旧电脑：导出 JSON（实施后含 `obsidian_path`）
+2. 拷贝 vault 文件夹到新电脑
+3. 新电脑：装 app → 导入 JSON → 设置里指定 vault 根目录
+4. 封面自动重下，映射自动恢复
+
+### 7.12 待定项（已拍板，2026-09-03 开工）
+
+1. **配置存放位置**：✅ 采用 Rust 端 `obsidian_settings.json`（存于 app data 目录）。理由：同步是后端行为，配置就近；与 `retention.ts` 走前端 localStorage 的不一致可接受，因为两者的触发机制不同（retention 仅影响启动清理，本功能涉及文件系统写入）。
+2. **分区托管**：✅ 保留。HTML 注释标记圈出 app 托管区，同步时只替换该区，用户在 Obsidian 里写的其余内容永不丢失；若标记被手动删除则跳过同步并提示。
+3. **永久删除「移到归档目录」**：❌ 暂不做。默认永久删除时完全不动 vault 文件（Obsidian 是独立知识库）。如后续需要，再加一个开关把笔记移到 `收藏/已归档/`。
+
+### 7.13 实施状态（2026-09-03）
+
+- P0 + P1 已完成：迁移 `0008`、新建 `obsidian.rs`、改造 `update_item_notes` 自动同步、新增 4 个命令（`get/set_obsidian_settings`、`open_note_in_obsidian`、`export_items_to_obsidian`、`pick_obsidian_vault`）、设置页 Obsidian 分区、批注弹窗「在 Obsidian 中打开」、卡片 hover「导出到 Obsidian」、批量工具栏「导出到 Obsidian」。
+- 打开深链复用既有 `webbrowser`，**未引入 `tauri-plugin-opener`**（见 7.4 依赖现状）。
+- P2（批注编辑器支持 Markdown 渲染）留作后续，非主流程阻塞项。
+- 注意：改动**尚未 commit**（遵循 DEVELOPMENT.md 3.13，AI 不自动提交）。

@@ -6,6 +6,7 @@ mod commands;
 mod db;
 mod error;
 mod models;
+mod obsidian;
 mod source;
 mod state;
 mod wbi;
@@ -24,8 +25,14 @@ use commands::{
     list_tags, list_zhihu_collections, logout, merge_tags, open_url, parse_csdn_collection_url,
     parse_public_favorite_url, parse_zhihu_collection_url, preview_csdn_import,
     preview_github_import, preview_import, preview_zhihu_import, recache_covers,
-    regenerate_bridge_token, rename_tag_category, save_export_file, search_items, update_item_notes,
+    regenerate_bridge_token, rename_tag_category, save_export_file, search_items,     update_item_notes,
     update_item_tags,
+    // Obsidian 单向联动
+    get_obsidian_settings,
+    set_obsidian_settings,
+    open_note_in_obsidian,
+    export_items_to_obsidian,
+    pick_obsidian_vault,
     upsert_tag, zhihu_browser_login, zhihu_logout, zhihu_profile, zhihu_set_cookie,
 };
 
@@ -103,6 +110,12 @@ pub fn run() {
             // 浏览器扩展「快速入库」本地桥
             get_bridge_info,
             regenerate_bridge_token,
+            // Obsidian 单向联动
+            get_obsidian_settings,
+            set_obsidian_settings,
+            open_note_in_obsidian,
+            export_items_to_obsidian,
+            pick_obsidian_vault,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Bilibili Collector");

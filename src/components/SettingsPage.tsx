@@ -3,6 +3,7 @@ import {
   Check,
   Copy,
   Database,
+  FileText,
   LogOut,
   Puzzle,
   RefreshCw,
@@ -12,7 +13,7 @@ import {
 } from "lucide-react";
 import { api } from "../lib/api";
 import { useToast } from "./Toast";
-import type { BilibiliProfile, BridgeInfo } from "../types";
+import type { BilibiliProfile, BridgeInfo, ObsidianSettings } from "../types";
 import { applyTheme, getStoredTheme, storeTheme, type ThemeMode } from "../lib/theme";
 import { getRetentionDays, setRetentionDays, RETENTION_OPTIONS } from "../lib/retention";
 
@@ -27,10 +28,20 @@ export function SettingsPage({ onOpenTrash }: SettingsPageProps) {
   const [recaching, setRecaching] = useState(false);
   const [bridge, setBridge] = useState<BridgeInfo | null>(null);
   const [copied, setCopied] = useState(false);
+  const [obsidian, setObsidian] = useState<ObsidianSettings>({
+    enabled: false,
+    vaultPath: "",
+    vaultName: "",
+    subdir: "收藏"
+  });
   const { toast } = useToast();
 
   useEffect(() => {
     void api.getProfile().then(setProfile);
+  }, []);
+
+  useEffect(() => {
+    void api.getObsidianSettings().then(setObsidian).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -65,6 +76,28 @@ export function SettingsPage({ onOpenTrash }: SettingsPageProps) {
     setTheme(mode);
     storeTheme(mode);
     applyTheme(mode);
+  };
+
+  const saveObsidian = async (next: ObsidianSettings) => {
+    setObsidian(next);
+    try {
+      await api.setObsidianSettings(next);
+      toast("success", "已保存 Obsidian 设置");
+    } catch (e) {
+      toast("error", `保存失败: ${String(e)}`);
+    }
+  };
+
+  const pickVault = async () => {
+    try {
+      const path = await api.pickObsidianVault();
+      if (path) {
+        const name = path.split(/[\\/]/).pop() || path;
+        await saveObsidian({ ...obsidian, vaultPath: path, vaultName: name });
+      }
+    } catch (e) {
+      toast("error", `选择目录失败: ${String(e)}`);
+    }
   };
 
   return (
@@ -189,6 +222,52 @@ export function SettingsPage({ onOpenTrash }: SettingsPageProps) {
             <Trash2 size={16} />
             打开回收站
           </button>
+        </div>
+
+        <div className="settings-card is-wide">
+          <div className="settings-icon"><FileText size={20} /></div>
+          <div>
+            <h2>Obsidian 笔记联动</h2>
+            <p>
+              把写过批注的收藏单向同步成 Obsidian 笔记（收藏 → 笔记）。关闭时完全不读写你的仓库，
+              行为与普通批注一致。
+            </p>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, margin: "8px 0 12px" }}>
+              <input
+                type="checkbox"
+                checked={obsidian.enabled}
+                onChange={(e) => void saveObsidian({ ...obsidian, enabled: e.target.checked })}
+              />
+              <span>启用联动</span>
+            </label>
+            {obsidian.enabled && (
+              <>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+                  <span className="muted" style={{ minWidth: 0, wordBreak: "break-all" }}>
+                    {obsidian.vaultPath || "尚未选择仓库目录"}
+                  </span>
+                  <button className="ghost-button small" type="button" onClick={() => void pickVault()}>
+                    选择目录
+                  </button>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 12 }}>
+                  <label style={{ fontSize: 13 }}>笔记子目录</label>
+                  <input
+                    className="bridge-token-input"
+                    type="text"
+                    value={obsidian.subdir}
+                    placeholder="收藏"
+                    onChange={(e) => setObsidian({ ...obsidian, subdir: e.target.value })}
+                    onBlur={() => void saveObsidian(obsidian)}
+                    aria-label="笔记子目录"
+                  />
+                </div>
+                {obsidian.vaultName && (
+                  <p className="muted">仓库名：{obsidian.vaultName}（Obsidian URI 用于定位仓库）</p>
+                )}
+              </>
+            )}
+          </div>
         </div>
 
         <div className="settings-card is-wide">

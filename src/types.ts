@@ -49,7 +49,17 @@ export interface VideoItem {
   duration?: number;
   favoriteTime?: number;
   deletedAt?: number;
+  /** 同步到 Obsidian 的笔记在 vault 内的相对路径；未同步为 undefined。 */
+  obsidianPath?: string;
   tags: Tag[];
+}
+
+/** Obsidian 单向联动配置（与 Rust 端 obsidian::ObsidianSettings 对应）。 */
+export interface ObsidianSettings {
+  enabled: boolean;
+  vaultPath: string;
+  vaultName: string;
+  subdir: string;
 }
 
 export interface CollectionInfo {

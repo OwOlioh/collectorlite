@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { Eye, Pencil, Save, X } from "lucide-react";
+import { Eye, FileText, Pencil, Save, X } from "lucide-react";
 import { api } from "../lib/api";
 import { LinkifiedText } from "../lib/linkify";
+import { useToast } from "./Toast";
 import type { VideoItem } from "../types";
 
 interface VideoNoteEditorModalProps {
@@ -18,19 +19,33 @@ export function VideoNoteEditorModal({
   const [notes, setNotes] = useState(item.notes || "");
   const [mode, setMode] = useState<"edit" | "preview">("edit");
   const [saving, setSaving] = useState(false);
+  const [opening, setOpening] = useState(false);
   const [error, setError] = useState("");
+  const { toast } = useToast();
 
   const save = async () => {
     setSaving(true);
     setError("");
     try {
-      await api.updateItemNotes(item.id, notes);
+      const updated = await api.updateItemNotes(item.id, notes);
+      if (updated.obsidianPath) toast("success", "已同步到 Obsidian");
       onSaved();
       onClose();
     } catch (err) {
       setError(String(err));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const openInObsidian = async () => {
+    setOpening(true);
+    try {
+      await api.openNoteInObsidian(item.id);
+    } catch (err) {
+      toast("error", `打开失败: ${String(err)}`);
+    } finally {
+      setOpening(false);
     }
   };
 
@@ -85,6 +100,17 @@ export function VideoNoteEditorModal({
           </div>
         )}
         {error && <div className="alert">{error}</div>}
+        {item.obsidianPath && (
+          <button
+            className="ghost-button wide"
+            type="button"
+            onClick={openInObsidian}
+            disabled={opening}
+          >
+            <FileText size={16} />
+            {opening ? "打开中..." : "在 Obsidian 中打开"}
+          </button>
+        )}
         <button className="primary-button wide" type="button" onClick={save} disabled={saving}>
           <Save size={16} />
           {saving ? "保存中..." : "保存批注"}

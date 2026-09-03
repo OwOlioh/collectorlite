@@ -8,6 +8,7 @@ import type {
   ImportRequest,
   ImportResult,
   ItemFilters,
+  ObsidianSettings,
   RecacheResult,
   QrSession,
   QrStatus,
@@ -143,6 +144,15 @@ export const api = {
   // 浏览器扩展「快速入库」本地桥
   getBridgeInfo: () => call<BridgeInfo>("get_bridge_info", {}),
   regenerateBridgeToken: () => call<BridgeInfo>("regenerate_bridge_token", {}),
+  // Obsidian 单向联动
+  getObsidianSettings: () => call<ObsidianSettings>("get_obsidian_settings", {}),
+  setObsidianSettings: (settings: ObsidianSettings) =>
+    call<null>("set_obsidian_settings", { settings }),
+  openNoteInObsidian: (itemId: number) =>
+    call<null>("open_note_in_obsidian", { itemId }),
+  exportItemsToObsidian: (itemIds: number[]) =>
+    call<number>("export_items_to_obsidian", { itemIds }),
+  pickObsidianVault: () => call<string | null>("pick_obsidian_vault", {}),
 };
 
 let mockTags: Tag[] = [
@@ -804,6 +814,16 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
     case "get_bridge_info":
     case "regenerate_bridge_token":
       return { port: 0, running: false, token: "mock-bridge-token" } as T;
+    // Obsidian 联动 mock
+    case "get_obsidian_settings":
+      return { enabled: false, vaultPath: "", vaultName: "", subdir: "收藏" } as T;
+    case "set_obsidian_settings":
+    case "open_note_in_obsidian":
+      return null as T;
+    case "export_items_to_obsidian":
+      return 0 as T;
+    case "pick_obsidian_vault":
+      return null as T;
     default:
       return null as T;
   }

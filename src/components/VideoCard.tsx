@@ -13,6 +13,9 @@ interface VideoCardProps {
   onEditTags: (item: VideoItem) => void;
   onEditNote: (item: VideoItem) => void;
   onDelete: (item: VideoItem) => void;
+  /** Obsidian 联动开关开启时才传入，卡片才会显示导出按钮。 */
+  obsidianEnabled?: boolean;
+  onExportObsidian?: (item: VideoItem) => void;
 }
 
 export function VideoCard({
@@ -23,6 +26,8 @@ export function VideoCard({
   onEditTags,
   onEditNote,
   onDelete,
+  obsidianEnabled,
+  onExportObsidian,
 }: VideoCardProps) {
   const isBrowser = item.source === "browser";
   const cover = resolveCoverUrl(item.coverUrl, item.coverLocalPath);
@@ -112,6 +117,16 @@ export function VideoCard({
           >
             <FileText size={14} />
           </button>
+          {obsidianEnabled && onExportObsidian && (
+            <button
+              className="icon-button card-obsidian-button"
+              type="button"
+              onClick={() => onExportObsidian(item)}
+              title="导出到 Obsidian"
+            >
+              <FileText size={14} />
+            </button>
+          )}
           <button
             className="icon-button danger card-delete-button"
             type="button"

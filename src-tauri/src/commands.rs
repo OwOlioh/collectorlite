@@ -14,6 +14,7 @@ use crate::models::{
 use crate::source::browser::BrowserBookmarkClient;
 use crate::source::SourceAdapter;
 use crate::state::AppState;
+use crate::obsidian;
 
 /// 封面下载并发度：导入时仍把远程封面存到本地 `covers/`（保留离线查看能力），
 /// 但把原来逐条串行改为有界并发，缩短满收藏夹的导入等待时间。
@@ -37,6 +38,7 @@ fn to_video_item(item: &crate::models::ExternalItem, local_id: i64) -> VideoItem
         duration: item.duration,
         favorite_time: item.favorite_time,
         deleted_at: None,
+        obsidian_path: None,
         tags: vec![],
     }
 }
@@ -647,14 +649,119 @@ pub async fn update_item_notes(
     item_id: i64,
     notes: String,
 ) -> Result<VideoItem, String> {
-    db::update_item_notes(&state.pool, item_id, &notes)
+    // 1) 先写库，批注本身必须成功保存（健壮性底线）
+    let mut item = db::update_item_notes(&state.pool, item_id, &notes)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+
+    // 2) 满足「开关开启 + 仓库已配置 + 有批注内容」才触发单向同步；任何失败都只告警，不影响批注已保存
+    let settings = obsidian::load_settings(&state.data_dir);
+    let should_sync = settings.enabled
+        && !settings.vault_path.is_empty()
+        && !notes.trim().is_empty();
+    if should_sync {
+        match obsidian::write_or_update_note(&settings, &item) {
+            Ok(Some(rel)) => {
+                if db::set_item_obsidian_path(&state.pool, item_id, &rel).await.is_ok() {
+                    item.obsidian_path = Some(rel);
+                }
+            }
+            Ok(None) => {
+                // 托管标记被用户手动移除：跳过同步，不覆盖用户在 Obsidian 里的内容
+                eprintln!("[obsidian] 跳过同步：托管标记已被移除 (item {item_id})");
+            }
+            Err(e) => {
+                eprintln!("[obsidian] 同步失败（批注已保存）：{e}");
+            }
+        }
+    }
+    Ok(item)
 }
 
 #[tauri::command]
 pub fn open_url(url: String) -> Result<(), String> {
     webbrowser::open(&url).map_err(|error| error.to_string())
+}
+
+// ── Obsidian 单向联动 ──
+
+#[tauri::command]
+pub fn get_obsidian_settings(state: State<'_, AppState>) -> Result<obsidian::ObsidianSettings, String> {
+    Ok(obsidian::load_settings(&state.data_dir))
+}
+
+#[tauri::command]
+pub fn set_obsidian_settings(
+    state: State<'_, AppState>,
+    settings: obsidian::ObsidianSettings,
+) -> Result<(), String> {
+    // 未提供仓库名时，用所选目录名兜底（Obsidian URI 的 vault 参数需要的是仓库名而非路径）
+    let mut settings = settings;
+    if settings.vault_name.trim().is_empty() {
+        if let Some(name) = std::path::Path::new(&settings.vault_path).file_name() {
+            settings.vault_name = name.to_string_lossy().to_string();
+        }
+    }
+    obsidian::save_settings(&state.data_dir, &settings).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn open_note_in_obsidian(
+    state: State<'_, AppState>,
+    item_id: i64,
+) -> Result<(), String> {
+    let settings = obsidian::load_settings(&state.data_dir);
+    if !settings.enabled || settings.vault_path.is_empty() {
+        return Err("Obsidian 联动未启用或未配置仓库目录".into());
+    }
+    let item = db::get_item(&state.pool, item_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    obsidian::open_in_obsidian(&settings, &item).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn export_items_to_obsidian(
+    state: State<'_, AppState>,
+    item_ids: Vec<i64>,
+) -> Result<usize, String> {
+    let settings = obsidian::load_settings(&state.data_dir);
+    if !settings.enabled || settings.vault_path.is_empty() {
+        return Err("Obsidian 联动未启用或未配置仓库目录".into());
+    }
+    let mut exported = 0usize;
+    for id in &item_ids {
+        let item = match db::get_item(&state.pool, *id).await {
+            Ok(item) => item,
+            Err(_) => continue,
+        };
+        // 仅同步写过批注的收藏（与「保存即同步」的创建范围一致）
+        if item.notes.trim().is_empty() {
+            continue;
+        }
+        if let Ok(Some(rel)) = obsidian::write_or_update_note(&settings, &item) {
+            let _ = db::set_item_obsidian_path(&state.pool, *id, &rel).await;
+            exported += 1;
+        }
+    }
+    Ok(exported)
+}
+
+/// 用系统文件夹选择器选 Obsidian 仓库目录（复用已有 tauri-plugin-dialog，无需前端 npm 依赖）。
+#[tauri::command]
+pub fn pick_obsidian_vault(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    // 弹系统文件夹选择器（cancel 返回 None，表示用户放弃选择）
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("选择 Obsidian 仓库目录")
+        .blocking_pick_folder();
+
+    Ok(picked
+        .and_then(|fp| fp.into_path().ok())
+        .map(|p| p.to_string_lossy().to_string()))
 }
 
 /// 浏览器扩展「快速入库」本地桥的状态与令牌，供设置页展示。

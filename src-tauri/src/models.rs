@@ -84,6 +84,8 @@ pub struct VideoItem {
     pub duration: Option<i64>,
     pub favorite_time: Option<i64>,
     pub deleted_at: Option<i64>,
+    /// 同步到 Obsidian 后，vault 内相对路径（如 `收藏/标题.md`）；未同步为 None。
+    pub obsidian_path: Option<String>,
     pub tags: Vec<Tag>,
 }
 
@@ -185,6 +187,8 @@ pub struct ExportItem {
     pub duration: Option<i64>,
     pub favorite_time: Option<i64>,
     pub notes: String,
+    /// vault 内相对路径，换机迁移时据此恢复联动；未同步为 None。
+    pub obsidian_path: Option<String>,
     pub extra: Value,
     pub tags: Vec<ExportTag>,
 }

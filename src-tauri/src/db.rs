@@ -181,6 +181,7 @@ struct ItemRow {
     duration: Option<i64>,
     favorite_time: Option<i64>,
     deleted_at: Option<i64>,
+    obsidian_path: Option<String>,
 }
 
 impl ItemRow {
@@ -202,6 +203,7 @@ impl ItemRow {
             duration: self.duration,
             favorite_time: self.favorite_time,
             deleted_at: self.deleted_at,
+            obsidian_path: self.obsidian_path.clone(),
             tags,
         }
     }
@@ -313,7 +315,8 @@ async fn update_fts_row(
 pub async fn rebuild_item_fts(pool: &SqlitePool, item_id: i64) -> Result<(), AppError> {
     let row = sqlx::query_as::<_, ItemRow>(
         "SELECT id, source, external_id, source_url, title, description, notes, cover_url, cover_local_path,
-                author_name, author_id, partition_name, published_at, duration, favorite_time, deleted_at
+                author_name, author_id, partition_name, published_at, duration, favorite_time, deleted_at,
+                obsidian_path
          FROM items WHERE id = ?",
     )
     .bind(item_id)
@@ -469,7 +472,8 @@ pub async fn replace_item_tags(
     rebuild_item_fts(pool, item_id).await?;
     let row = sqlx::query_as::<_, ItemRow>(
         "SELECT id, source, external_id, source_url, title, description, notes, cover_url, cover_local_path,
-                author_name, author_id, partition_name, published_at, duration, favorite_time, deleted_at
+                author_name, author_id, partition_name, published_at, duration, favorite_time, deleted_at,
+                obsidian_path
          FROM items WHERE id = ?",
     )
     .bind(item_id)
@@ -505,7 +509,8 @@ pub async fn update_item_notes(
         .await?;
     let row = sqlx::query_as::<_, ItemRow>(
         "SELECT id, source, external_id, source_url, title, description, notes, cover_url, cover_local_path,
-                author_name, author_id, partition_name, published_at, duration, favorite_time, deleted_at
+                author_name, author_id, partition_name, published_at, duration, favorite_time, deleted_at,
+                obsidian_path
          FROM items WHERE id = ?",
     )
     .bind(item_id)
@@ -526,6 +531,50 @@ pub async fn update_item_notes(
     .fetch_all(pool)
     .await?;
     Ok(row.to_item(tags))
+}
+
+/// 读取单条收藏（供 Obsidian 打开 / 导出命令使用）。
+pub async fn get_item(pool: &SqlitePool, item_id: i64) -> Result<VideoItem, AppError> {
+    let row = sqlx::query_as::<_, ItemRow>(
+        "SELECT id, source, external_id, source_url, title, description, notes, cover_url, cover_local_path,
+                author_name, author_id, partition_name, published_at, duration, favorite_time, deleted_at,
+                obsidian_path
+         FROM items WHERE id = ?",
+    )
+    .bind(item_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound(format!("收藏不存在: {item_id}")))?;
+    let tags = sqlx::query(
+        "SELECT t.id, t.namespace, t.name, t.normalized, t.color, t.description, t.category_id,
+                COUNT(it2.item_id) AS count
+         FROM tags t
+         JOIN item_tags it ON it.tag_id = t.id
+         LEFT JOIN item_tags it2 ON it2.tag_id = t.id
+         WHERE it.item_id = ?
+         GROUP BY t.id
+         ORDER BY t.name COLLATE NOCASE",
+    )
+    .bind(item_id)
+    .map(tag_from_row)
+    .fetch_all(pool)
+    .await?;
+    Ok(row.to_item(tags))
+}
+
+/// 回写该收藏同步到的 Obsidian 笔记相对路径（相对 vault 根）。
+pub async fn set_item_obsidian_path(
+    pool: &SqlitePool,
+    item_id: i64,
+    rel_path: &str,
+) -> Result<(), AppError> {
+    sqlx::query("UPDATE items SET obsidian_path = ?, updated_at = ? WHERE id = ?")
+        .bind(rel_path)
+        .bind(now_seconds())
+        .bind(item_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// 快速入库用：按 `(source, external_id)` 查已有条目，只取回填侧边栏需要的最小字段。
@@ -1086,6 +1135,7 @@ struct ExportRow {
     published_at: Option<i64>,
     duration: Option<i64>,
     favorite_time: Option<i64>,
+    obsidian_path: Option<String>,
     extra_json: String,
 }
 
@@ -1096,7 +1146,8 @@ pub async fn export_items(
 ) -> Result<CollectionExport, AppError> {
     let mut qb = QueryBuilder::<Sqlite>::new(
         "SELECT id, source, external_id, source_url, title, description, notes, cover_url,
-                author_name, author_id, partition_name, published_at, duration, favorite_time, extra_json
+                author_name, author_id, partition_name, published_at, duration, favorite_time,
+                obsidian_path, extra_json
          FROM items WHERE 1 = 1 AND deleted_at IS NULL",
     );
     match &item_ids {
@@ -1153,6 +1204,7 @@ pub async fn export_items(
             duration: row.duration,
             favorite_time: row.favorite_time,
             notes: row.notes,
+            obsidian_path: row.obsidian_path,
             extra,
             tags,
         });
@@ -1306,9 +1358,9 @@ pub async fn import_collection(
         let insert_result = sqlx::query_scalar::<_, i64>(
             "INSERT INTO items (
                 source, external_id, source_url, title, description, cover_url, cover_local_path, author_name,
-                author_id, partition_name, published_at, duration, favorite_time, notes, extra_json,
+                author_id, partition_name, published_at, duration, favorite_time, notes, obsidian_path, extra_json,
                 created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              RETURNING id",
         )
         .bind(&item.source)
@@ -1324,6 +1376,7 @@ pub async fn import_collection(
         .bind(item.duration)
         .bind(item.favorite_time)
         .bind(&item.notes)
+        .bind(&item.obsidian_path)
         .bind(&extra_str)
         .bind(now)
         .bind(now)
