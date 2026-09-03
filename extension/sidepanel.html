@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>收藏到「收藏管理器」</h1>
+        <button id="open-options" type="button" class="link">设置</button>
+      </header>
+
+      <p id="status" class="status" hidden></p>
+
+      <label class="field">
+        <span class="label">标题</span>
+        <input id="title" type="text" placeholder="页面标题" />
+      </label>
+
+      <div class="field">
+        <span class="label">标签</span>
+        <div id="selected" class="chips"></div>
+        <input id="tag-input" type="text" placeholder="输入后回车新建标签" autocomplete="off" />
+        <div id="pool" class="chips pool"></div>
+      </div>
+
+      <label class="field">
+        <span class="label">批注</span>
+        <textarea id="note" rows="9" placeholder="为什么要收藏这一页？"></textarea>
+      </label>
+
+      <button id="save" type="button" class="primary">收藏</button>
+
+      <p id="url" class="url"></p>
+    </main>
+    <script src="sidepanel.js"></script>
+  </body>
+</html>

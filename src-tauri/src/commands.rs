@@ -1,13 +1,15 @@
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 
 use tauri::State;
 
+use crate::capture;
 use crate::db;
 use crate::error::AppError;
 use crate::models::{
-    BilibiliProfile, CollectionInfo, ImportPreview, ImportRequest, ImportResult, ItemFilters,
-    ItemTagAssignment, PartitionSuggestion, QrSession, QrStatus, RecacheResult, Tag, TagCategory,
-    TagInput, VideoItem,
+    BilibiliProfile, BridgeInfo, CollectionInfo, ImportPreview, ImportRequest, ImportResult,
+    ItemFilters, ItemTagAssignment, PartitionSuggestion, QrSession, QrStatus, RecacheResult, Tag,
+    TagCategory, TagInput, VideoItem,
 };
 use crate::source::browser::BrowserBookmarkClient;
 use crate::source::SourceAdapter;
@@ -72,7 +74,7 @@ fn cover_cache_path(
     Ok(covers_dir.join(format!("{hash:x}.{extension}")))
 }
 
-fn save_cover_file(
+pub(crate) fn save_cover_file(
     state: &AppState,
     source: &str,
     external_id: &str,
@@ -653,6 +655,31 @@ pub async fn update_item_notes(
 #[tauri::command]
 pub fn open_url(url: String) -> Result<(), String> {
     webbrowser::open(&url).map_err(|error| error.to_string())
+}
+
+/// 浏览器扩展「快速入库」本地桥的状态与令牌，供设置页展示。
+/// 扩展读不到本地文件，用户需要把 token 手动复制一次到扩展选项页。
+#[tauri::command]
+pub fn get_bridge_info(state: State<'_, AppState>) -> Result<BridgeInfo, String> {
+    let token = capture::load_or_create_token(&state.data_dir).map_err(|error| error.to_string())?;
+    let port = state.bridge_port.load(Ordering::Relaxed);
+    Ok(BridgeInfo {
+        port,
+        running: port > 0,
+        token,
+    })
+}
+
+/// 重新生成本地桥令牌（旧 token 立即失效，需在扩展选项页同步更新）。
+#[tauri::command]
+pub fn regenerate_bridge_token(state: State<'_, AppState>) -> Result<BridgeInfo, String> {
+    let token = capture::regenerate_token(&state.data_dir).map_err(|error| error.to_string())?;
+    let port = state.bridge_port.load(Ordering::Relaxed);
+    Ok(BridgeInfo {
+        port,
+        running: port > 0,
+        token,
+    })
 }
 
 #[tauri::command]

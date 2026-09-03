@@ -30,6 +30,8 @@ scraper = "0.20"
 sha2 = "0.10"
 regex = "1"
 futures = "0.3"
+rand = "0.8"
+tiny_http = "0.12"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"

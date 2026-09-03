@@ -1,8 +1,18 @@
 import { useEffect, useState } from "react";
-import { Database, LogOut, RefreshCw, ShieldCheck, SunMoon, Trash2 } from "lucide-react";
+import {
+  Check,
+  Copy,
+  Database,
+  LogOut,
+  Puzzle,
+  RefreshCw,
+  ShieldCheck,
+  SunMoon,
+  Trash2
+} from "lucide-react";
 import { api } from "../lib/api";
 import { useToast } from "./Toast";
-import type { BilibiliProfile } from "../types";
+import type { BilibiliProfile, BridgeInfo } from "../types";
 import { applyTheme, getStoredTheme, storeTheme, type ThemeMode } from "../lib/theme";
 import { getRetentionDays, setRetentionDays, RETENTION_OPTIONS } from "../lib/retention";
 
@@ -15,11 +25,41 @@ export function SettingsPage({ onOpenTrash }: SettingsPageProps) {
   const [theme, setTheme] = useState<ThemeMode>(getStoredTheme());
   const [retention, setRetention] = useState<number>(getRetentionDays());
   const [recaching, setRecaching] = useState(false);
+  const [bridge, setBridge] = useState<BridgeInfo | null>(null);
+  const [copied, setCopied] = useState(false);
   const { toast } = useToast();
 
   useEffect(() => {
     void api.getProfile().then(setProfile);
   }, []);
+
+  useEffect(() => {
+    void api
+      .getBridgeInfo()
+      .then(setBridge)
+      .catch(() => setBridge(null));
+  }, []);
+
+  const copyToken = async () => {
+    if (!bridge?.token) return;
+    try {
+      await navigator.clipboard.writeText(bridge.token);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1800);
+    } catch {
+      toast("error", "复制失败，请手动选中下方令牌复制");
+    }
+  };
+
+  const regenerateToken = async () => {
+    try {
+      const next = await api.regenerateBridgeToken();
+      setBridge(next);
+      toast("success", "已重新生成令牌，记得同步到扩展选项页");
+    } catch (e) {
+      toast("error", `重新生成失败: ${String(e)}`);
+    }
+  };
 
   const changeTheme = (mode: ThemeMode) => {
     setTheme(mode);
@@ -148,6 +188,46 @@ export function SettingsPage({ onOpenTrash }: SettingsPageProps) {
           <button className="ghost-button" type="button" onClick={() => onOpenTrash?.()}>
             <Trash2 size={16} />
             打开回收站
+          </button>
+        </div>
+
+        <div className="settings-card is-wide">
+          <div className="settings-icon"><Puzzle size={20} /></div>
+          <div>
+            <h2>浏览器扩展</h2>
+            <p>
+              安装 Edge 扩展后，可以在网页侧边栏里给当前页打标签、写备注并一键收藏。
+              本机桥只监听 127.0.0.1，每次请求都要带令牌。
+            </p>
+            <div className="bridge-status">
+              <span className={`bridge-dot ${bridge?.running ? "is-on" : ""}`} />
+              {bridge?.running
+                ? `桥已启动，监听端口 ${bridge.port}`
+                : "桥未启动（重新启动应用后会自动拉起）"}
+            </div>
+            <div className="bridge-token">
+              <input
+                className="bridge-token-input"
+                type="text"
+                readOnly
+                value={bridge?.token ?? ""}
+                onFocus={(event) => event.currentTarget.select()}
+                aria-label="本机令牌"
+              />
+              <button className="ghost-button small" type="button" onClick={copyToken}>
+                {copied ? <Check size={14} /> : <Copy size={14} />}
+                {copied ? "已复制" : "复制"}
+              </button>
+            </div>
+            <ol className="bridge-steps">
+              <li>Edge 打开 <code>edge://extensions</code>，开启「开发人员模式」，点「加载解压缩的扩展」选择项目里的 <code>extension</code> 目录。</li>
+              <li>右键扩展图标 →「扩展选项」，把上面的令牌粘贴进去保存。</li>
+              <li>浏览网页时点扩展图标，侧边栏里配好标签和备注，点「收藏」即可入库。</li>
+            </ol>
+          </div>
+          <button className="ghost-button" type="button" onClick={regenerateToken}>
+            <RefreshCw size={16} />
+            重新生成
           </button>
         </div>
       </div>

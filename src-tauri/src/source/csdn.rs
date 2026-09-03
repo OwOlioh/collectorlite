@@ -157,6 +157,79 @@ impl CsdnClient {
             }),
         })
     }
+
+    /// 抓 CSDN 单篇文章的丰富元数据（标题 / 封面 / 摘要 / 作者）。
+    /// 复用已有的页面抓取基建（抓 `og:` meta），不引入新依赖。
+    /// 仅当链接确实是 `.../article/details/{id}` 时才生效；其余 CSDN 链接返回 `None`，
+    /// 由调用方回退到「按收藏夹路由」或通用存档。
+    pub async fn fetch_article(&self, url: &str) -> Option<ExternalItem> {
+        let article_re = Regex::new(r"blog\.csdn\.net/[^/]+/article/details/(\d+)").ok()?;
+        let caps = article_re.captures(url)?;
+        let article_id = caps[1].to_string();
+        let username = Regex::new(r"blog\.csdn\.net/([^/]+)/article/details/")
+            .ok()
+            .and_then(|re| re.captures(url))
+            .map(|c| c[1].to_string())
+            .unwrap_or_default();
+
+        let headers = Self::build_headers();
+        let resp = self
+            .client
+            .get(url)
+            .headers(headers)
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let text = resp.text().await.ok()?;
+        let title = meta_property(&text, "og:title").unwrap_or_else(|| url.to_string());
+        let cover_url = meta_property(&text, "og:image");
+        let description = meta_property(&text, "og:description").unwrap_or_default();
+        let author_name = meta_name(&text, "author")
+            .or_else(|| meta_property(&text, "og:author-name"));
+
+        Some(ExternalItem {
+            source: "csdn".into(),
+            external_id: article_id,
+            source_url: url.to_string(),
+            title,
+            description,
+            cover_url,
+            cover_local_path: None,
+            author_name,
+            author_id: None,
+            partition_name: Some("CSDN".into()),
+            published_at: None,
+            duration: None,
+            favorite_time: Some(crate::db::now_seconds()),
+            extra: serde_json::json!({ "username": username }),
+        })
+    }
+}
+
+/// 从页面 HTML 里抽 `<meta property="X" content="Y">` 的值。
+fn meta_property(html: &str, key: &str) -> Option<String> {
+    let pattern = format!(
+        r#"<meta[^>]*property="{}"[^>]*content="([^"]*)""#,
+        regex::escape(key)
+    );
+    Regex::new(&pattern)
+        .ok()
+        .and_then(|re| re.captures(html))
+        .and_then(|caps| caps.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
+/// 从页面 HTML 里抽 `<meta name="X" content="Y">` 的值。
+fn meta_name(html: &str, key: &str) -> Option<String> {
+    let pattern = format!(r#"<meta[^>]*name="{}"[^>]*content="([^"]*)""#, regex::escape(key));
+    Regex::new(&pattern)
+        .ok()
+        .and_then(|re| re.captures(html))
+        .and_then(|caps| caps.get(1))
+        .map(|m| m.as_str().to_string())
 }
 
 #[async_trait]

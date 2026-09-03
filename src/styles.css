@@ -3095,3 +3095,72 @@ textarea {
   background: var(--danger);
   color: #fff;
 }
+
+/* ── 设置页：浏览器扩展（本地桥令牌） ── */
+.settings-card.is-wide {
+  grid-column: 1 / -1;
+  align-items: start;
+}
+
+.bridge-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.bridge-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex: none;
+}
+
+.bridge-dot.is-on {
+  background: #10b981;
+}
+
+.bridge-token {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.bridge-token-input {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  background: var(--surface-soft);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+}
+
+.bridge-token-input:focus {
+  outline: none;
+  border-color: var(--blue);
+}
+
+.bridge-steps {
+  margin: 12px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.75;
+}
+
+.bridge-steps code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  color: var(--text);
+}

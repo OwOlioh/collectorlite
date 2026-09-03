@@ -46,7 +46,7 @@ pub struct CollectionInfo {
     pub url: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalItem {
     pub source: String,
@@ -227,6 +227,16 @@ pub struct BilibiliProfile {
 pub struct QrSession {
     pub qrcode_key: String,
     pub qrcode_url: String,
+}
+
+/// 浏览器扩展「快速入库」本地桥的运行时状态，供设置页展示与排障。
+/// `port` 为 0 表示桥未启动（端口全被占用）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BridgeInfo {
+    pub port: u16,
+    pub running: bool,
+    pub token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

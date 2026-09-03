@@ -15,7 +15,7 @@ impl BrowserBookmarkClient {
         Self
     }
 
-    fn resolve_favicon_url(page_url: &str) -> Option<String> {
+    pub(crate) fn resolve_favicon_url(page_url: &str) -> Option<String> {
         let parsed = Url::parse(page_url).ok()?;
         let domain = parsed.host_str()?;
         Some(format!("https://favicon.im/{domain}"))

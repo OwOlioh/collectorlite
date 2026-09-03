@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use regex::Regex;
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 use serde_json::Value;
 use tokio::time::sleep;
@@ -109,6 +110,25 @@ impl GithubClient {
             }),
         })
     }
+
+    /// 单仓库链接（github.com/{owner}/{repo}）抓取为一条 github 条目，复用 `item_from_json`。
+    /// 失败返回 `None`，由调用方回退到通用存档（不会丢数据）。
+    pub async fn fetch_repo(&self, url: &str) -> Option<ExternalItem> {
+        let (owner, repo) = parse_github_repo(url)?;
+        let api = format!("https://api.github.com/repos/{owner}/{repo}");
+        let json = self.fetch_json(&api).await.ok()?;
+        Self::item_from_json(&json)
+    }
+}
+
+/// 从 github 链接里抽 owner/repo（忽略后续路径与 query）。抽不到返回 `None`。
+fn parse_github_repo(url: &str) -> Option<(String, String)> {
+    let re = Regex::new(r"github\.com/([^/\s]+)/([^/\s?#]+)").ok()?;
+    let caps = re.captures(url)?;
+    Some((
+        caps.get(1)?.as_str().to_string(),
+        caps.get(2)?.as_str().to_string(),
+    ))
 }
 
 /// Parse ISO 8601 date string to Unix timestamp
@@ -292,5 +312,18 @@ mod tests {
     fn test_parse_iso8601_with_tz() {
         let ts = parse_iso8601("2025-10-11T12:36:10+00:00").unwrap();
         assert!(ts > 0);
+    }
+
+    #[test]
+    fn parse_github_repo_extracts_owner_and_name() {
+        assert_eq!(
+            parse_github_repo("https://github.com/rust-lang/rust"),
+            Some(("rust-lang".to_string(), "rust".to_string()))
+        );
+        assert_eq!(
+            parse_github_repo("https://github.com/octocat/Hello-World?tab=readme"),
+            Some(("octocat".to_string(), "Hello-World".to_string()))
+        );
+        assert_eq!(parse_github_repo("https://github.com/rust-lang"), None);
     }
 }

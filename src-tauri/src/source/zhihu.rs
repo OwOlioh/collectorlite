@@ -204,6 +204,17 @@ impl ZhihuClient {
             }),
         })
     }
+
+    /// 抓知乎单条内容（回答 / 文章 / 想法）的丰富元数据。
+    /// 需要登录 cookie；未登录会 401 → 返回 `None`，由调用方回退到通用存档。
+    pub async fn fetch_single(&self, url: &str) -> Option<ExternalItem> {
+        let api = single_api_url(url)?;
+        let json = self.fetch_json(&api).await.ok()?;
+        // 单条内容的 JSON 结构与收藏夹 item 的 `content` 子对象一致，
+        // 这里包一层 `{ "content": json }` 直接复用 `item_from_json`，避免重复造轮子。
+        let wrapped = serde_json::json!({ "content": json });
+        Self::item_from_json(&wrapped)
+    }
 }
 
 /// Convert a JSON value to string, handling both string and number types
@@ -213,6 +224,79 @@ fn json_value_to_string(v: &Value) -> String {
         Value::Number(n) => n.to_string(),
         _ => String::new(),
     }
+}
+
+/// 把知乎单条内容链接映射成对应的 v4 API 端点。识别不了则返回 `None`。
+/// - 回答：`www.zhihu.com/question/{qid}/answer/{aid}` → `/api/v4/answers/{aid}`
+/// - 文章：`zhuanlan.zhihu.com/p/{id}` 或 `www.zhihu.com/p/{id}` → `/api/v4/articles/{id}`
+/// - 想法：`www.zhihu.com/pin/{id}` → `/api/v4/pins/{id}`
+fn single_api_url(url: &str) -> Option<String> {
+    let answer_re = Regex::new(r"zhihu\.com/question/\d+/answer/(\d+)").ok()?;
+    if let Some(caps) = answer_re.captures(url) {
+        return Some(format!("https://www.zhihu.com/api/v4/answers/{}", &caps[1]));
+    }
+    let article_re = Regex::new(r"(zhuanlan\.zhihu\.com|www\.zhihu\.com)/p/(\d+)").ok()?;
+    if let Some(caps) = article_re.captures(url) {
+        return Some(format!("https://www.zhihu.com/api/v4/articles/{}", &caps[2]));
+    }
+    let pin_re = Regex::new(r"zhihu\.com/pin/(\d+)").ok()?;
+    if let Some(caps) = pin_re.captures(url) {
+        return Some(format!("https://www.zhihu.com/api/v4/pins/{}", &caps[1]));
+    }
+    None
+}
+
+/// 从知乎单条链接 + 扩展读到的 og 元数据构造 zhihu item（API 抓取失败时的兜底）。
+///
+/// 知乎 API v4 需要 `x-zse-96` 反爬签名，app 侧即使有 cookie 也常常 403；
+/// 但扩展运行在用户已登录的浏览器里，能稳定读到页面的 og:title / og:image。
+/// 这里用「URL 解析出的 id + 扩展传来的干净标题 / 封面」构造标准 zhihu 条目，
+/// external_id 与收藏夹导入（`item_from_json` 用 content.id）同键，去重一致。
+pub fn item_from_url_and_meta(url: &str, title: &str, og_image: &str) -> Option<ExternalItem> {
+    let (external_id, item_type) = if let Some(caps) =
+        Regex::new(r"zhihu\.com/question/\d+/answer/(\d+)").ok()?.captures(url)
+    {
+        (caps[1].to_string(), "answer")
+    } else if let Some(caps) = Regex::new(r"zhihu\.com/p/(\d+)").ok()?.captures(url) {
+        (caps[1].to_string(), "article")
+    } else if let Some(caps) = Regex::new(r"zhihu\.com/pin/(\d+)").ok()?.captures(url) {
+        (caps[1].to_string(), "pin")
+    } else {
+        return None;
+    };
+
+    let clean_title = title.trim();
+    let title = if clean_title.is_empty() {
+        if item_type == "pin" {
+            "想法".to_string()
+        } else {
+            url.to_string()
+        }
+    } else {
+        clean_title.to_string()
+    };
+    let cover = if og_image.trim().is_empty() {
+        None
+    } else {
+        Some(og_image.trim().to_string())
+    };
+
+    Some(ExternalItem {
+        source: "zhihu".into(),
+        external_id,
+        source_url: url.to_string(),
+        title,
+        description: String::new(),
+        cover_url: cover,
+        cover_local_path: None,
+        author_name: None,
+        author_id: None,
+        partition_name: Some("知乎".into()),
+        published_at: None,
+        duration: None,
+        favorite_time: Some(crate::db::now_seconds()),
+        extra: serde_json::json!({ "item_type": item_type }),
+    })
 }
 
 #[async_trait]
@@ -356,5 +440,58 @@ mod tests {
     fn test_invalid_url() {
         let result = ZhihuClient::parse_collection_id("https://www.zhihu.com/question/123");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_single_api_url_maps_content_links() {
+        assert_eq!(
+            single_api_url("https://www.zhihu.com/question/123/answer/456?utm=x"),
+            Some("https://www.zhihu.com/api/v4/answers/456".to_string())
+        );
+        assert_eq!(
+            single_api_url("https://zhuanlan.zhihu.com/p/789"),
+            Some("https://www.zhihu.com/api/v4/articles/789".to_string())
+        );
+        assert_eq!(
+            single_api_url("https://www.zhihu.com/p/101112"),
+            Some("https://www.zhihu.com/api/v4/articles/101112".to_string())
+        );
+        assert_eq!(
+            single_api_url("https://www.zhihu.com/pin/131415"),
+            Some("https://www.zhihu.com/api/v4/pins/131415".to_string())
+        );
+        // 非单条内容链接（收藏夹 / 用户主页 / 问题页）识别不了，回退通用存档。
+        assert_eq!(single_api_url("https://www.zhihu.com/collection/19677733"), None);
+        assert_eq!(single_api_url("https://www.zhihu.com/question/123"), None);
+    }
+
+    #[test]
+    fn test_item_from_url_and_meta_article() {
+        let item = item_from_url_and_meta(
+            "https://zhuanlan.zhihu.com/p/642170180",
+            "一篇知乎文章",
+            "https://pic.zhimg.com/v2-abc.jpg",
+        )
+        .unwrap();
+        assert_eq!(item.source, "zhihu");
+        assert_eq!(item.external_id, "642170180");
+        assert_eq!(item.title, "一篇知乎文章");
+        assert_eq!(item.cover_url.as_deref(), Some("https://pic.zhimg.com/v2-abc.jpg"));
+        assert_eq!(item.extra["item_type"], "article");
+    }
+
+    #[test]
+    fn test_item_from_url_and_meta_answer() {
+        let item = item_from_url_and_meta("https://www.zhihu.com/question/123/answer/456", "问题标题", "")
+            .unwrap();
+        assert_eq!(item.external_id, "456");
+        assert_eq!(item.extra["item_type"], "answer");
+        assert_eq!(item.cover_url, None);
+    }
+
+    #[test]
+    fn test_item_from_url_and_meta_non_content() {
+        assert!(item_from_url_and_meta("https://www.zhihu.com/hot", "热榜", "").is_none());
+        assert!(item_from_url_and_meta("https://www.zhihu.com/question/123", "问题页", "").is_none());
     }
 }

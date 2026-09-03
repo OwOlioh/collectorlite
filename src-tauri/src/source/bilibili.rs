@@ -396,34 +396,52 @@ impl BilibiliClient {
     }
 
     pub async fn download_cover(&self, url: &str) -> Result<(Vec<u8>, String), AppError> {
-        let response = self
-            .http
-            .get(url)
-            .header(USER_AGENT, USER_AGENT_STR)
-            .header(REFERER, BILIBILI_REFERER)
-            .send()
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(AppError::Other(format!("下载封面失败（HTTP {status}）")));
-        }
-        let extension = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(|value| {
-                if value.contains("png") {
-                    "png"
-                } else if value.contains("webp") {
-                    "webp"
-                } else {
-                    "jpg"
+        // 本机代理偶发抖动（TunnelUnsuccessful / 连接中途断开）会让单次传输失败，
+        // 一旦失败封面就永久落不了地。这里对「传输层错误」重试 3 次；
+        // 业务性错误（403 防盗链 / 404 等）不重试，直接返回。
+        let mut last_err: Option<AppError> = None;
+        for _ in 0..3 {
+            let response = match self
+                .http
+                .get(url)
+                .header(USER_AGENT, USER_AGENT_STR)
+                .header(REFERER, BILIBILI_REFERER)
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    last_err = Some(AppError::Other(format!("下载封面请求失败：{error}")));
+                    continue;
                 }
-            })
-            .unwrap_or("jpg")
-            .to_string();
-        let bytes = response.bytes().await?.to_vec();
-        Ok((bytes, extension))
+            };
+            let status = response.status();
+            if !status.is_success() {
+                return Err(AppError::Other(format!("下载封面失败（HTTP {status}）")));
+            }
+            let extension = response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| {
+                    if value.contains("png") {
+                        "png"
+                    } else if value.contains("webp") {
+                        "webp"
+                    } else {
+                        "jpg"
+                    }
+                })
+                .unwrap_or("jpg")
+                .to_string();
+            match response.bytes().await {
+                Ok(bytes) => return Ok((bytes.to_vec(), extension)),
+                Err(error) => {
+                    last_err = Some(AppError::Other(format!("读取封面失败：{error}")));
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| AppError::Other("下载封面失败".into())))
     }
 
     pub async fn resolve_public_favorite(&self, url: &str) -> Result<CollectionInfo, AppError> {
@@ -1287,6 +1305,7 @@ mod tests {
             "https://space.bilibili.com/397274588/channel/seriesdetail?sid=67890",
         )
         .unwrap();
+        assert_eq!(parsed.mid, 397274588);
         assert_eq!(parsed.id, "67890");
         assert_eq!(parsed.collection_type, "bili_series");
     }

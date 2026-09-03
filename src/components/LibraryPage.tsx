@@ -29,6 +29,8 @@ interface LibraryPageProps {
   tags: Tag[];
   onTagsChanged: () => void;
   onTrashChanged: () => void;
+  /** 数值变化即重新拉列表。浏览器扩展入库后由 App 递增。 */
+  refreshToken?: number;
 }
 
 const initialFilters: ItemFilters = {
@@ -47,7 +49,12 @@ function BilibiliIcon({ size = 15 }: { size?: number }) {
   );
 }
 
-export function LibraryPage({ tags, onTagsChanged, onTrashChanged }: LibraryPageProps) {
+export function LibraryPage({
+  tags,
+  onTagsChanged,
+  onTrashChanged,
+  refreshToken
+}: LibraryPageProps) {
   const [section, setSection] = useState<LibrarySection>("search");
   const [filters, setFilters] = useState<ItemFilters>(initialFilters);
   const [items, setItems] = useState<VideoItem[]>([]);
@@ -73,7 +80,7 @@ export function LibraryPage({ tags, onTagsChanged, onTrashChanged }: LibraryPage
     if (section !== "search") return;
     const timer = window.setTimeout(loadItems, 120);
     return () => window.clearTimeout(timer);
-  }, [loadItems, section]);
+  }, [loadItems, section, refreshToken]);
 
   const selectedFilterTags = tags.filter((tag) => filters.tagIds.includes(tag.id));
 

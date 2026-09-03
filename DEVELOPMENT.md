@@ -285,6 +285,17 @@ const [zhihuCollections, setZhihuCollections] = useState(...);
 - **筛选**：`ItemFilters.trash: Option<bool>`（`None`/`false` = 仅正常项，`Some(true)` = 仅回收站），`search_items` 已支持。
 - **前端**：侧边栏「回收站」入口带未读计数角标；`TrashPage` 提供单条/批量恢复、永久删除、清空，并显示保留期倒计时；`api.ts` 的 `listTrash` / `restoreItem` / `restoreItems` / `purgeItem` / `purgeItems` / `emptyTrash` / `getTrashCount` / `autoPurgeTrash` 均有 mock 兜底。
 
+### 3.13 不要自动 commit / push（AI 协作约定）
+
+**这是一条硬性协作纪律，优先级高于"实现→验证→提交"的默认节奏。**
+
+- AI（WorkBuddy）完成代码 / 文档改动后，**不要自动执行 `git commit`**，也不要在"校验通过""验证全绿"之后自行提交。
+- **正确流程**：改完 → 跑校验（`cargo check` / `tsc --noEmit` / `cargo test`）→ 把改动文件与 diff 摘要列给用户 review → **等用户明确说"提交"** 后再 commit。
+- **push 同理**：必须用户明确同意才能 `git push`，且若用户中途叫停（例如"先不要 push"），立即停止，已 commit 但未 push 的内容保持本地。
+- **例外**：仅当用户在本轮对话里已经明确授权（如"提交吧" / "push 吧"）时，才执行对应动作。
+- **commit 聚焦**：提交前若 `cargo fmt` 误改了无关文件的纯格式差异，用 `git checkout -- <file>` 回退，保持 commit 只含本次相关改动。
+- 这条约定是为了避免 AI 在未被确认的情况下就把半成品 / 阶段性改动固化进 git 历史；用户希望保留"先 review、后落盘"的掌控感。
+
 ---
 
 ## 四、新增来源检查清单
@@ -306,7 +317,7 @@ const [zhihuCollections, setZhihuCollections] = useState(...);
 - [ ] 若来源涉及删除/清理，复用 `db::soft_delete_*`（进回收站），不要引入硬删除逻辑（见 3.12）
 - [ ] 新增 UI 颜色一律用 CSS 变量（`:root` 浅色 + `[data-theme="dark"]` 深色 + 侧边栏 `--side-*`），不要硬编码 hex（深浅色主题已支持）
 - [ ] 跨源反馈用 `useToast()`，不要 `window.alert`
-- [ ] 提交 + 打 tag
+- [ ] **提交 + 打 tag（需用户明确同意后才做，见 3.13，禁止自动 commit/push）**
 
 ---
 

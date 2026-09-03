@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>收藏管理器 · 本机令牌</h1>
+      </header>
+
+      <ol class="steps">
+        <li>打开「收藏管理器」，进入设置页的「浏览器扩展」区块。</li>
+        <li>复制那里的本机令牌，粘贴到下面。</li>
+        <li>保存后，点击扩展图标即可在侧边栏收藏当前页面。</li>
+      </ol>
+
+      <label class="field">
+        <span class="label">本机令牌</span>
+        <input id="token" type="text" placeholder="64 位十六进制字符串" spellcheck="false" />
+      </label>
+
+      <button id="save" type="button" class="primary">保存</button>
+      <p id="status" class="status" hidden></p>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>

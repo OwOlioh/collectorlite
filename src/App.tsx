@@ -6,6 +6,7 @@ import { ImportPage } from "./components/ImportPage";
 import { SettingsPage } from "./components/SettingsPage";
 import { TrashPage } from "./components/TrashPage";
 import { Sidebar } from "./components/Sidebar";
+import { CaptureBridgeListener } from "./components/CaptureBridgeListener";
 import { ToastProvider } from "./components/Toast";
 import { applyTheme, getStoredTheme, watchSystemTheme } from "./lib/theme";
 import { getRetentionDays } from "./lib/retention";
@@ -14,6 +15,8 @@ export default function App() {
   const [active, setActive] = useState<AppView>("library");
   const [tags, setTags] = useState<Tag[]>([]);
   const [trashCount, setTrashCount] = useState(0);
+  // 浏览器扩展入库后递增，用来通知收藏库重新拉列表
+  const [libraryVersion, setLibraryVersion] = useState(0);
 
   const refreshTags = useCallback(async () => {
     setTags(await api.listTags());
@@ -26,6 +29,12 @@ export default function App() {
       /* 忽略：回收站计数不影响主流程 */
     }
   }, []);
+
+  const handleCaptured = useCallback(() => {
+    void refreshTags();
+    void refreshTrashCount();
+    setLibraryVersion((version) => version + 1);
+  }, [refreshTags, refreshTrashCount]);
 
   useEffect(() => {
     void refreshTags();
@@ -47,12 +56,14 @@ export default function App() {
 
   return (
     <ToastProvider>
+      <CaptureBridgeListener onCaptured={handleCaptured} />
       <div className="app-shell">
         <Sidebar active={active} trashCount={trashCount} onChange={setActive} />
         <main className="main-panel">
           <div className={`view-panel ${active === "library" ? "is-active" : ""}`}>
             <LibraryPage
               tags={tags}
+              refreshToken={libraryVersion}
               onTagsChanged={refreshTags}
               onTrashChanged={refreshTrashCount}
             />

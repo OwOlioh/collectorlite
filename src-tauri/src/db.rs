@@ -10,7 +10,7 @@ use crate::models::{
     ItemFilters, Tag, TagCategory, TagInput, VideoItem,
 };
 
-fn now_seconds() -> i64 {
+pub fn now_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -526,6 +526,66 @@ pub async fn update_item_notes(
     .fetch_all(pool)
     .await?;
     Ok(row.to_item(tags))
+}
+
+/// 快速入库用：按 `(source, external_id)` 查已有条目，只取回填侧边栏需要的最小字段。
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct CapturedItem {
+    pub id: i64,
+    pub title: String,
+    pub notes: String,
+}
+
+pub async fn find_item_by_source_id(
+    pool: &SqlitePool,
+    source: &str,
+    external_id: &str,
+) -> Result<Option<CapturedItem>, AppError> {
+    let row = sqlx::query_as::<_, CapturedItem>(
+        "SELECT id, title, notes FROM items WHERE source = ? AND external_id = ?",
+    )
+    .bind(source)
+    .bind(external_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+/// 快速入库用：更新已有条目的标题与备注。
+///
+/// 刻意**不**走 `upsert_item`——那会清空 `cover_local_path` 并整体替换 `extra_json`，
+/// 把书签导入写进去的 `folder_tags` 抹掉，已下载的封面也会白重下一次。
+/// 顺带把 `deleted_at` 置空：重新收藏回收站里的条目等同于恢复它。
+pub async fn update_captured_item(
+    pool: &SqlitePool,
+    item_id: i64,
+    title: &str,
+    notes: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE items SET title = ?, notes = ?, deleted_at = NULL, updated_at = ? WHERE id = ?",
+    )
+    .bind(title)
+    .bind(notes)
+    .bind(now_seconds())
+    .bind(item_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 读取某条目已挂载的标签名（侧边栏回填用）。
+pub async fn item_tag_names(pool: &SqlitePool, item_id: i64) -> Result<Vec<String>, AppError> {
+    let names = sqlx::query_scalar::<_, String>(
+        "SELECT t.name FROM tags t
+         JOIN item_tags it ON it.tag_id = t.id
+         WHERE it.item_id = ?
+         ORDER BY t.name COLLATE NOCASE",
+    )
+    .bind(item_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(names)
 }
 
 pub async fn merge_tags(
@@ -1123,6 +1183,23 @@ pub async fn set_item_cover_local_path(
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// 该项是否已有本地封面缓存。capture 路径据此决定是否要补下载，避免对已缓存项重复抓取。
+pub async fn item_has_local_cover(
+    pool: &SqlitePool,
+    source: &str,
+    external_id: &str,
+) -> Result<bool, AppError> {
+    let path = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT cover_local_path FROM items WHERE source = ? AND external_id = ?",
+    )
+    .bind(source)
+    .bind(external_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+    Ok(path.map(|value| !value.is_empty()).unwrap_or(false))
 }
 
 /// 取出需要补缓存封面的项：bilibili / csdn 来源、有远程 cover_url、但本地缓存为空的项。

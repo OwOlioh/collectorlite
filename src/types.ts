@@ -135,3 +135,10 @@ export interface ItemFilters {
 }
 
 export type AppView = "library" | "import" | "trash" | "settings";
+
+/** 浏览器扩展「快速入库」用的本地桥状态。port 为 0 表示桥未启动。 */
+export interface BridgeInfo {
+  port: number;
+  running: boolean;
+  token: string;
+}

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   BilibiliProfile,
+  BridgeInfo,
   BrowserImportRequest,
   CollectionInfo,
   ImportPreview,
@@ -18,6 +19,9 @@ import type {
 import { convertFileSrc } from "@tauri-apps/api/core";
 
 const inTauri = () => "__TAURI_INTERNALS__" in window;
+
+/** 供需要直接调 Tauri 子模块（如事件监听）的组件判断当前运行环境。 */
+export { inTauri };
 
 export const resolveCoverUrl = (coverUrl?: string, coverLocalPath?: string) => {
   if (coverLocalPath && inTauri()) {
@@ -136,6 +140,9 @@ export const api = {
     call<ImportPreview>("preview_github_import", { input: request }),
   executeGithubImport: (request: ImportRequest) =>
     call<ImportResult>("execute_github_import", { input: request }),
+  // 浏览器扩展「快速入库」本地桥
+  getBridgeInfo: () => call<BridgeInfo>("get_bridge_info", {}),
+  regenerateBridgeToken: () => call<BridgeInfo>("regenerate_bridge_token", {}),
 };
 
 let mockTags: Tag[] = [
@@ -793,6 +800,10 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
         errors: []
       } as T;
     }
+    // 浏览器 mock 环境没有真实桥，返回示意数据让设置页 UI 可调试
+    case "get_bridge_info":
+    case "regenerate_bridge_token":
+      return { port: 0, running: false, token: "mock-bridge-token" } as T;
     default:
       return null as T;
   }
