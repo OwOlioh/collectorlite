@@ -1,0 +1,9 @@
+# 统一行尾策略
+# 关键：*.sql 强制 LF —— 否则 Windows 上 autocrlf 会把迁移文件 checkout 成 CRLF，
+# 导致与数据库 _sqlx_migrations 里记录的 LF checksum 不一致，
+# sqlx 启动校验报 "migration N was previously applied but has been modified" 直接 panic
+# （曾导致 Actions 构建的 release 版启动闪退）。
+* text=auto
+*.sql text eol=lf
+*.sh text eol=lf
+*.gitattributes text eol=lf
