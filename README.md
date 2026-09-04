@@ -1,80 +1,186 @@
 # 收藏管理器
 
-一个运行在本地的多平台收藏整理工具。将 B站、浏览器书签、知乎等平台的收藏内容导入本地 SQLite 数据库，使用标签和分类统一管理。
+一个运行在本地的多平台收藏整理桌面应用。把 B站、浏览器书签、知乎、CSDN、GitHub Stars 等平台的收藏**元数据**汇总到本地 SQLite，用标签 / 分类统一管理，支持批注并可选**单向联动到 Obsidian**。
 
-## 功能
+技术栈：Tauri 2 · Rust · React + TypeScript + Vite。数据保存在本地，不依赖任何云服务。
 
-- **多平台导入**：B站（扫码登录/公开链接）、浏览器书签（HTML 文件）、知乎（登录/链接）
-- 分区标签、自定义标签和标签分类
-- 标签分类拖拽
-- 内容标签编辑
-- 内容批注
-- 本地删除、多选批量删除、按标签删除（删除先进入回收站，默认 7 天保留期内可恢复）
-- 来源筛选（B站/浏览器/知乎）
-- 内容标题、简介、作者和标签检索
-- 浏览器书签 favicon 封面
+> 仅保存收藏的**元数据与链接**（标题、作者、封面、时间、备注），不下载视频 / 正文内容。
 
-## 隐私与数据
+---
 
-- 不下载视频或文件内容。
-- 只保存元数据和封面图片。
-- 登录 Cookie 保存在 Windows 凭据管理器以及应用数据目录中，不会写入仓库。
-- SQLite 数据库和封面保存在 Tauri 应用数据目录：
+## 功能特性
+
+**多源导入**
+
+- **B站**：扫码登录 / 公开收藏夹链接 / 我的收藏夹、合集与系列、图文收藏
+- **浏览器书签**：HTML 文件（Chrome/Edge 导出）拖拽导入，目录层级自动转标签
+- **知乎**：Cookie 登录收藏夹、单条链接（回答 / 文章 / 想法）
+- **CSDN**：用户名收藏夹、单篇文章
+- **GitHub**：Stars（个人令牌或用户名）
+- **Edge 浏览器扩展**：在网页侧边栏一键「快速入库」（可选安装，本地桥通信）
+
+**整理与检索**
+
+- 标签系统（手动 / 分区标签）+ 标签分类（拖拽归组、跨分类检索）
+- 内容标签编辑、批量多选批量打标签
+- 关键词检索（标题 / 简介 / 作者 / 标签）、来源筛选、排序、网格 / 列表视图
+
+**批注 × Obsidian 联动（可选，默认关闭）**
+
+- 每条收藏可写批注（支持预览与链接化显示）
+- 开启联动后，写过批注的收藏会自动同步成一页 Obsidian 笔记（frontmatter 元数据 + 分区托管正文），可一键跳转到 Obsidian 打开
+- 关闭联动时行为与普通批注完全一致，不读写你的仓库
+
+**数据安全**
+
+- 删除先进**回收站**（保留期默认 7 天，可设 7 / 15 / 30 天），期内可恢复；永久删除才真正清库
+- 一键 **JSON 备份导出 / 导入**（保留标签与分类），支持整库换机迁移
+- 封面本地缓存，WebView 模糊加载
+
+**界面**
+
+- 亮 / 暗 / 跟随系统主题
+- 虚拟滚动（上万条收藏也能流畅浏览）
+
+---
+
+## 下载与安装
+
+从 **[GitHub Releases](https://github.com/OwOlioh/billcollector2.0/releases)** 下载最新版本：
+
+| 文件 | 说明 |
+| --- | --- |
+| `收藏管理器_<版本>_x64-setup.exe` | **NSIS 安装器**（推荐）：双击安装，桌面 / 开始菜单生成图标 |
+| `收藏管理器_<版本>_x64.zip` | **免安装便携版**：解压到任意文件夹，双击 `收藏管理器.exe` 即可运行 |
+
+> 安装包**未做代码签名**，Windows SmartScreen 首次运行可能提示「未知发布者」——点 **更多信息 → 仍要运行** 即可。介意此提示的开发者可自行购买代码签名证书后重新打包。
+
+**系统要求**：Windows 10 / 11 x64（需 WebView2 运行时，Win11 自带）。
+
+---
+
+## 快速上手
+
+### 1. 导入收藏
+
+侧边栏切到 **导入**，选择来源卡片：
+
+- **B站 / 知乎**：扫码（B站）或填 Cookie → 列出收藏夹 → 选目标
+- **书签 / CSDN / GitHub**：按提示上传 HTML / 填用户名或令牌 / 填链接
+- 预览后可在「配置标签」为每条收藏预置标签，再点 **执行导入**
+
+### 2. 整理
+
+- **打标签**：卡片悬停「编辑标签」，输入回车 / 空格 / 逗号创建
+- **分类**：侧边栏「管理标签」里拖拽标签到分类，分类支持跨分类检索
+- **批量**：勾选多张卡片 → 批量打标签 / 删除 / 导出
+
+### 3. 批注与 Obsidian 联动
+
+1. 设置页 → **Obsidian 笔记联动** → 打开开关 → 选择你的 vault 目录（笔记默认写入子目录 `收藏/`，可改）；
+2. 任意收藏点「编辑批注」→ 写内容 → **保存批注**（自动同步）或 **导出到 Obsidian**；
+3. 同步完成后点 **在 Obsidian 中打开** 即可跳转到对应笔记。
+
+笔记格式：md + YAML frontmatter（含 `collector_id` / `url` / `author` 等），正文用 `<!-- collector:notes:start / end -->` 标记圈定联动区；**标记之外你手写的内容永远不被覆盖**。删除收藏**不会**删除 vault 里的笔记。
+
+### 4. 删除与回收站
+
+卡片删除、批量删除、按标签删除都会先进**回收站**。回收站支持单条 / 全部恢复、永久删除、清空；超过保留期的条目在应用启动时自动清理（可在设置页调整保留期）。
+
+### 5. 备份与迁移
+
+工具栏 **导出 JSON**（单条 / 批量 / 全部）→ 换机后 **导入文件** 即可恢复收藏与标签分类。数据库 / 封面也可直接拷贝数据目录迁移（见下）。
+
+---
+
+## 数据与隐私
+
+- 只保存**元数据和封面**，不上传任何内容到服务器
+- 登录 Cookie 存于 Windows 凭据管理器与应用数据目录，**不会**写进代码仓库
+- 全部数据位于本地目录（卸载应用不会自动删除，如需彻底清除请手动删除）：
 
 ```text
 %APPDATA%\com.local.bili-collector\
+├── bili_collector_v2.sqlite3    # 主数据库（收藏 / 标签 / 批注 / 回收站）
+├── covers\                      # 本地封面缓存
+└── *_cookie.txt                 # 各来源登录凭据
 ```
 
-## 开发环境
+> 提示：整库备份 = 关闭应用后复制上面目录；跨机器迁移建议用 **JSON 导出 / 导入**（更干净、可选择性）。
 
-- **项目路径**：`C:\Users\lioh\Documents\GitHub\bilibili_collector`
-- Node.js 20+
-- Rust stable
-- Windows 上的 Microsoft Visual Studio Build Tools
+---
 
-安装依赖：
+## 开发者指南
 
-```powershell
-npm.cmd install
+### 技术栈与目录
+
+| 目录 / 文件 | 说明 |
+| --- | --- |
+| `src/` | React + TypeScript 前端（Vite），`App.tsx` 挂载所有视图 |
+| `src-tauri/` | Rust 后端：`commands.rs`（Tauri 命令）、`db.rs`（SQLite/sqlx）、`source/`（各来源适配器）、`obsidian.rs`（Obsidian 联动）|
+| `src-tauri/migrations/` | SQLite 迁移脚本（`0001` ~ `0008`）|
+| `DEVELOPMENT.md` | 架构、新增来源完整流程、踩坑记录（扩展新源前必读）|
+| `AGENTS.md` | AI 协作上下文与项目总览 |
+
+架构要点：统一 `SourceAdapter` trait；`(source, external_id)` 复合键跨源去重；导入走 `upsert_item`；数据只存元数据。
+
+### 环境要求（Windows）
+
+| 依赖 | 版本 | 用途 |
+| --- | --- | --- |
+| Node.js | 20+ | 前端构建 / Tauri CLI |
+| Rust | stable（MSVC 工具链） | 后端编译 |
+| Visual Studio Build Tools | 含「使用 C++ 的桌面开发」 | Rust MSVC 链接所需 |
+| WebView2 运行时 | Win10/11 自带 | Tauri 渲染引擎 |
+
+### 首次配置
+
+```bash
+git clone https://github.com/OwOlioh/billcollector2.0.git
+cd billcollector2.0
+npm ci            # 安装前端与 Tauri CLI 依赖
 ```
 
-启动开发环境（先启动 Vite，再启动 Tauri）：
+### 开发模式（热更新）
 
-```powershell
-# 终端 1
-npm.cmd run dev -- --host 127.0.0.1
-
-# 终端 2
-cd src-tauri
-cargo run
+```bash
+npm run tauri dev
 ```
 
-## 检查
+一条命令同时启动 Vite（前端 HMR）与 Rust（自动编译）。改 Rust 代码后需重启该命令（Rust 无热重载）。
 
-```powershell
-npm.cmd run test
-npm.cmd run build
-cargo fmt -- --check
-cargo check
-cargo test --lib
+> **网络注意**：部分来源接口（B站等）在无代理环境可能请求失败（报 `-400`）。项目会读取系统代理；如遇到，请在启动前确保终端代理环境变量（`HTTPS_PROXY`）已配置并指向你的代理端口。
+
+### 测试与检查
+
+```bash
+npm run test          # 前端单测（vitest）
+cargo test            # 后端单测（含回归：ItemRow 列完整性、路径边界等）
+npx tsc --noEmit      # 前端类型检查
+cargo check           # 后端编译检查
+cargo fmt -- --check  # 格式检查
 ```
 
-## 新增来源
+### 从源码打包与发布
 
-参见 [DEVELOPMENT.md](DEVELOPMENT.md) 获取完整的开发指南，包括架构说明、踩坑记录和检查清单。
+本地打包：
 
-## 打包
-
-```powershell
-npm.cmd run tauri build
+```bash
+npm run tauri build
 ```
 
-Windows 安装包会生成在：
+NSIS 安装包输出在 `src-tauri\target\release\bundle\nsis\`。
 
-```text
-src-tauri\target\release\bundle\nsis\
+**自动发布**：向 GitHub 推送形如 `v0.1.0` 的 tag，仓库内置的 GitHub Actions（`.github/workflows/release.yml`）会在 Windows 环境自动构建，并把安装包与便携版 zip 挂到对应 Release（先存草稿，确认无误后手动点发布）。
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
 ```
 
-## 许可
+---
 
-[MIT](LICENSE)
+## 文档
+
+- [DEVELOPMENT.md](DEVELOPMENT.md) —— 新增来源开发指南、架构、踩坑清单
+- [AGENTS.md](AGENTS.md) —— AI 协作总览
+- [LICENSE](LICENSE) —— MIT

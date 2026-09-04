@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - "v*"
+  # 支持手动触发：不 push tag 也能在 Actions 页试跑构建
+  workflow_dispatch:
 
 jobs:
   build-windows:
@@ -21,17 +23,41 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri
+
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build Tauri release
+      # 产物与 targets 由 src-tauri/tauri.conf.json 的 bundle.targets 决定（当前 nsis）
+      - name: Build & publish Tauri release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: "B站收藏管理器 ${{ github.ref_name }}"
-          releaseBody: "Windows 安装包。"
+          releaseName: "收藏管理器 ${{ github.ref_name }}"
+          releaseBody: >-
+            Windows 安装包：NSIS 安装器（x64-setup.exe）与免安装 zip 便携版。
+            安装包未做代码签名，首次运行若提示「未知发布者」，请点「更多信息」→「仍要运行」。
+            详细说明见仓库 README。
           releaseDraft: true
           prerelease: false
           projectPath: src-tauri
+
+      # Tauri 无内置 zip target，便携版 = 把 release exe 单独压缩上传
+      - name: Bundle portable zip
+        shell: pwsh
+        run: |
+          $ver = "${{ github.ref_name }}".TrimStart('v')
+          $zip = "收藏管理器_${ver}_x64.zip"
+          Compress-Archive -Path "src-tauri/target/release/bili-collector.exe" -DestinationPath $zip -Force
+          "PORTABLE_ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Upload portable zip
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.ref_name }}" "$env:PORTABLE_ZIP" --clobber
+

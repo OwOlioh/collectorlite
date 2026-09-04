@@ -571,9 +571,14 @@ favorited_at: 2026-09-03
 2. **分区托管**：✅ 保留。HTML 注释标记圈出 app 托管区，同步时只替换该区，用户在 Obsidian 里写的其余内容永不丢失；若标记被手动删除则跳过同步并提示。
 3. **永久删除「移到归档目录」**：❌ 暂不做。默认永久删除时完全不动 vault 文件（Obsidian 是独立知识库）。如后续需要，再加一个开关把笔记移到 `收藏/已归档/`。
 
-### 7.13 实施状态（2026-09-03）
+### 7.13 实施状态（2026-09-04 更新）
 
-- P0 + P1 已完成：迁移 `0008`、新建 `obsidian.rs`、改造 `update_item_notes` 自动同步、新增 4 个命令（`get/set_obsidian_settings`、`open_note_in_obsidian`、`export_items_to_obsidian`、`pick_obsidian_vault`）、设置页 Obsidian 分区、批注弹窗「在 Obsidian 中打开」、卡片 hover「导出到 Obsidian」、批量工具栏「导出到 Obsidian」。
-- 打开深链复用既有 `webbrowser`，**未引入 `tauri-plugin-opener`**（见 7.4 依赖现状）。
+- **功能已完整落地并提交**（commit `32213c4` + `2257c0d`）：迁移 `0008`、`obsidian.rs`、`update_item_notes` 自动同步、5 个命令（`get/set_obsidian_settings`、`get_item_obsidian_path`、`open_note_in_obsidian`、`export_items_to_obsidian`、`pick_obsidian_vault`）、设置页联动卡、批注弹窗整合「导出到 Obsidian + 在 Obsidian 中打开」、批量工具栏导出、移除卡片重复导出按钮。
+- 打开深链：`webbrowser` 在 Windows **只认默认浏览器**（硬编码查 `http` 关联并把任何 scheme 丢给浏览器）→ 改走 `ShellExecuteW`（`obsidian.rs::open_uri_system`，需 `windows-sys 0.59`），由系统按协议关联唤起 Obsidian.exe。
+- 真机验证后修复的坑：
+  - `ItemRow` 加 `obsidian_path` 后 `search_items` / `list_trash` 漏列 → `query_as` 运行时 `ColumnNotFound` 致收藏库空白；已统一为 `ITEM_ROW_COLUMNS` 常量 + 回归测试。
+  - Obsidian 命令最初写成**同步命令**（主线程），`blocking_pick_folder()` 卡死 UI → 全部改 async，选目录放 `spawn_blocking`。
+  - `ensure_within_vault` 用 `canonicalize()` 前缀比较，Windows 会给 vault 加 `\\?\` 前缀而目标文件未创建时无前缀 → 永远误拒；改纯词法规范化比较 + 回归测试。
+  - 前端 `obsidianEnabled` 只挂载时加载一次 → 设置页开启后导出入口不出现；改为依赖 `refreshToken` + `onObsidianChanged` 回调刷新。
+  - 批注弹窗「在 Obsidian 中打开」按 item 快照判灰 → 弹窗打开时用 `get_item_obsidian_path` 查库确认，导出成功后再点亮。
 - P2（批注编辑器支持 Markdown 渲染）留作后续，非主流程阻塞项。
-- 注意：改动**尚未 commit**（遵循 DEVELOPMENT.md 3.13，AI 不自动提交）。
