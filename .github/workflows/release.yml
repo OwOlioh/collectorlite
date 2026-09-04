@@ -9,6 +9,11 @@ on:
 
 jobs:
   build-windows:
+    # 必须声明 contents: write —— 否则 GITHUB_TOKEN 默认只读，
+    # tauri-action 创建 Release / gh release upload 会报
+    # "Resource not accessible by integration"（v1.1.0 两次发布失败的根因）。
+    permissions:
+      contents: write
     runs-on: windows-latest
     steps:
       - name: Check out repository
