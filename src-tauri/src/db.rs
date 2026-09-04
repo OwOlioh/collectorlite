@@ -163,6 +163,15 @@ fn opus_mid_to_string(value: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// `ItemRow` 解码所需的列清单（唯一来源）。
+///
+/// `sqlx::query_as` 是**运行时按列名**解码的：给 `ItemRow` 加了字段但某处 SELECT 漏掉它时，
+/// 编译期不会报错，只会在运行时抛 `ColumnNotFound`，表现为整个列表空白（曾因此导致收藏库
+/// 与回收站页面全空）。所以所有 `ItemRow` 查询都必须引用这个常量，禁止手写列清单。
+const ITEM_ROW_COLUMNS: &str = "id, source, external_id, source_url, title, description, notes, \
+     cover_url, cover_local_path, author_name, author_id, partition_name, published_at, duration, \
+     favorite_time, deleted_at, obsidian_path";
+
 #[derive(Debug, Clone, FromRow)]
 struct ItemRow {
     id: i64,
@@ -313,12 +322,8 @@ async fn update_fts_row(
 }
 
 pub async fn rebuild_item_fts(pool: &SqlitePool, item_id: i64) -> Result<(), AppError> {
-    let row = sqlx::query_as::<_, ItemRow>(
-        "SELECT id, source, external_id, source_url, title, description, notes, cover_url, cover_local_path,
-                author_name, author_id, partition_name, published_at, duration, favorite_time, deleted_at,
-                obsidian_path
-         FROM items WHERE id = ?",
-    )
+    let item_sql = format!("SELECT {ITEM_ROW_COLUMNS} FROM items WHERE id = ?");
+    let row = sqlx::query_as::<_, ItemRow>(&item_sql)
     .bind(item_id)
     .fetch_one(pool)
     .await?;
@@ -470,12 +475,8 @@ pub async fn replace_item_tags(
         attach_tag(pool, item_id, tag_id).await?;
     }
     rebuild_item_fts(pool, item_id).await?;
-    let row = sqlx::query_as::<_, ItemRow>(
-        "SELECT id, source, external_id, source_url, title, description, notes, cover_url, cover_local_path,
-                author_name, author_id, partition_name, published_at, duration, favorite_time, deleted_at,
-                obsidian_path
-         FROM items WHERE id = ?",
-    )
+    let item_sql = format!("SELECT {ITEM_ROW_COLUMNS} FROM items WHERE id = ?");
+    let row = sqlx::query_as::<_, ItemRow>(&item_sql)
     .bind(item_id)
     .fetch_one(pool)
     .await?;
@@ -507,12 +508,8 @@ pub async fn update_item_notes(
         .bind(item_id)
         .execute(pool)
         .await?;
-    let row = sqlx::query_as::<_, ItemRow>(
-        "SELECT id, source, external_id, source_url, title, description, notes, cover_url, cover_local_path,
-                author_name, author_id, partition_name, published_at, duration, favorite_time, deleted_at,
-                obsidian_path
-         FROM items WHERE id = ?",
-    )
+    let item_sql = format!("SELECT {ITEM_ROW_COLUMNS} FROM items WHERE id = ?");
+    let row = sqlx::query_as::<_, ItemRow>(&item_sql)
     .bind(item_id)
     .fetch_one(pool)
     .await?;
@@ -535,12 +532,8 @@ pub async fn update_item_notes(
 
 /// 读取单条收藏（供 Obsidian 打开 / 导出命令使用）。
 pub async fn get_item(pool: &SqlitePool, item_id: i64) -> Result<VideoItem, AppError> {
-    let row = sqlx::query_as::<_, ItemRow>(
-        "SELECT id, source, external_id, source_url, title, description, notes, cover_url, cover_local_path,
-                author_name, author_id, partition_name, published_at, duration, favorite_time, deleted_at,
-                obsidian_path
-         FROM items WHERE id = ?",
-    )
+    let item_sql = format!("SELECT {ITEM_ROW_COLUMNS} FROM items WHERE id = ?");
+    let row = sqlx::query_as::<_, ItemRow>(&item_sql)
     .bind(item_id)
     .fetch_optional(pool)
     .await?
@@ -575,6 +568,22 @@ pub async fn set_item_obsidian_path(
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// 读取该收藏同步到的 Obsidian 笔记相对路径。
+/// 批注弹窗打开时调用：即使前端 item 快照里 obsidianPath 为空，
+/// 也能据此点亮「在 Obsidian 中打开」（导出成功后数据库已回写该列）。
+pub async fn get_item_obsidian_path(
+    pool: &SqlitePool,
+    item_id: i64,
+) -> Result<Option<String>, AppError> {
+    let row = sqlx::query_as::<_, (Option<String>,)>(
+        "SELECT obsidian_path FROM items WHERE id = ?",
+    )
+    .bind(item_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|r| r.0))
 }
 
 /// 快速入库用：按 `(source, external_id)` 查已有条目，只取回填侧边栏需要的最小字段。
@@ -884,11 +893,10 @@ pub async fn empty_trash(pool: &SqlitePool) -> Result<Vec<String>, AppError> {
 }
 
 pub async fn list_trash(pool: &SqlitePool) -> Result<Vec<VideoItem>, AppError> {
-    let rows = sqlx::query_as::<_, ItemRow>(
-        "SELECT id, source, external_id, source_url, title, description, notes, cover_url, cover_local_path,
-                author_name, author_id, partition_name, published_at, duration, favorite_time, deleted_at
-         FROM items WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC",
-    )
+    let item_sql = format!(
+        "SELECT {ITEM_ROW_COLUMNS} FROM items WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC"
+    );
+    let rows = sqlx::query_as::<_, ItemRow>(&item_sql)
     .fetch_all(pool)
     .await?;
     hydrate_items(pool, rows).await
@@ -998,11 +1006,9 @@ pub async fn search_items(
     pool: &SqlitePool,
     filters: &ItemFilters,
 ) -> Result<Vec<VideoItem>, AppError> {
-    let mut query = QueryBuilder::<Sqlite>::new(
-        "SELECT id, source, external_id, source_url, title, description, notes, cover_url, cover_local_path,
-                author_name, author_id, partition_name, published_at, duration, favorite_time, deleted_at
-         FROM items i WHERE 1 = 1",
-    );
+    let mut query = QueryBuilder::<Sqlite>::new(format!(
+        "SELECT {ITEM_ROW_COLUMNS} FROM items i WHERE 1 = 1"
+    ));
 
     // 回收站过滤：默认（trash 为 None/false）仅显示正常在库项；trash=Some(true) 时只看回收站。
     match &filters.trash {
@@ -1339,16 +1345,30 @@ pub async fn import_collection(
             continue;
         }
 
-        // 增量模式：已存在则跳过，绝不覆盖原库
-        let existing = sqlx::query_scalar::<_, i64>(
-            "SELECT id FROM items WHERE source = ? AND external_id = ?",
+        // 已存在时区分两种情况：
+        //  - 正常在库 → 增量模式，跳过，绝不覆盖（保护用户可能已改的批注 / 标签 / 封面）
+        //  - 在回收站 → 视为"重新收藏"，直接恢复（与实时导入 `upsert_item` 的语义一致）
+        //
+        // 旧行为是一律 `skipped += 1`，导致回收站里的条目用备份文件**永远导不回来**：
+        // 只能在保留期内去回收站手动恢复，一旦过期被自动清理就彻底丢失，
+        // 而用户侧只看到"导入 0 条"，完全不知道为什么。
+        let existing: Option<(i64, Option<i64>)> = sqlx::query_as(
+            "SELECT id, deleted_at FROM items WHERE source = ? AND external_id = ?",
         )
         .bind(&item.source)
         .bind(&item.external_id)
         .fetch_optional(pool)
         .await?;
-        if existing.is_some() {
-            skipped += 1;
+
+        if let Some((existing_id, deleted_at)) = existing {
+            if deleted_at.is_none() {
+                skipped += 1;
+                continue;
+            }
+            // 恢复回收站条目（清 deleted_at + 重建 FTS），保留其原有标签与封面
+            restore_item(pool, existing_id).await?;
+            // 计入 imported：此刻它确实回到了收藏库，比报"跳过"更符合用户预期
+            imported += 1;
             continue;
         }
 
@@ -1497,5 +1517,64 @@ mod tests {
         // 缺失 / 非标量应返回 None，避免编造 id
         assert_eq!(opus_mid_to_string(&json!(null)), None);
         assert_eq!(opus_mid_to_string(&json!({ "x": 1 })), None);
+    }
+
+    /// 回归测试：`ItemRow` 的所有查询都必须覆盖结构体全部字段。
+    ///
+    /// `sqlx::query_as` 是**运行时按列名**解码的 —— 给 `ItemRow` 加了字段却漏改某处 SELECT 时，
+    /// 编译期不会报错，只会在运行时抛 `ColumnNotFound`，表现为收藏库 / 回收站**整页空白**
+    /// （曾因 `obsidian_path` 漏列真实触发）。这里把三条主要读取路径都跑一遍钉死。
+    #[tokio::test]
+    async fn item_row_queries_return_every_column() {
+        use super::{get_item, list_trash, search_items, SqlitePoolOptions};
+        use crate::models::ItemFilters;
+
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("内存库连接失败");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("迁移失败");
+
+        sqlx::query(
+            "INSERT INTO items (source, external_id, source_url, title, created_at, updated_at)
+             VALUES ('bilibili', 'BV_TEST_0001', 'https://example.com/1', '测试标题', 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .expect("插入测试收藏失败");
+
+        // 1) 收藏库列表（LibraryPage 的取数入口）
+        let filters = ItemFilters {
+            query: None,
+            tag_ids: vec![],
+            tag_mode: "and".to_string(),
+            sort: "favorite_desc".to_string(),
+            sources: vec![],
+            trash: None,
+        };
+        let list = search_items(&pool, &filters)
+            .await
+            .expect("search_items 缺列会抛 ColumnNotFound");
+        assert_eq!(list.len(), 1, "收藏库应返回 1 条");
+
+        // 2) 单条读取（Obsidian 打开 / 导出用）
+        let id = list[0].id;
+        get_item(&pool, id)
+            .await
+            .expect("get_item 缺列会抛 ColumnNotFound");
+
+        // 3) 软删除后走回收站列表
+        sqlx::query("UPDATE items SET deleted_at = 1 WHERE id = ?")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .expect("软删除失败");
+        let trash = list_trash(&pool)
+            .await
+            .expect("list_trash 缺列会抛 ColumnNotFound");
+        assert_eq!(trash.len(), 1, "回收站应返回 1 条");
     }
 }

@@ -75,7 +75,10 @@ export default function App() {
             <TrashPage onTrashChanged={refreshTrashCount} />
           </div>
           <div className={`view-panel ${active === "settings" ? "is-active" : ""}`}>
-            <SettingsPage onOpenTrash={() => setActive("trash")} />
+            <SettingsPage
+              onOpenTrash={() => setActive("trash")}
+              onObsidianChanged={() => setLibraryVersion((version) => version + 1)}
+            />
           </div>
         </main>
       </div>

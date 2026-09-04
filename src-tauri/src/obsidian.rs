@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_yaml;
@@ -144,10 +144,30 @@ fn normalize_rel(p: &Path) -> String {
         .to_string()
 }
 
+/// 纯词法规范化：去掉 `.` 组件、回退 `..`，不触碰文件系统（路径可以尚不存在）。
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 /// 最后一道防线：确保目标绝对路径仍落在 vault 内（subdir 若填了绝对路径 / `..` 也拦得住）。
+///
+/// 注意：**不能**用 `canonicalize()` 后做前缀比较 —— Windows 上 canonicalize 会给 vault
+/// 返回带 `\\?\` 前缀的路径，而目标文件首次写入前父目录可能不存在、canonicalize 失败
+/// 退回无前缀的原始路径，两边形式不一致导致 `starts_with` 永远为 false，所有写入都会
+/// 被误判为「超出仓库范围」而拒绝（曾导致「有批注却导出提示没有批注」）。
 fn ensure_within_vault(vault: &Path, abs: &Path) -> Result<(), AppError> {
-    let vault = vault.canonicalize().unwrap_or_else(|_| vault.to_path_buf());
-    let abs = abs.canonicalize().unwrap_or_else(|_| abs.to_path_buf());
+    let vault = lexical_normalize(vault);
+    let abs = lexical_normalize(abs);
     if !abs.starts_with(&vault) {
         return Err(AppError::InvalidInput(
             "目标路径超出 Obsidian 仓库范围，已拒绝写入".into(),
@@ -299,6 +319,47 @@ fn build_new_uri(vault: &str, rel_path: &str, content: &str) -> String {
     uri
 }
 
+/// 用系统默认方式打开 URI。
+///
+/// Windows 下**不能**用 `webbrowser`：它在 Windows 只认「默认浏览器」—— 实现里硬编码
+/// 去查 `http` 协议的关联程序，然后把**任何 scheme**（包括 `obsidian://`）都丢给浏览器，
+/// 表现为「点打开却跳到浏览器」。Obsidian 链接必须走 `ShellExecuteW`，由系统按注册表里
+/// `obsidian://` 协议关联唤起 Obsidian.exe。
+#[cfg(windows)]
+fn open_uri_system(uri: &str) -> Result<(), AppError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let wide: Vec<u16> = std::ffi::OsStr::new(uri).encode_wide().chain(Some(0)).collect();
+    // hwnd / lpOperation / lpParameters / lpDirectory 传空：用系统为该协议注册的默认动作打开
+    let code = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            wide.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // ShellExecute 返回值 <= 32 表示失败
+    if (code as isize) <= 32 {
+        Err(AppError::Other(format!(
+            "系统未能打开链接（错误码 {}）：{}",
+            code as isize,
+            std::io::Error::last_os_error()
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn open_uri_system(uri: &str) -> Result<(), AppError> {
+    webbrowser::open(uri).map_err(|e| AppError::Other(format!("无法打开链接: {e}")))
+}
+
 /// 在 Obsidian 中打开（或兜底新建）该收藏对应的笔记。
 pub fn open_in_obsidian(settings: &ObsidianSettings, item: &VideoItem) -> Result<(), AppError> {
     let uri = match &item.obsidian_path {
@@ -309,6 +370,42 @@ pub fn open_in_obsidian(settings: &ObsidianSettings, item: &VideoItem) -> Result
             build_new_uri(&settings.vault_name, &rel, &content)
         }
     };
-    webbrowser::open(&uri).map_err(|e| AppError::Other(format!("无法唤起 Obsidian: {e}")))?;
-    Ok(())
+    open_uri_system(&uri)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Windows 上 canonicalize 会给存在的路径加 \\?\ 前缀，而目标文件首次写入前
+    // 父目录可能不存在、canonicalize 失败退回无前缀原始路径 —— 两侧形式不一致导致
+    // 前缀比较永远 false（曾让所有导出被误拒）。这里用词法比较钉死行为，不访问磁盘。
+    #[test]
+    fn ensure_within_vault_accepts_child_with_uncreated_parent() {
+        let vault = Path::new(r"C:\Users\lioh\Documents\lioh");
+        let abs = Path::new(r"C:\Users\lioh\Documents\lioh\收藏\某标题.md");
+        assert!(ensure_within_vault(vault, abs).is_ok(), "vault 内子路径应通过");
+    }
+
+    #[test]
+    fn ensure_within_vault_rejects_outside_path() {
+        let vault = Path::new(r"C:\Users\lioh\Documents\lioh");
+        let abs = Path::new(r"C:\Users\lioh\Documents\Other\某标题.md");
+        assert!(ensure_within_vault(vault, abs).is_err(), "vault 外路径应拒绝");
+    }
+
+    #[test]
+    fn ensure_within_vault_rejects_parent_escape() {
+        let vault = Path::new(r"C:\Users\lioh\Documents\lioh");
+        let abs = Path::new(r"C:\Users\lioh\Documents\lioh\..\Other\某标题.md");
+        assert!(ensure_within_vault(vault, abs).is_err(), "含 .. 逃逸应拒绝");
+    }
+
+    #[test]
+    fn ensure_within_vault_rejects_absolute_subdir_escape() {
+        // 模拟 subdir 填了绝对路径：vault.join(绝对路径) 会整体换成绝对路径 → 应被拒
+        let vault = Path::new(r"C:\Users\lioh\Documents\lioh");
+        let abs = Path::new(r"C:\Windows\System32\某标题.md");
+        assert!(ensure_within_vault(vault, abs).is_err(), "绝对路径逃逸应拒绝");
+    }
 }

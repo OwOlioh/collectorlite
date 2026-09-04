@@ -1,40 +1,95 @@
-import { useState } from "react";
-import { Eye, FileText, Pencil, Save, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { ExternalLink, Eye, FileText, Pencil, Save, X } from "lucide-react";
 import { api } from "../lib/api";
 import { LinkifiedText } from "../lib/linkify";
 import { useToast } from "./Toast";
-import type { VideoItem } from "../types";
+import type { ObsidianSettings, VideoItem } from "../types";
 
 interface VideoNoteEditorModalProps {
   item: VideoItem;
   onClose: () => void;
   onSaved: () => void;
+  /** 导出到 Obsidian 成功后调用：父组件刷新列表，让 item.obsidianPath 尽快反映新状态。 */
+  onExported?: () => void;
 }
 
 export function VideoNoteEditorModal({
   item,
   onClose,
-  onSaved
+  onSaved,
+  onExported
 }: VideoNoteEditorModalProps) {
   const [notes, setNotes] = useState(item.notes || "");
   const [mode, setMode] = useState<"edit" | "preview">("edit");
   const [saving, setSaving] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [opening, setOpening] = useState(false);
+  const [obsidian, setObsidian] = useState<ObsidianSettings | null>(null);
   const [error, setError] = useState("");
+  // 该收藏是否已有对应的 Obsidian 笔记（导出成功或原本就有映射才算）。
+  // 没有笔记时「在 Obsidian 中打开」置灰 —— 得先导出生成笔记才能打开。
+  const [synced, setSynced] = useState(!!item.obsidianPath);
   const { toast } = useToast();
+
+  // 每次打开弹窗都重新拉取联动设置，避免「设置页开启联动后，收藏库的
+  // obsidianEnabled 状态不刷新」导致导出入口消失的问题。
+  useEffect(() => {
+    void api.getObsidianSettings().then(setObsidian).catch(() => setObsidian(null));
+  }, []);
+
+  // 打开弹窗时从数据库确认该收藏是否已有 Obsidian 笔记。
+  // item 快照的 obsidianPath 可能过时（比如上次会话已导出、但列表还没刷新），
+  // 这里以数据库为准，有就点亮「在 Obsidian 中打开」。
+  useEffect(() => {
+    void api
+      .getItemObsidianPath(item.id)
+      .then((path) => {
+        if (path) setSynced(true);
+      })
+      .catch(() => {});
+  }, [item.id]);
+
+  const obsidianReady = !!obsidian?.enabled && obsidian.vaultPath.trim() !== "";
 
   const save = async () => {
     setSaving(true);
     setError("");
     try {
       const updated = await api.updateItemNotes(item.id, notes);
-      if (updated.obsidianPath) toast("success", "已同步到 Obsidian");
+      if (updated.obsidianPath) {
+        setSynced(true);
+        toast("success", "批注已保存，并同步到 Obsidian");
+      } else if (obsidianReady && notes.trim()) {
+        toast("success", "批注已保存（联动已开启，保存时自动同步）");
+      } else {
+        toast("success", "批注已保存");
+      }
       onSaved();
       onClose();
     } catch (err) {
       setError(String(err));
     } finally {
       setSaving(false);
+    }
+  };
+
+  // 导出 = 先把当前编辑的批注落库，再显式导出到 Obsidian，保证导出的是最新内容
+  const exportToObsidian = async () => {
+    setExporting(true);
+    try {
+      await api.updateItemNotes(item.id, notes);
+      const n = await api.exportItemsToObsidian([item.id]);
+      if (n > 0) {
+        setSynced(true);
+        toast("success", "已导出到 Obsidian");
+        onExported?.();
+      } else {
+        toast("info", "暂无批注内容，未导出（先写点批注吧）");
+      }
+    } catch (e) {
+      toast("error", `导出失败: ${String(e)}`);
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -66,6 +121,7 @@ export function VideoNoteEditorModal({
             <X size={16} />
           </button>
         </div>
+
         <div className="note-mode-tabs">
           <button
             type="button"
@@ -84,6 +140,7 @@ export function VideoNoteEditorModal({
             预览
           </button>
         </div>
+
         {mode === "edit" ? (
           <textarea
             value={notes}
@@ -99,18 +156,40 @@ export function VideoNoteEditorModal({
             )}
           </div>
         )}
+
         {error && <div className="alert">{error}</div>}
-        {item.obsidianPath && (
-          <button
-            className="ghost-button wide"
-            type="button"
-            onClick={openInObsidian}
-            disabled={opening}
-          >
-            <FileText size={16} />
-            {opening ? "打开中..." : "在 Obsidian 中打开"}
-          </button>
+
+        {obsidianReady && (
+          <div className="obsidian-note-zone">
+            <p className="obsidian-note-hint">
+              {synced
+                ? "该收藏已同步到 Obsidian，可直接打开"
+                : "先写批注并「导出到 Obsidian」生成笔记，才能打开"}
+            </p>
+            <div className="obsidian-note-buttons">
+              <button
+                className="ghost-button"
+                type="button"
+                onClick={exportToObsidian}
+                disabled={exporting}
+              >
+                <FileText size={16} />
+                {exporting ? "导出中..." : "导出到 Obsidian"}
+              </button>
+              <button
+                className="ghost-button"
+                type="button"
+                onClick={openInObsidian}
+                disabled={opening || !synced}
+                title={synced ? "在 Obsidian 中打开该笔记" : "尚无对应笔记，请先导出"}
+              >
+                <ExternalLink size={16} />
+                {opening ? "打开中..." : "在 Obsidian 中打开"}
+              </button>
+            </div>
+          </div>
         )}
+
         <button className="primary-button wide" type="button" onClick={save} disabled={saving}>
           <Save size={16} />
           {saving ? "保存中..." : "保存批注"}

@@ -2668,6 +2668,27 @@ textarea {
   color: var(--blue-strong, var(--blue));
 }
 
+.obsidian-note-zone {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px dashed var(--border);
+  border-radius: 7px;
+  background: var(--surface-soft);
+}
+
+.obsidian-note-hint {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.obsidian-note-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .video-note-editor-modal .primary-button {
   margin-top: 16px;
 }

@@ -148,6 +148,9 @@ export const api = {
   getObsidianSettings: () => call<ObsidianSettings>("get_obsidian_settings", {}),
   setObsidianSettings: (settings: ObsidianSettings) =>
     call<null>("set_obsidian_settings", { settings }),
+  /** 查该收藏是否已同步出 Obsidian 笔记（返回 vault 内相对路径，未同步为 null）。 */
+  getItemObsidianPath: (itemId: number) =>
+    call<string | null>("get_item_obsidian_path", { itemId }),
   openNoteInObsidian: (itemId: number) =>
     call<null>("open_note_in_obsidian", { itemId }),
   exportItemsToObsidian: (itemIds: number[]) =>
@@ -819,6 +822,7 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
       return { enabled: false, vaultPath: "", vaultName: "", subdir: "收藏" } as T;
     case "set_obsidian_settings":
     case "open_note_in_obsidian":
+    case "get_item_obsidian_path":
       return null as T;
     case "export_items_to_obsidian":
       return 0 as T;

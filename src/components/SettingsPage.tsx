@@ -19,9 +19,11 @@ import { getRetentionDays, setRetentionDays, RETENTION_OPTIONS } from "../lib/re
 
 interface SettingsPageProps {
   onOpenTrash?: () => void;
+  /** Obsidian 设置保存后回调，供 App 递增版本号、通知收藏库刷新导出按钮显隐。 */
+  onObsidianChanged?: () => void;
 }
 
-export function SettingsPage({ onOpenTrash }: SettingsPageProps) {
+export function SettingsPage({ onOpenTrash, onObsidianChanged }: SettingsPageProps) {
   const [profile, setProfile] = useState<BilibiliProfile | null>(null);
   const [theme, setTheme] = useState<ThemeMode>(getStoredTheme());
   const [retention, setRetention] = useState<number>(getRetentionDays());
@@ -83,6 +85,7 @@ export function SettingsPage({ onOpenTrash }: SettingsPageProps) {
     try {
       await api.setObsidianSettings(next);
       toast("success", "已保存 Obsidian 设置");
+      onObsidianChanged?.();
     } catch (e) {
       toast("error", `保存失败: ${String(e)}`);
     }

@@ -686,12 +686,14 @@ pub fn open_url(url: String) -> Result<(), String> {
 // ── Obsidian 单向联动 ──
 
 #[tauri::command]
-pub fn get_obsidian_settings(state: State<'_, AppState>) -> Result<obsidian::ObsidianSettings, String> {
+pub async fn get_obsidian_settings(
+    state: State<'_, AppState>,
+) -> Result<obsidian::ObsidianSettings, String> {
     Ok(obsidian::load_settings(&state.data_dir))
 }
 
 #[tauri::command]
-pub fn set_obsidian_settings(
+pub async fn set_obsidian_settings(
     state: State<'_, AppState>,
     settings: obsidian::ObsidianSettings,
 ) -> Result<(), String> {
@@ -703,6 +705,16 @@ pub fn set_obsidian_settings(
         }
     }
     obsidian::save_settings(&state.data_dir, &settings).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_item_obsidian_path(
+    state: State<'_, AppState>,
+    item_id: i64,
+) -> Result<Option<String>, String> {
+    db::get_item_obsidian_path(&state.pool, item_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -730,6 +742,9 @@ pub async fn export_items_to_obsidian(
         return Err("Obsidian 联动未启用或未配置仓库目录".into());
     }
     let mut exported = 0usize;
+    // 收集首个真实错误：旧实现把 write_or_update_note 的 Err 静默吞掉、只回 0，
+    // 前端会误报「该收藏暂无批注」—— 有批注却导不出来时根本查不到原因。
+    let mut first_error: Option<String> = None;
     for id in &item_ids {
         let item = match db::get_item(&state.pool, *id).await {
             Ok(item) => item,
@@ -739,9 +754,26 @@ pub async fn export_items_to_obsidian(
         if item.notes.trim().is_empty() {
             continue;
         }
-        if let Ok(Some(rel)) = obsidian::write_or_update_note(&settings, &item) {
-            let _ = db::set_item_obsidian_path(&state.pool, *id, &rel).await;
-            exported += 1;
+        match obsidian::write_or_update_note(&settings, &item) {
+            Ok(Some(rel)) => {
+                let _ = db::set_item_obsidian_path(&state.pool, *id, &rel).await;
+                exported += 1;
+            }
+            Ok(None) => {
+                if first_error.is_none() {
+                    first_error = Some("笔记中的托管标记已被手动移除，已跳过".into());
+                }
+            }
+            Err(e) => {
+                if first_error.is_none() {
+                    first_error = Some(e.to_string());
+                }
+            }
+        }
+    }
+    if exported == 0 {
+        if let Some(err) = first_error {
+            return Err(format!("导出失败：{err}"));
         }
     }
     Ok(exported)
@@ -749,15 +781,20 @@ pub async fn export_items_to_obsidian(
 
 /// 用系统文件夹选择器选 Obsidian 仓库目录（复用已有 tauri-plugin-dialog，无需前端 npm 依赖）。
 #[tauri::command]
-pub fn pick_obsidian_vault(app: tauri::AppHandle) -> Result<Option<String>, String> {
+pub async fn pick_obsidian_vault(app: tauri::AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
 
-    // 弹系统文件夹选择器（cancel 返回 None，表示用户放弃选择）
-    let picked = app
-        .dialog()
-        .file()
-        .set_title("选择 Obsidian 仓库目录")
-        .blocking_pick_folder();
+    // `blocking_pick_folder` 是阻塞式调用，绝不能放在同步命令（主线程）里跑，
+    // 否则会卡死整个 UI —— 表现为「点击启用联动后程序无响应」。
+    // 移到 `spawn_blocking` 里，在后台线程弹选择器，主线程保持响应。
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_title("选择 Obsidian 仓库目录")
+            .blocking_pick_folder()
+    })
+    .await
+    .map_err(|e| format!("选择目录失败: {e}"))?;
 
     Ok(picked
         .and_then(|fp| fp.into_path().ok())

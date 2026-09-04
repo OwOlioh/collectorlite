@@ -34,5 +34,11 @@ futures = "0.3"
 rand = "0.8"
 tiny_http = "0.12"
 
+[dev-dependencies]
+# 仅测试用：#[tokio::test] 需要 rt，主依赖里的 tokio 只开了 time/macros
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+# ShellExecuteW：自定义协议（obsidian://）必须走系统路由，webbrowser 在 Windows 只会丢给默认浏览器
+windows-sys = { version = "0.59", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

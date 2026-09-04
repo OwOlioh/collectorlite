@@ -30,6 +30,7 @@ use commands::{
     // Obsidian 单向联动
     get_obsidian_settings,
     set_obsidian_settings,
+    get_item_obsidian_path,
     open_note_in_obsidian,
     export_items_to_obsidian,
     pick_obsidian_vault,
@@ -113,6 +114,7 @@ pub fn run() {
             // Obsidian 单向联动
             get_obsidian_settings,
             set_obsidian_settings,
+            get_item_obsidian_path,
             open_note_in_obsidian,
             export_items_to_obsidian,
             pick_obsidian_vault,

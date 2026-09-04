@@ -68,12 +68,14 @@ export function LibraryPage({
   const [batchTagging, setBatchTagging] = useState(false);
   const [obsidianEnabled, setObsidianEnabled] = useState(false);
 
+  // 依赖 refreshToken：设置页开启/配置 Obsidian 联动后（App 递增 libraryVersion），
+  // 这里会重新拉取开关状态，否则导出按钮会停留在旧状态、迟迟不出现。
   useEffect(() => {
     void api
       .getObsidianSettings()
       .then((s: ObsidianSettings) => setObsidianEnabled(s.enabled))
       .catch(() => setObsidianEnabled(false));
-  }, []);
+  }, [refreshToken]);
 
   const loadItems = useCallback(async () => {
     setLoading(true);
@@ -92,15 +94,7 @@ export function LibraryPage({
 
   const selectedFilterTags = tags.filter((tag) => filters.tagIds.includes(tag.id));
 
-  const exportToObsidian = async (item: VideoItem) => {
-    try {
-      const n = await api.exportItemsToObsidian([item.id]);
-      toast("success", n > 0 ? "已导出到 Obsidian" : "该收藏暂无批注，未导出");
-    } catch (e) {
-      toast("error", `导出失败: ${String(e)}`);
-    }
-  };
-
+  // 单条导出已整合进批注弹窗（VideoNoteEditorModal），这里只保留批量导出
   const exportSelectedToObsidian = async () => {
     if (selectedIds.length === 0) return;
     try {
@@ -546,8 +540,6 @@ export function LibraryPage({
                       onEditTags={setEditingVideo}
                       onEditNote={setNoteVideo}
                       onDelete={deleteVideo}
-                      obsidianEnabled={obsidianEnabled}
-                      onExportObsidian={exportToObsidian}
                     />
                   )}
                 />
@@ -582,6 +574,7 @@ export function LibraryPage({
           item={noteVideo}
           onClose={() => setNoteVideo(null)}
           onSaved={() => { loadItems(); toast("success", "批注已保存"); }}
+          onExported={() => { loadItems(); }}
         />
       )}
     </section>
