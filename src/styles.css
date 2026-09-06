@@ -2116,6 +2116,7 @@ textarea {
 /* 分类顺序拖拽：源行淡化、目标行上下缘给出插入指示线 */
 .category-accordion-item.is-sort-source {
   opacity: 0.45;
+  cursor: grabbing;
 }
 
 .category-accordion-item.is-sort-before,

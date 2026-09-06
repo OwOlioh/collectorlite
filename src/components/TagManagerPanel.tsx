@@ -49,6 +49,15 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
   const autoScrollVelocityRef = useRef(0);
   const dragTargetRef = useRef<{ categoryId: number | null } | null>(null);
   const draggedCategoryIdRef = useRef<number | null>(null);
+  const categoryPointerRef = useRef<{
+    id: number;
+    startX: number;
+    startY: number;
+    active: boolean;
+  } | null>(null);
+  const sortIndicatorRef = useRef<{ id: number; before: boolean } | null>(null);
+  const attachedCategoryMoveRef = useRef<((event: PointerEvent) => void) | null>(null);
+  const attachedCategoryUpRef = useRef<((event: PointerEvent) => void) | null>(null);
   const dragListenersAttachedRef = useRef(false);
   const attachedPointerMoveRef = useRef<((event: PointerEvent) => void) | null>(null);
   const attachedPointerUpRef = useRef<((event: PointerEvent) => void) | null>(null);
@@ -121,50 +130,113 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
     await onTagsChanged?.();
   };
 
-  // ---- 分类顺序拖拽（HTML5 DnD）：拖动分类行上下移动，整列表重排 ----
+  // ---- 分类顺序拖拽（pointer 自实现，与标签拖拽同构）。
+  // 早期用 HTML5 DnD（draggable）：WebView2 里 dragstart 不触发、拖不动，
+  // 故改为 pointerdown + window pointermove/up，经拖动阈值判定后整列表重排。----
   const clearCategorySort = () => {
     draggedCategoryIdRef.current = null;
+    sortIndicatorRef.current = null;
     setDraggedCategoryId(null);
     setCategorySortIndicator(null);
   };
 
-  const beginCategoryDrag = (
-    categoryId: number,
-    event: React.DragEvent<HTMLElement>
-  ) => {
-    draggedCategoryIdRef.current = categoryId;
-    setDraggedCategoryId(categoryId);
-    setCategorySortIndicator(null);
-    event.dataTransfer.effectAllowed = "move";
-    try {
-      event.dataTransfer.setData("text/plain", String(categoryId));
-    } catch {
-      /* 个别内核不允许同步 setData，忽略 */
-    }
-  };
-
-  const categoryDragOver = (
-    categoryId: number,
-    event: React.DragEvent<HTMLElement>
-  ) => {
+  const updateCategorySortIndicator = (clientX: number, clientY: number) => {
+    const element = document
+      .elementFromPoint(clientX, clientY)
+      ?.closest<HTMLElement>(".category-accordion-item[data-category-id]");
     const dragged = draggedCategoryIdRef.current;
-    if (dragged === null || dragged === categoryId) return;
-    event.preventDefault(); // 声明可放置
-    event.dataTransfer.dropEffect = "move";
-    const rect = event.currentTarget.getBoundingClientRect();
-    const before = event.clientY < rect.top + rect.height / 2;
-    setCategorySortIndicator((current) =>
-      current?.id === categoryId && current.before === before
-        ? current
-        : { id: categoryId, before }
-    );
+    if (!element || dragged === null) {
+      if (sortIndicatorRef.current) {
+        sortIndicatorRef.current = null;
+        setCategorySortIndicator(null);
+      }
+      return;
+    }
+    const targetId = Number(element.dataset.categoryId);
+    if (targetId === dragged) return;
+    const rect = element.getBoundingClientRect();
+    const before = clientY < rect.top + rect.height / 2;
+    const next = { id: targetId, before };
+    const current = sortIndicatorRef.current;
+    if (!current || current.id !== next.id || current.before !== next.before) {
+      sortIndicatorRef.current = next;
+      setCategorySortIndicator(next);
+    }
   };
 
-  const categoryDragLeave = (event: React.DragEvent<HTMLElement>) => {
-    const next = event.relatedTarget;
-    if (!(next instanceof Node) || !event.currentTarget.contains(next)) {
-      setCategorySortIndicator(null);
+  const removeCategoryPointerListeners = () => {
+    if (attachedCategoryMoveRef.current) {
+      window.removeEventListener("pointermove", attachedCategoryMoveRef.current);
     }
+    if (attachedCategoryUpRef.current) {
+      window.removeEventListener("pointerup", attachedCategoryUpRef.current);
+      window.removeEventListener("pointercancel", attachedCategoryUpRef.current);
+    }
+    attachedCategoryMoveRef.current = null;
+    attachedCategoryUpRef.current = null;
+  };
+
+  const moveCategoryPointerDrag = (event: PointerEvent) => {
+    const state = categoryPointerRef.current;
+    if (!state) return;
+    if (!state.active) {
+      const dx = event.clientX - state.startX;
+      const dy = event.clientY - state.startY;
+      if (dx * dx + dy * dy < 36) return; // 移动 6px 才进入拖拽，避免误触点击
+      state.active = true;
+      draggedCategoryIdRef.current = state.id;
+      setDraggedCategoryId(state.id);
+    }
+    updateCategorySortIndicator(event.clientX, event.clientY);
+    updateAutoScroll(event.clientY);
+  };
+
+  const endCategoryPointerDrag = (event: PointerEvent) => {
+    const state = categoryPointerRef.current;
+    if (!state) return;
+    categoryPointerRef.current = null;
+    removeCategoryPointerListeners();
+    if (!state.active) {
+      return; // 未超过阈值：交由 onClick 处理展开/折叠
+    }
+    const dragged = draggedCategoryIdRef.current;
+    const target = sortIndicatorRef.current;
+    clearCategorySort();
+    // 已判定为拖动：抑制随后可能派发的 click（避免同时折叠/展开分类）
+    suppressCategoryClick.current = true;
+    window.setTimeout(() => {
+      suppressCategoryClick.current = false;
+    }, 300);
+    if (dragged !== null && target && target.id !== dragged) {
+      void commitCategoryReorder(dragged, target.id, target.before);
+    }
+  };
+
+  const addCategoryPointerListeners = () => {
+    attachedCategoryMoveRef.current = moveCategoryPointerDrag;
+    attachedCategoryUpRef.current = endCategoryPointerDrag;
+    window.addEventListener("pointermove", attachedCategoryMoveRef.current);
+    window.addEventListener("pointerup", attachedCategoryUpRef.current);
+    window.addEventListener("pointercancel", attachedCategoryUpRef.current);
+  };
+
+  const beginCategoryPointerDrag = (
+    categoryId: number,
+    event: React.PointerEvent<HTMLElement>
+  ) => {
+    if (event.button !== 0) return;
+    if (draggedTagRef.current !== null) return; // 正在拖标签，不抢占
+    const target = event.target as HTMLElement | null;
+    if (target?.closest("button, input, a, .tag-edit-line")) return;
+    event.preventDefault();
+    clearCategorySort();
+    categoryPointerRef.current = {
+      id: categoryId,
+      startX: event.clientX,
+      startY: event.clientY,
+      active: false
+    };
+    addCategoryPointerListeners();
   };
 
   const commitCategoryReorder = async (
@@ -188,20 +260,6 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
     } finally {
       await refreshCategories(); // 以后端权威顺序兜底
     }
-  };
-
-  const categoryDrop = (
-    categoryId: number,
-    event: React.DragEvent<HTMLElement>
-  ) => {
-    const dragged = draggedCategoryIdRef.current;
-    if (dragged === null) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const rect = event.currentTarget.getBoundingClientRect();
-    const before = event.clientY < rect.top + rect.height / 2;
-    clearCategorySort();
-    void commitCategoryReorder(dragged, categoryId, before);
   };
 
   const setDragTarget = (categoryId: number | null) => {
@@ -342,6 +400,7 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
   useEffect(() => {
     return () => {
       stopAutoScroll();
+      removeCategoryPointerListeners();
       if (dragListenersAttachedRef.current) {
         removePointerListeners();
       }
@@ -553,7 +612,6 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
                   tabIndex={0}
                   data-drop-target="category"
                   data-category-id={category.id}
-                  draggable
                   className={`category-accordion-item ${expanded ? "is-active" : ""} ${
                     dragOverCategoryId === category.id ? "is-drag-over" : ""
                   } ${draggedCategoryId === category.id ? "is-sort-source" : ""} ${
@@ -575,12 +633,8 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
                       setExpandedCategoryId(expanded ? null : category.id);
                     }
                   }}
-                  onDragStart={(event) => beginCategoryDrag(category.id, event)}
-                  onDragOver={(event) => categoryDragOver(category.id, event)}
-                  onDragLeave={categoryDragLeave}
-                  onDrop={(event) => categoryDrop(category.id, event)}
-                  onDragEnd={clearCategorySort}
-                  title={draggedCategoryId === category.id ? undefined : "拖动调整分类顺序"}
+                  onPointerDown={(event) => beginCategoryPointerDrag(category.id, event)}
+                  title="拖动调整分类顺序"
                 >
                   {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
                   <span
