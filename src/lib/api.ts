@@ -92,6 +92,8 @@ export const api = {
     call<Tag>("assign_tag_category", { tagId, categoryId }),
   reorderTagCategories: (orderedIds: number[]) =>
     call<null>("reorder_tag_categories", { orderedIds }),
+  groupTagCategories: (categoryIds: number[]) =>
+    call<null>("group_tag_categories", { categoryIds }),
   updateItemTags: (itemId: number, tagSpecs: TagInput[]) =>
     call<VideoItem>("update_item_tags", { itemId, tagSpecs }),
   setItemStar: (itemId: number, starred: boolean) =>
@@ -452,6 +454,18 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
         .filter((category): category is TagCategory => category !== null);
       return null as T;
     }
+    case "group_tag_categories": {
+      const ids = new Set((args?.categoryIds as number[] | undefined) ?? []);
+      if (ids.size < 2) return null as T;
+      // 模拟：leader = 列表中位置最靠前（原顺序首个）的成员，颜色整组统一
+      const leader = mockCategories.find((c) => ids.has(c.id));
+      if (!leader) return null as T;
+      const leaderColor = leader.color ?? "#64748b";
+      mockCategories = mockCategories.map((c) =>
+        ids.has(c.id) ? { ...c, groupId: leader.id, color: leaderColor } : c
+      );
+      return null as T;
+    }
     case "update_item_tags": {
       const itemId = Number(args?.itemId);
       const tagSpecs = (args?.tagSpecs as TagInput[] | undefined) ?? [];
@@ -524,6 +538,12 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
         category.name = name || category.name;
         category.normalized = (name || category.name).toLowerCase();
         if (args?.color) category.color = String(args.color);
+        // 分类组：组内成员共享颜色，改动同步整组
+        if (category.groupId && args?.color) {
+          mockCategories = mockCategories.map((c) =>
+            c.groupId === category.groupId ? { ...c, color: String(args.color) } : c
+          );
+        }
       }
       return category ? ({ ...category } as T) : (null as T);
     }

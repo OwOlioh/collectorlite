@@ -645,6 +645,16 @@ pub async fn reorder_tag_categories(
 }
 
 #[tauri::command]
+pub async fn group_tag_categories(
+    state: State<'_, AppState>,
+    category_ids: Vec<i64>,
+) -> Result<(), String> {
+    db::group_tag_categories(&state.pool, &category_ids)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn update_item_tags(
     state: State<'_, AppState>,
     item_id: i64,

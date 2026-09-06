@@ -33,6 +33,9 @@ pub struct TagCategory {
     pub normalized: String,
     pub color: Option<String>,
     pub position: i64,
+    /// 所属分类组：组内最靠前成员（leader）的 id；NULL = 未分组。
+    #[serde(default)]
+    pub group_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

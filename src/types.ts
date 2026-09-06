@@ -25,6 +25,8 @@ export interface TagCategory {
   normalized: string;
   color?: string;
   position: number;
+  /** 所属分类组：组内最靠前成员 id；未分组为 null/undefined。 */
+  groupId?: number | null;
 }
 
 export interface ItemTagAssignment {

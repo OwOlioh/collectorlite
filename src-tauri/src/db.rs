@@ -838,7 +838,7 @@ pub async fn delete_tag(pool: &SqlitePool, tag_id: i64) -> Result<(), AppError> 
 
 pub async fn list_tag_categories(pool: &SqlitePool) -> Result<Vec<TagCategory>, AppError> {
     let rows = sqlx::query(
-        "SELECT id, name, normalized, color, position
+        "SELECT id, name, normalized, color, position, group_id
          FROM tag_categories
          ORDER BY position, name COLLATE NOCASE",
     )
@@ -855,6 +855,7 @@ fn category_from_row(row: SqliteRow) -> TagCategory {
         normalized: row.get("normalized"),
         color: row.get("color"),
         position: row.get("position"),
+        group_id: row.get("group_id"),
     }
 }
 
@@ -878,7 +879,7 @@ pub async fn create_tag_category(
     let row = sqlx::query(
         "INSERT INTO tag_categories (name, normalized, color, position, created_at)
          VALUES (?, ?, ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM tag_categories), ?)
-         RETURNING id, name, normalized, color, position",
+         RETURNING id, name, normalized, color, position, group_id",
     )
     .bind(name.trim())
     .bind(&normalized)
@@ -891,7 +892,7 @@ pub async fn create_tag_category(
 }
 
 /// 重排分类：按 ordered_ids 的顺序重写各分类的 position（0..n）。
-/// 前端拖拽分类行后传入全量有序 id；列表查询按 position, name 排序。
+/// 前端拖拽分类行（或整组块）后传入全量有序 id；列表查询按 position, name 排序。
 pub async fn reorder_tag_categories(
     pool: &SqlitePool,
     ordered_ids: &[i64],
@@ -908,6 +909,132 @@ pub async fn reorder_tag_categories(
     Ok(())
 }
 
+/// 把若干分类合并为一个「组」：
+/// 1. 若选中分类原本属于其它组，先从旧组拆离（旧组剩下 ≥2 个成员仍成一组并重指 leader；
+///    只剩 1 个则解除分组）；
+/// 2. 整组颜色统一为「位置最靠前」成员的颜色，group_id 指向该 leader；
+/// 3. 把组成员按原位置顺序聚拢成连续块（保持从 leader 所在位置起），并重写全表 position，
+///    保证前端「按块拖动排序」时组成员在列表里始终连续。
+pub async fn group_tag_categories(
+    pool: &SqlitePool,
+    category_ids: &[i64],
+) -> Result<(), AppError> {
+    if category_ids.len() < 2 {
+        return Err(AppError::InvalidInput("合并为组至少需要 2 个分类".into()));
+    }
+    let mut tx = pool.begin().await?;
+
+    // 读取全部分类（按 position 排序），构造成员集
+    struct RowInfo {
+        id: i64,
+        position: i64,
+        color: Option<String>,
+        group_id: Option<i64>,
+    }
+    let all: Vec<RowInfo> = sqlx::query_as::<_, (i64, i64, Option<String>, Option<i64>)>(
+        "SELECT id, position, color, group_id FROM tag_categories ORDER BY position, name COLLATE NOCASE",
+    )
+    .fetch_all(&mut *tx)
+    .await?
+    .into_iter()
+    .map(|(id, position, color, group_id)| RowInfo {
+        id,
+        position,
+        color,
+        group_id,
+    })
+    .collect();
+
+    let ids_set: std::collections::HashSet<i64> = category_ids.iter().copied().collect();
+    if ids_set.len() < 2 {
+        return Err(AppError::InvalidInput("合并为组至少需要 2 个不同的分类".into()));
+    }
+
+    // 收集选中成员原属的组（用于拆离）
+    let mut old_groups: Vec<i64> = all
+        .iter()
+        .filter(|r| ids_set.contains(&r.id))
+        .filter_map(|r| r.group_id)
+        .collect();
+    old_groups.sort_unstable();
+    old_groups.dedup();
+
+    // 旧组残局处理：选中成员先脱组；旧组剩余成员重新成组/解组
+    for group_leader in &old_groups {
+        let remaining: Vec<i64> = all
+            .iter()
+            .filter(|r| !ids_set.contains(&r.id) && r.group_id.as_ref() == Some(group_leader))
+            .map(|r| r.id)
+            .collect();
+        if remaining.len() >= 2 {
+            // 剩余成员按 position 最小者作新 leader
+            let new_leader = all
+                .iter()
+                .filter(|r| remaining.contains(&r.id))
+                .min_by_key(|r| r.position)
+                .map(|r| r.id)
+                .unwrap();
+            sqlx::query("UPDATE tag_categories SET group_id = ? WHERE id = ?")
+                .bind(new_leader)
+                .bind(new_leader)
+                .execute(&mut *tx)
+                .await?;
+        } else if remaining.len() == 1 {
+            sqlx::query("UPDATE tag_categories SET group_id = NULL WHERE id = ?")
+                .bind(remaining[0])
+                .execute(&mut *tx)
+                .await?;
+        }
+        // remaining.len() == 0：整组并入新组，无需额外动作
+    }
+
+    // 选出 leader：成员中 position 最小者；其颜色作为整组颜色
+    let mut members: Vec<&RowInfo> = all
+        .iter()
+        .filter(|r| ids_set.contains(&r.id))
+        .collect();
+    members.sort_by_key(|r| r.position);
+    let leader = members[0];
+    let leader_color = leader.color.clone();
+
+    // 用新组颜色统一全部成员并设置 group_id（leader 自指）
+    for member in &members {
+        sqlx::query("UPDATE tag_categories SET color = ?, group_id = ? WHERE id = ?")
+            .bind(&leader_color)
+            .bind(leader.id)
+            .bind(member.id)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    // 重排：成员从 leader 原位置起连续排列，其余分类保持相对顺序，重写全表 position
+    let ordered_ids: Vec<i64> = all.iter().map(|r| r.id).collect();
+    let mut compact: Vec<i64> = ordered_ids
+        .iter()
+        .copied()
+        .filter(|id| !ids_set.contains(id))
+        .collect();
+    let insert_at = compact
+        .iter()
+        .position(|id| {
+            let pos = all.iter().find(|r| r.id == *id).map(|r| r.position).unwrap_or(i64::MAX);
+            pos > leader.position
+        })
+        .unwrap_or(compact.len());
+    let member_ids: Vec<i64> = members.iter().map(|r| r.id).collect();
+    compact.splice(insert_at..insert_at, member_ids.iter().copied());
+    for (index, category_id) in compact.iter().enumerate() {
+        sqlx::query("UPDATE tag_categories SET position = ? WHERE id = ?")
+            .bind(index as i64)
+            .bind(category_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
+
 pub async fn rename_tag_category(
     pool: &SqlitePool,
     id: i64,
@@ -915,10 +1042,16 @@ pub async fn rename_tag_category(
     color: Option<String>,
 ) -> Result<TagCategory, AppError> {
     let normalized = normalize_tag(name);
+    // 该分类若属于某组，颜色改动要同步给整组（组成员共享同色）
+    let group_id: Option<i64> = sqlx::query_scalar("SELECT group_id FROM tag_categories WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?
+        .flatten();
     // UPDATE ... RETURNING 一步返回完整行，避免 UPDATE 后二次 SELECT 的 WAL 竞态。
     let row = sqlx::query(
         "UPDATE tag_categories SET name = ?, normalized = ?, color = ? WHERE id = ?
-         RETURNING id, name, normalized, color, position",
+         RETURNING id, name, normalized, color, position, group_id",
     )
     .bind(name.trim())
     .bind(&normalized)
@@ -927,10 +1060,62 @@ pub async fn rename_tag_category(
     .map(category_from_row)
     .fetch_one(pool)
     .await?;
+    if let Some(g) = group_id {
+        sqlx::query("UPDATE tag_categories SET color = ? WHERE group_id = ? AND id != ?")
+            .bind(&color)
+            .bind(g)
+            .bind(id)
+            .execute(pool)
+            .await?;
+    }
     Ok(row)
 }
 
+/// 删除分类后的组修复：某组（leader_hint 指 group_id 目标）内除 exclude 外的剩余成员
+/// ≥2 时以 position 最小者为新 leader 继续成组；恰剩 1 个时解除分组。
+async fn repair_category_group_after_delete(
+    pool: &SqlitePool,
+    leader_hint: Option<i64>,
+    exclude: i64,
+) -> Result<(), AppError> {
+    let Some(g) = leader_hint else { return Ok(()) };
+    let remain: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT id, position FROM tag_categories WHERE group_id = ? AND id != ?",
+    )
+    .bind(g)
+    .bind(exclude)
+    .fetch_all(pool)
+    .await?;
+    if remain.len() >= 2 {
+        let new_leader = remain
+            .iter()
+            .min_by_key(|(_, pos)| *pos)
+            .map(|(id, _)| *id)
+            .unwrap();
+        sqlx::query("UPDATE tag_categories SET group_id = ? WHERE group_id = ?")
+            .bind(new_leader)
+            .bind(g)
+            .execute(pool)
+            .await?;
+    } else if remain.len() == 1 {
+        sqlx::query("UPDATE tag_categories SET group_id = NULL WHERE id = ?")
+            .bind(remain[0].0)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
 pub async fn delete_tag_category(pool: &SqlitePool, id: i64) -> Result<(), AppError> {
+    // 该分类所在组 / 该分类作为 leader 的组，删除后要让剩余成员重新成组或解组
+    let own_group: Option<i64> = sqlx::query_scalar(
+        "SELECT group_id FROM tag_categories WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+
     sqlx::query("UPDATE tags SET category_id = NULL WHERE category_id = ?")
         .bind(id)
         .execute(pool)
@@ -939,6 +1124,12 @@ pub async fn delete_tag_category(pool: &SqlitePool, id: i64) -> Result<(), AppEr
         .bind(id)
         .execute(pool)
         .await?;
+
+    // 1) 被删行是普通成员：它所属的组（leader=own_group）其余成员需重组
+    repair_category_group_after_delete(pool, own_group, id).await?;
+    // 2) 被删行是组长：指向它的所有行需重组（此时它们 group_id 仍 = id）
+    repair_category_group_after_delete(pool, Some(id), id).await?;
+
     Ok(())
 }
 
@@ -2540,5 +2731,68 @@ mod tests {
         .await
         .expect("查询失败");
         assert_eq!(b_count, 2, "合并后 b 名下应有 2 条视频");
+    }
+
+    /// 分类组：合并后组连续、颜色统一为最上层成员色、成员改色整组同步、删除组长后残局正确。
+    #[tokio::test]
+    async fn category_groups_unify_color_and_stay_contiguous() {
+        use super::{
+            create_tag_category, delete_tag_category, group_tag_categories, list_tag_categories,
+            rename_tag_category, SqlitePoolOptions,
+        };
+
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("内存库连接失败");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("迁移失败");
+
+        let a = create_tag_category(&pool, "甲", Some("#111111".into()))
+            .await
+            .expect("建分类失败");
+        let _b = create_tag_category(&pool, "乙", Some("#222222".into()))
+            .await
+            .expect("建分类失败");
+        let c = create_tag_category(&pool, "丙", Some("#333333".into()))
+            .await
+            .expect("建分类失败");
+        let _d = create_tag_category(&pool, "丁", Some("#444444".into()))
+            .await
+            .expect("建分类失败");
+
+        // 合并 甲(0) 与 丙(2)：leader=甲，颜色统一为甲色，组落在原 leader 位置且连续
+        group_tag_categories(&pool, &[a.id, c.id])
+            .await
+            .expect("合并失败");
+        let list = list_tag_categories(&pool).await.expect("list 失败");
+        let seq: Vec<String> = list.iter().map(|x| x.name.clone()).collect();
+        assert_eq!(seq, vec!["甲", "丙", "乙", "丁"], "组成员应连续于原 leader 位置");
+        let row_a = list.iter().find(|x| x.id == a.id).unwrap();
+        let row_c = list.iter().find(|x| x.id == c.id).unwrap();
+        assert_eq!(row_a.group_id, Some(a.id), "leader 自指");
+        assert_eq!(row_c.group_id, Some(a.id), "成员指向 leader");
+        assert_eq!(row_a.color.as_deref(), Some("#111111"));
+        assert_eq!(
+            row_c.color.as_deref(),
+            Some("#111111"),
+            "颜色统一为最上层成员色"
+        );
+
+        // 组内成员改色 → 整组同步
+        rename_tag_category(&pool, c.id, "丙", Some("#ff0000".to_string()))
+            .await
+            .expect("改色失败");
+        let list2 = list_tag_categories(&pool).await.expect("list 失败");
+        let row_a2 = list2.iter().find(|x| x.id == a.id).unwrap();
+        assert_eq!(row_a2.color.as_deref(), Some("#ff0000"), "改色应同步整组");
+
+        // 删除组长后：仅剩成员(丙) → 解除分组
+        delete_tag_category(&pool, a.id).await.expect("删除失败");
+        let list3 = list_tag_categories(&pool).await.expect("list 失败");
+        let row_c3 = list3.iter().find(|x| x.id == c.id).unwrap();
+        assert_eq!(row_c3.group_id, None, "组长删除后仅剩一个成员应解组");
     }
 }
