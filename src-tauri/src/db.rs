@@ -830,20 +830,38 @@ pub async fn create_tag_category(
     }
     // 一条语句完成插入并 RETURNING 完整行，避免「INSERT 后另起连接二次 SELECT」
     // 在 WAL 模式下读不到刚提交行、触发 RowNotFound（"no rows returned"）的竞态。
+    // position 取当前最大值 + 1：新建分类追加到列表末尾，随后用户可拖动重排。
     let row = sqlx::query(
         "INSERT INTO tag_categories (name, normalized, color, position, created_at)
-         VALUES (?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM tag_categories), ?)
          RETURNING id, name, normalized, color, position",
     )
     .bind(name.trim())
     .bind(&normalized)
     .bind(&color)
-    .bind(0)
     .bind(now_seconds())
     .map(category_from_row)
     .fetch_one(pool)
     .await?;
     Ok(row)
+}
+
+/// 重排分类：按 ordered_ids 的顺序重写各分类的 position（0..n）。
+/// 前端拖拽分类行后传入全量有序 id；列表查询按 position, name 排序。
+pub async fn reorder_tag_categories(
+    pool: &SqlitePool,
+    ordered_ids: &[i64],
+) -> Result<(), AppError> {
+    let mut tx = pool.begin().await?;
+    for (index, category_id) in ordered_ids.iter().enumerate() {
+        sqlx::query("UPDATE tag_categories SET position = ? WHERE id = ?")
+            .bind(index as i64)
+            .bind(category_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 pub async fn rename_tag_category(
@@ -2261,5 +2279,49 @@ mod tests {
             .await
             .expect("search_items 失败");
         assert_eq!(list3.len(), 2, "按标签 a 应返回 item2、item3");
+    }
+
+    /// 分类重排：reorder 后按 position 返回新顺序，新建分类追加到末尾。
+    #[tokio::test]
+    async fn reorder_tag_categories_rewrites_positions() {
+        use super::{create_tag_category, list_tag_categories, reorder_tag_categories, SqlitePoolOptions};
+
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("内存库连接失败");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("迁移失败");
+
+        let a = create_tag_category(&pool, "甲", None).await.expect("建分类失败");
+        let b = create_tag_category(&pool, "乙", None).await.expect("建分类失败");
+        let c = create_tag_category(&pool, "丙", None).await.expect("建分类失败");
+
+        // 新建时 position 递增 → 初始顺序 = 创建顺序
+        let names = |list: &[crate::models::TagCategory]| -> Vec<String> {
+            list.iter().map(|c| c.name.clone()).collect()
+        };
+        let initial = list_tag_categories(&pool).await.expect("list 失败");
+        assert_eq!(names(&initial), vec!["甲", "乙", "丙"], "新分类应追加末尾");
+
+        // 重排为 丙、甲、乙
+        reorder_tag_categories(&pool, &[c.id, a.id, b.id])
+            .await
+            .expect("reorder 失败");
+        let after = list_tag_categories(&pool).await.expect("list 失败");
+        assert_eq!(names(&after), vec!["丙", "甲", "乙"], "应遵循重排后的位置");
+        assert_eq!(
+            after.iter().map(|c| c.position).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "position 应被重写为连续序号"
+        );
+
+        // 新建分类应排到末尾（position 最大）
+        let d = create_tag_category(&pool, "丁", None).await.expect("建分类失败");
+        assert_eq!(d.position, 3);
+        let final_list = list_tag_categories(&pool).await.expect("list 失败");
+        assert_eq!(names(&final_list), vec!["丙", "甲", "乙", "丁"]);
     }
 }

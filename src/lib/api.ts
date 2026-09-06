@@ -90,6 +90,8 @@ export const api = {
     call<null>("delete_tag_category", { categoryId }),
   assignTagCategory: (tagId: number, categoryId: number | null) =>
     call<Tag>("assign_tag_category", { tagId, categoryId }),
+  reorderTagCategories: (orderedIds: number[]) =>
+    call<null>("reorder_tag_categories", { orderedIds }),
   updateItemTags: (itemId: number, tagSpecs: TagInput[]) =>
     call<VideoItem>("update_item_tags", { itemId, tagSpecs }),
   updateItemNotes: (itemId: number, notes: string) =>
@@ -431,6 +433,18 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
       const tag = mockTags.find((item) => item.id === tagId);
       if (tag) tag.categoryId = categoryId;
       return tag ? ({ ...tag } as T) : (null as T);
+    }
+    case "reorder_tag_categories": {
+      const orderedIds = (args?.orderedIds as number[] | undefined) ?? [];
+      const byId = new Map(mockCategories.map((category) => [category.id, category]));
+      mockCategories = orderedIds
+        .map((id, index) => {
+          const category = byId.get(Number(id));
+          if (!category) return null;
+          return { ...category, position: index };
+        })
+        .filter((category): category is TagCategory => category !== null);
+      return null as T;
     }
     case "update_item_tags": {
       const itemId = Number(args?.itemId);

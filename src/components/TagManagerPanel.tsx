@@ -31,6 +31,11 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
   const [draggedTagId, setDraggedTagId] = useState<number | null>(null);
   const [dragOverCategoryId, setDragOverCategoryId] = useState<number | null>(null);
   const [dragOverUncategorized, setDragOverUncategorized] = useState(false);
+  const [draggedCategoryId, setDraggedCategoryId] = useState<number | null>(null);
+  const [categorySortIndicator, setCategorySortIndicator] = useState<{
+    id: number;
+    before: boolean;
+  } | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editingName, setEditingName] = useState("");
   const [renamingCategoryId, setRenamingCategoryId] = useState<number | null>(null);
@@ -43,6 +48,7 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
   const autoScrollFrameRef = useRef<number | null>(null);
   const autoScrollVelocityRef = useRef(0);
   const dragTargetRef = useRef<{ categoryId: number | null } | null>(null);
+  const draggedCategoryIdRef = useRef<number | null>(null);
   const dragListenersAttachedRef = useRef(false);
   const attachedPointerMoveRef = useRef<((event: PointerEvent) => void) | null>(null);
   const attachedPointerUpRef = useRef<((event: PointerEvent) => void) | null>(null);
@@ -113,6 +119,89 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
   const assignCategory = async (tagId: number, categoryId: number | null) => {
     await api.assignTagCategory(tagId, categoryId);
     await onTagsChanged?.();
+  };
+
+  // ---- 分类顺序拖拽（HTML5 DnD）：拖动分类行上下移动，整列表重排 ----
+  const clearCategorySort = () => {
+    draggedCategoryIdRef.current = null;
+    setDraggedCategoryId(null);
+    setCategorySortIndicator(null);
+  };
+
+  const beginCategoryDrag = (
+    categoryId: number,
+    event: React.DragEvent<HTMLElement>
+  ) => {
+    draggedCategoryIdRef.current = categoryId;
+    setDraggedCategoryId(categoryId);
+    setCategorySortIndicator(null);
+    event.dataTransfer.effectAllowed = "move";
+    try {
+      event.dataTransfer.setData("text/plain", String(categoryId));
+    } catch {
+      /* 个别内核不允许同步 setData，忽略 */
+    }
+  };
+
+  const categoryDragOver = (
+    categoryId: number,
+    event: React.DragEvent<HTMLElement>
+  ) => {
+    const dragged = draggedCategoryIdRef.current;
+    if (dragged === null || dragged === categoryId) return;
+    event.preventDefault(); // 声明可放置
+    event.dataTransfer.dropEffect = "move";
+    const rect = event.currentTarget.getBoundingClientRect();
+    const before = event.clientY < rect.top + rect.height / 2;
+    setCategorySortIndicator((current) =>
+      current?.id === categoryId && current.before === before
+        ? current
+        : { id: categoryId, before }
+    );
+  };
+
+  const categoryDragLeave = (event: React.DragEvent<HTMLElement>) => {
+    const next = event.relatedTarget;
+    if (!(next instanceof Node) || !event.currentTarget.contains(next)) {
+      setCategorySortIndicator(null);
+    }
+  };
+
+  const commitCategoryReorder = async (
+    draggedId: number,
+    targetId: number,
+    before: boolean
+  ) => {
+    if (draggedId === targetId) return;
+    const next = [...categories];
+    const from = next.findIndex((category) => category.id === draggedId);
+    if (from < 0) return;
+    const [moved] = next.splice(from, 1);
+    const targetIndex = next.findIndex((category) => category.id === targetId);
+    if (targetIndex < 0) return;
+    next.splice(before ? targetIndex : targetIndex + 1, 0, moved);
+    setCategories(next); // 乐观更新，松开即见新顺序
+    try {
+      await api.reorderTagCategories(next.map((category) => category.id));
+    } catch (error) {
+      toast("error", `保存分类顺序失败：${String(error)}`);
+    } finally {
+      await refreshCategories(); // 以后端权威顺序兜底
+    }
+  };
+
+  const categoryDrop = (
+    categoryId: number,
+    event: React.DragEvent<HTMLElement>
+  ) => {
+    const dragged = draggedCategoryIdRef.current;
+    if (dragged === null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const before = event.clientY < rect.top + rect.height / 2;
+    clearCategorySort();
+    void commitCategoryReorder(dragged, categoryId, before);
   };
 
   const setDragTarget = (categoryId: number | null) => {
@@ -453,7 +542,7 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
             >
               <ChevronRight size={15} />
               <span>未分类</span>
-              <span>{uncategorized.length}</span>
+              <span className="category-count">{uncategorized.length}</span>
             </div>
             {categories.map((category) => {
               const categoryTags = tags.filter((tag) => tag.categoryId === category.id);
@@ -464,8 +553,15 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
                   tabIndex={0}
                   data-drop-target="category"
                   data-category-id={category.id}
+                  draggable
                   className={`category-accordion-item ${expanded ? "is-active" : ""} ${
                     dragOverCategoryId === category.id ? "is-drag-over" : ""
+                  } ${draggedCategoryId === category.id ? "is-sort-source" : ""} ${
+                    categorySortIndicator?.id === category.id
+                      ? categorySortIndicator.before
+                        ? "is-sort-before"
+                        : "is-sort-after"
+                      : ""
                   }`}
                   key={category.id}
                   onClick={() => {
@@ -479,14 +575,27 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
                       setExpandedCategoryId(expanded ? null : category.id);
                     }
                   }}
+                  onDragStart={(event) => beginCategoryDrag(category.id, event)}
+                  onDragOver={(event) => categoryDragOver(category.id, event)}
+                  onDragLeave={categoryDragLeave}
+                  onDrop={(event) => categoryDrop(category.id, event)}
+                  onDragEnd={clearCategorySort}
+                  title={draggedCategoryId === category.id ? undefined : "拖动调整分类顺序"}
                 >
                   {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
                   <span
                     className="category-color"
                     style={{ background: category.color || "#64748b" }}
                   />
-                  <span>{category.name}</span>
-                  <span>{categoryTags.length}</span>
+                  <span className="category-accordion-name">{category.name}</span>
+                  <span className="category-count">{categoryTags.length}</span>
+                  <span
+                    className="category-drag-handle"
+                    title="拖动调整分类顺序"
+                    aria-hidden="true"
+                  >
+                    <GripVertical size={13} />
+                  </span>
                 </div>
               );
             })}

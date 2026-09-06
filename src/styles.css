@@ -2108,9 +2108,45 @@ textarea {
   box-shadow: inset 0 0 0 1px var(--blue);
 }
 
-.category-accordion-item > span:nth-last-child(1) {
+.category-accordion-item > .category-count {
   margin-left: auto;
   color: var(--muted);
+}
+
+/* 分类顺序拖拽：源行淡化、目标行上下缘给出插入指示线 */
+.category-accordion-item.is-sort-source {
+  opacity: 0.45;
+}
+
+.category-accordion-item.is-sort-before,
+.category-accordion-item.is-sort-after {
+  background: var(--blue-soft);
+}
+
+.category-accordion-item.is-sort-before {
+  box-shadow: inset 0 3px 0 0 var(--blue);
+}
+
+.category-accordion-item.is-sort-after {
+  box-shadow: inset 0 -3px 0 0 var(--blue);
+}
+
+.category-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  color: var(--muted);
+  opacity: 0;
+  cursor: grab;
+}
+
+.category-accordion-item:hover .category-drag-handle,
+.category-accordion-item.is-sort-source .category-drag-handle {
+  opacity: 0.75;
+}
+
+.category-drag-handle:active {
+  cursor: grabbing;
 }
 
 .category-detail {

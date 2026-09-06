@@ -25,7 +25,8 @@ use commands::{
     list_tags, list_zhihu_collections, logout, merge_tags, open_url, parse_csdn_collection_url,
     parse_public_favorite_url, parse_zhihu_collection_url, preview_csdn_import,
     preview_github_import, preview_import, preview_zhihu_import, recache_covers,
-    regenerate_bridge_token, rename_tag_category, save_export_file, search_items,     update_item_notes,
+    regenerate_bridge_token, rename_tag_category, reorder_tag_categories,
+    save_export_file, search_items,     update_item_notes,
     update_item_tags,
     // Obsidian 单向联动
     get_obsidian_settings,
@@ -82,6 +83,7 @@ pub fn run() {
             rename_tag_category,
             delete_tag_category,
             assign_tag_category,
+            reorder_tag_categories,
             update_item_notes,
             update_item_tags,
             import_browser_bookmarks,
