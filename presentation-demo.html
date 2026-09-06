@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>收藏管理器 · 项目答辩演示</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swiper@11/swiper-bundle.min.css" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@700&family=Noto+Sans+SC:wght@400;700;900&display=swap" rel="stylesheet">
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'Noto Sans SC', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace']
+                    },
+                    colors: {
+                        primary: '#0A84FF',
+                        accent: '#30D158',
+                        warning: '#FFD60A',
+                        purple: '#BF5AF2',
+                        danger: '#FF453A'
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        body {
+            background-color: #050507;
+            color: #fff;
+            height: 100vh;
+            overflow: hidden;
+            display: flex;
+        }
+
+        /* --- 侧边栏 --- */
+        .sidebar-container {
+            width: 380px;
+            flex-shrink: 0;
+            background: rgba(18, 18, 22, 0.75);
+            backdrop-filter: blur(24px);
+            border-right: 1px solid rgba(255,255,255,0.08);
+            display: flex;
+            flex-direction: column;
+            padding: 2.5rem 2rem;
+            z-index: 20;
+            position: relative;
+        }
+
+        .main-stage {
+            flex-grow: 1;
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            background: radial-gradient(circle at 50% 40%, #16161c 0%, #050507 70%);
+        }
+
+        .swiper { width: 100%; padding: 40px 0; }
+
+        /* --- 卡片 --- */
+        .swiper-slide {
+            width: 340px;
+            height: 480px;
+            background: rgba(38, 38, 45, 0.45);
+            backdrop-filter: blur(30px) saturate(150%);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 28px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 15px 35px rgba(0,0,0,0.5);
+            transition: all 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);
+            user-select: none;
+            position: relative;
+            overflow: hidden;
+            text-align: center;
+        }
+
+        .swiper-slide:not(.swiper-slide-active) {
+            filter: brightness(0.5) blur(1.5px);
+            transform: scale(0.92);
+        }
+
+        .swiper-slide-active {
+            border: 1px solid rgba(255, 255, 255, 0.45);
+            background: rgba(58, 58, 68, 0.85);
+            box-shadow: 0 30px 70px rgba(0,0,0,0.6), 0 0 45px rgba(255,255,255,0.06);
+        }
+
+        /* --- 荧光笔 --- */
+        .highlight-text {
+            background-image: linear-gradient(120deg, transparent 0%, var(--hl) 0%, var(--hl) 100%);
+            background-repeat: no-repeat;
+            background-size: 0% 100%;
+            background-position: 0 0;
+            padding: 5px 10px;
+            border-radius: 6px;
+            color: #d4d4d8;
+            transition: background-size 0.55s ease 0.25s, color 0.3s ease 0.25s;
+            display: inline-block;
+        }
+        .swiper-slide-active .highlight-text {
+            background-size: 100% 100%;
+            color: #000;
+            font-weight: 800;
+        }
+
+        /* --- 序号水印 --- */
+        .bg-number {
+            position: absolute;
+            top: -10px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 150px;
+            font-weight: 900;
+            color: rgba(255,255,255,0.035);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .card-body { position: relative; z-index: 10; padding: 0 1.75rem; }
+
+        /* --- 总结卡清单 --- */
+        .summary-list li {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 0.85rem;
+            opacity: 0;
+            transform: translateX(-12px);
+            text-align: left;
+        }
+        .swiper-slide-active .summary-list li {
+            opacity: 1;
+            transform: translateX(0);
+            transition: all 0.4s ease;
+        }
+        .swiper-slide-active .summary-list li:nth-child(1) { transition-delay: 0.15s; }
+        .swiper-slide-active .summary-list li:nth-child(2) { transition-delay: 0.25s; }
+        .swiper-slide-active .summary-list li:nth-child(3) { transition-delay: 0.35s; }
+        .swiper-slide-active .summary-list li:nth-child(4) { transition-delay: 0.45s; }
+        .swiper-slide-active .summary-list li:nth-child(5) { transition-delay: 0.55s; }
+        .swiper-slide-active .summary-list li:nth-child(6) { transition-delay: 0.65s; }
+
+        .tech-slide { display: none; }
+        .hidden-mode { display: none !important; }
+
+        .progress-dot {
+            width: 6px; height: 6px; border-radius: 50%;
+            background: rgba(255,255,255,0.2);
+            transition: all 0.3s;
+        }
+        .progress-dot.active { background: #fff; transform: scale(1.4); }
+    </style>
+</head>
+<body>
+
+    <aside class="sidebar-container">
+        <div class="mb-6">
+            <h5 class="text-xs font-bold text-gray-500 tracking-[5px] uppercase mb-2">Defense · v0.1.0</h5>
+            <h1 class="text-[2.6rem] font-black text-white leading-tight">
+                收藏<br><span class="text-primary">管理器</span>
+            </h1>
+            <p class="text-gray-500 text-xs font-mono mt-2">Local-First Multi-Platform Collector</p>
+        </div>
+
+        <div id="info-panel" class="transition-all duration-300 flex-1">
+            <div class="flex items-center gap-2 mb-3">
+                <span id="info-index" class="text-xs font-mono text-gray-600">01</span>
+                <div class="h-px flex-1 bg-white/10"></div>
+                <span id="info-mode" class="text-[10px] font-mono px-2 py-0.5 rounded bg-primary/20 text-primary">功能演示</span>
+            </div>
+
+            <h2 id="info-title" class="text-2xl font-bold text-primary mb-3">项目定位</h2>
+            <p id="info-desc" class="text-gray-300 text-sm leading-relaxed mb-6">
+                一款运行在 Windows 桌面的本地优先多平台收藏聚合工具。
+            </p>
+
+            <div class="p-4 bg-white/5 rounded-xl border-l-2 border-accent">
+                <div class="text-[10px] text-gray-500 uppercase tracking-widest mb-1 font-bold">Key Point</div>
+                <p id="info-note" class="text-xs text-gray-300 font-mono leading-relaxed">
+                    只存元数据与链接，不下载内容本体。
+                </p>
+            </div>
+        </div>
+
+        <div class="mt-6">
+            <div id="progress-bar" class="flex items-center gap-1.5 mb-5 flex-wrap"></div>
+
+            <button id="mode-toggle" class="w-full py-3.5 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-purple/60 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2.5 group mb-4">
+                <div class="w-2 h-2 rounded-full bg-gray-600 group-hover:bg-purple transition-colors" id="mode-indicator"></div>
+                <span id="mode-text" class="tracking-wider">切换到技术实现模式</span>
+            </button>
+
+            <div class="flex items-center gap-3 text-[11px] text-gray-600 justify-center">
+                <span class="bg-white/5 px-2 py-1 rounded font-mono border border-white/10">←</span>
+                <span class="bg-white/5 px-2 py-1 rounded font-mono border border-white/10">→</span>
+                <span>切换</span>
+                <span class="bg-white/5 px-2 py-1 rounded font-mono border border-white/10">滚轮</span>
+                <span>翻页</span>
+            </div>
+        </div>
+    </aside>
+
+    <main class="main-stage">
+        <div class="absolute top-1/4 left-1/4 w-96 h-96 bg-primary/15 rounded-full blur-[110px] pointer-events-none"></div>
+        <div class="absolute bottom-1/4 right-1/4 w-80 h-80 bg-purple/10 rounded-full blur-[90px] pointer-events-none"></div>
+
+        <div class="swiper mySwiper">
+            <div class="swiper-wrapper">
+
+                <div class="swiper-slide" data-idx="0" style="--hl: #0A84FF;">
+                    <span class="bg-number">01</span>
+                    <div class="card-body">
+                        <i class="fa-solid fa-box-archive text-5xl mb-5 text-primary drop-shadow-[0_0_18px_rgba(10,132,255,0.5)]"></i>
+                        <h3 class="text-2xl font-bold mb-1">项目定位</h3>
+                        <p class="text-xs font-mono mb-5 text-primary">Local-First Collector</p>
+                        <p class="text-gray-400 text-xs leading-relaxed mb-6">
+                            把散落在五个平台的收藏汇聚进一个本地库，提供跨源检索、标签整理与笔记联动。
+                        </p>
+                        <div class="highlight-text text-xs">TAURI 2 + SQLITE</div>
+                    </div>
+                </div>
+
+                <div class="swiper-slide" data-idx="1" style="--hl: #FFD60A;">
+                    <span class="bg-number">02</span>
+                    <div class="card-body">
+                        <i class="fa-solid fa-triangle-exclamation text-5xl mb-5 text-warning drop-shadow-[0_0_18px_rgba(255,214,10,0.5)]"></i>
+                        <h3 class="text-2xl font-bold mb-1">为什么做</h3>
+                        <p class="text-xs font-mono mb-5 text-warning">5 Platforms · 0 Entry</p>
+                        <p class="text-gray-400 text-xs leading-relaxed mb-6">
+                            收藏散落、平台会失效、无法统一检索、误删即永久丢失——现有方案全都解决不了。
+                        </p>
+                        <div class="highlight-text text-xs">索引与入口，非离线归档</div>
+                    </div>
+                </div>
+
+                <div class="swiper-slide" data-idx="2" style="--hl: #BF5AF2;">
+                    <span class="bg-number">03</span>
+                    <div class="card-body">
+                        <i class="fa-solid fa-layer-group text-5xl mb-5 text-purple drop-shadow-[0_0_18px_rgba(191,90,242,0.5)]"></i>
+                        <h3 class="text-2xl font-bold mb-1">分层架构</h3>
+                        <p class="text-xs font-mono mb-5 text-purple">React ↔ Rust ↔ SQLite</p>
+                        <p class="text-gray-400 text-xs leading-relaxed mb-6">
+                            前端经约 60 个 IPC 命令调 Rust 后端；后端分命令层、适配器层、笔记与桥接层。
+                        </p>
+                        <div class="highlight-text text-xs">RUST 8.6K + TS 5.6K 行</div>
+                    </div>
+                </div>
+
+                <div class="swiper-slide" data-idx="3" style="--hl: #30D158;">
+                    <span class="bg-number">04</span>
+                    <div class="card-body">
+                        <i class="fa-solid fa-cloud-arrow-down text-5xl mb-5 text-accent drop-shadow-[0_0_18px_rgba(48,209,88,0.5)]"></i>
+                        <h3 class="text-2xl font-bold mb-1">多源导入</h3>
+                        <p class="text-xs font-mono mb-5 text-accent">SourceAdapter × 5</p>
+                        <p class="text-gray-400 text-xs leading-relaxed mb-6">
+                            B 站 / 知乎 / CSDN / GitHub / 浏览器书签统一走一套 trait，新平台只需实现三个方法。
+                        </p>
+                        <div class="highlight-text text-xs">预览白名单机制</div>
+                    </div>
+                </div>
+
+                <div class="swiper-slide" data-idx="4" style="--hl: #0A84FF;">
+                    <span class="bg-number">05</span>
+                    <div class="card-body">
+                        <i class="fa-solid fa-border-all text-5xl mb-5 text-primary drop-shadow-[0_0_18px_rgba(10,132,255,0.5)]"></i>
+                        <h3 class="text-2xl font-bold mb-1">统一收藏库</h3>
+                        <p class="text-xs font-mono mb-5 text-primary">Search · Filter · Sort</p>
+                        <p class="text-gray-400 text-xs leading-relaxed mb-6">
+                            网格与列表双视图、全字段检索、来源与标签组合筛选、多选批量操作、虚拟滚动。
+                        </p>
+                        <div class="highlight-text text-xs">FTS5 全文检索</div>
+                    </div>
+                </div>
+
+                <div class="swiper-slide" data-idx="5" style="--hl: #BF5AF2;">
+                    <span class="bg-number">06</span>
+                    <div class="card-body">
+                        <i class="fa-solid fa-tags text-5xl mb-5 text-purple drop-shadow-[0_0_18px_rgba(191,90,242,0.5)]"></i>
+                        <h3 class="text-2xl font-bold mb-1">标签体系</h3>
+                        <p class="text-xs font-mono mb-5 text-purple">Category → Tag → Item</p>
+                        <p class="text-gray-400 text-xs leading-relaxed mb-6">
+                            三层结构，命名空间隔离来源自动带入的标签，支持相似标签合并与拖拽归类。
+                        </p>
+                        <div class="highlight-text text-xs">127 标签 / 11 分类</div>
+                    </div>
+                </div>
+
+                <div class="swiper-slide" data-idx="6" style="--hl: #30D158;">
+                    <span class="bg-number">07</span>
+                    <div class="card-body">
+                        <i class="fa-solid fa-file-lines text-5xl mb-5 text-accent drop-shadow-[0_0_18px_rgba(48,209,88,0.5)]"></i>
+                        <h3 class="text-2xl font-bold mb-1">Obsidian 联动</h3>
+                        <p class="text-xs font-mono mb-5 text-accent">One-Way · Scoped Sync</p>
+                        <p class="text-gray-400 text-xs leading-relaxed mb-6">
+                            批注生成 Markdown，仅覆盖 collector 托管区，你在 Obsidian 里写的内容永不被冲掉。
+                        </p>
+                        <div class="highlight-text text-xs">删除收藏不删笔记</div>
+                    </div>
+                </div>
+
+                <div class="swiper-slide" data-idx="7" style="--hl: #FFD60A;">
+                    <span class="bg-number">08</span>
+                    <div class="card-body">
+                        <i class="fa-solid fa-trash-can text-5xl mb-5 text-warning drop-shadow-[0_0_18px_rgba(255,214,10,0.5)]"></i>
+                        <h3 class="text-2xl font-bold mb-1">回收站</h3>
+                        <p class="text-xs font-mono mb-5 text-warning">Soft Delete + Retention</p>
+                        <p class="text-gray-400 text-xs leading-relaxed mb-6">
+                            所有删除均为软删除，先进回收站；保留期可配置，启动时自动清理超期条目。
+                        </p>
+                        <div class="highlight-text text-xs">7 / 15 / 30 天可选</div>
+                    </div>
+                </div>
+
+                <div class="swiper-slide tech-slide" data-idx="8" style="--hl: #0A84FF;">
+                    <span class="bg-number">09</span>
+                    <div class="card-body">
+                        <i class="fa-solid fa-fingerprint text-5xl mb-5 text-primary drop-shadow-[0_0_18px_rgba(10,132,255,0.5)]"></i>
+                        <h3 class="text-2xl font-bold mb-1">跨源去重</h3>
+                        <p class="text-xs font-mono mb-5 text-primary">Composite Unique Key</p>
+                        <p class="text-gray-400 text-xs leading-relaxed mb-6">
+                            BV 号、回答 ID、仓库全名互不相通，用 (source, external_id) 复合键天然隔离，写入走 upsert。
+                        </p>
+                        <div class="highlight-text text-xs">(source, external_id)</div>
+                    </div>
+                </div>
+
+                <div class="swiper-slide tech-slide" data-idx="9" style="--hl: #30D158;">
+                    <span class="bg-number">10</span>
+                    <div class="card-body">
+                        <i class="fa-solid fa-image text-5xl mb-5 text-accent drop-shadow-[0_0_18px_rgba(48,209,88,0.5)]"></i>
+                        <h3 class="text-2xl font-bold mb-1">封面本地化</h3>
+                        <p class="text-xs font-mono mb-5 text-accent">WebView ≠ Host Proxy</p>
+                        <p class="text-gray-400 text-xs leading-relaxed mb-6">
+                            WebView 不继承宿主进程代理，直连 CDN 必失败；改由 Rust 侧下载到 covers/ 并本地加载。
+                        </p>
+                        <div class="highlight-text text-xs">cover_local_path</div>
+                    </div>
+                </div>
+
+                <div class="swiper-slide tech-slide" data-idx="10" style="--hl: #FFD60A;">
+                    <span class="bg-number">11</span>
+                    <div class="card-body">
+                        <i class="fa-solid fa-bug text-5xl mb-5 text-warning drop-shadow-[0_0_18px_rgba(255,214,10,0.5)]"></i>
+                        <h3 class="text-2xl font-bold mb-1">路径校验陷阱</h3>
+                        <p class="text-xs font-mono mb-5 text-warning">canonicalize \\?\ Prefix</p>
+                        <p class="text-gray-400 text-xs leading-relaxed mb-6">
+                            Windows 上 canonicalize 给已存在目录加 \\?\ 前缀，首次写入目标没有——前缀比较恒为假，导出全被误拒。
+                        </p>
+                        <div class="highlight-text text-xs">改为纯词法规范化</div>
+                    </div>
+                </div>
+
+                <div class="swiper-slide tech-slide" data-idx="11" style="--hl: #FF453A;">
+                    <span class="bg-number">12</span>
+                    <div class="card-body">
+                        <i class="fa-solid fa-skull text-5xl mb-5 text-danger drop-shadow-[0_0_18px_rgba(255,69,58,0.5)]"></i>
+                        <h3 class="text-2xl font-bold mb-1">发布版闪退</h3>
+                        <p class="text-xs font-mono mb-5 text-danger">LF → CRLF Checksum</p>
+                        <p class="text-gray-400 text-xs leading-relaxed mb-6">
+                            CI 的 autocrlf 改了迁移文件行尾，与数据库记录的校验值不符，启动即 panic。
+                        </p>
+                        <div class="highlight-text text-xs">构建成功 ≠ 能运行</div>
+                    </div>
+                </div>
+
+                <div class="swiper-slide" data-idx="12" style="--hl: #ffffff;">
+                    <span class="bg-number">13</span>
+                    <div class="card-body">
+                        <i class="fa-solid fa-flag-checkered text-5xl mb-5 text-white drop-shadow-[0_0_18px_rgba(255,255,255,0.4)]"></i>
+                        <h3 class="text-2xl font-bold mb-1">项目总结</h3>
+                        <p class="text-xs font-mono mb-5 text-gray-400">By the Numbers</p>
+                        <ul class="summary-list text-xs text-gray-300">
+                            <li><div class="w-5 h-5 rounded-full bg-accent/20 text-accent flex items-center justify-center border border-accent/50 shrink-0"><i class="fa-solid fa-check text-[10px]"></i></div><span>283 条收藏 · 5 个平台</span></li>
+                            <li><div class="w-5 h-5 rounded-full bg-accent/20 text-accent flex items-center justify-center border border-accent/50 shrink-0"><i class="fa-solid fa-check text-[10px]"></i></div><span>8 个迁移全部向后兼容</span></li>
+                            <li><div class="w-5 h-5 rounded-full bg-accent/20 text-accent flex items-center justify-center border border-accent/50 shrink-0"><i class="fa-solid fa-check text-[10px]"></i></div><span>55 个单元测试全绿</span></li>
+                            <li><div class="w-5 h-5 rounded-full bg-accent/20 text-accent flex items-center justify-center border border-accent/50 shrink-0"><i class="fa-solid fa-check text-[10px]"></i></div><span>安装包仅 5 MB</span></li>
+                            <li><div class="w-5 h-5 rounded-full bg-accent/20 text-accent flex items-center justify-center border border-accent/50 shrink-0"><i class="fa-solid fa-check text-[10px]"></i></div><span>数据零上传，全在本机</span></li>
+                            <li><div class="w-5 h-5 rounded-full bg-white text-black flex items-center justify-center shrink-0"><i class="fa-solid fa-lock text-[10px]"></i></div><span class="text-white font-bold">GitHub Actions 自动发布</span></li>
+                        </ul>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/swiper@11/swiper-bundle.min.js"></script>
+    <script>
+        const contentData = {
+            0: { title: "项目定位", desc: "一款运行在 Windows 桌面的本地优先多平台收藏聚合工具，把散落在 B 站、知乎、CSDN、GitHub、浏览器书签的收藏汇聚进一个本地库。", note: "只存元数据与链接：约 124 字节/条，283 条数据仅 7 MB。" },
+            1: { title: "为什么做", desc: "收藏散落在五个平台各自为政；内容被删、账号被封就没了；想找一篇旧文要挨个平台翻；一旦删除不可恢复。", note: "定位是「索引与入口」，不做离线归档——避开版权与体积爆炸。" },
+            2: { title: "分层架构", desc: "前端 WebView（React 18 + TS）经约 60 个 IPC 命令调用 Rust 后端；后端分为命令层、适配器层、笔记与桥接层；底层接 SQLite、平台 API 与本地 HTTP 桥。", note: "选 Tauri 而非 Electron：复用系统 WebView2，安装包 5 MB（Electron 通常 80 MB 起）。" },
+            3: { title: "多源导入", desc: "B 站（收藏夹/合集/图文）、知乎（收藏夹/单条）、CSDN、GitHub Stars、浏览器书签，任意网页还可通过 Edge 扩展兜底入库。", note: "导入走白名单：只有预览时勾选的条目才入库，避免一次灌入几千条。" },
+            4: { title: "统一收藏库", desc: "网格与列表双视图，标题/简介/作者/分区/标签全字段检索，来源与标签组合筛选（AND / OR），按收藏或发布时间排序，多选批量操作。", note: "上千条用 react-virtuoso 虚拟滚动；封面必须本地化才能显示。" },
+            5: { title: "标签体系", desc: "分类 → 标签 → 绑定三层结构；命名空间隔离「用户自建」与「来源自动带入」的标签，互不污染；支持相似标签合并与拖拽归类。", note: "merge_tags 会自动迁移全部绑定关系，合并后不留孤儿数据。" },
+            6: { title: "Obsidian 联动", desc: "批注生成带 YAML frontmatter 的 Markdown 笔记，用 serde_yaml 安全序列化；正文以 collector 标记划出托管区，只覆盖这一段。", note: "单向推送、不做回读：避免双向同步的静默覆盖风险。" },
+            7: { title: "回收站", desc: "单条、批量、按标签删除全部走软删除，先进回收站；保留期 7 / 15 / 30 天可配置，启动时自动清理超期条目。", note: "硬删除（purge）才真正删库行、删封面文件并级联清理绑定。" },
+            8: { title: "难点一 · 跨源统一与去重", desc: "各平台 ID 体系完全不同，统一为 ExternalItem 中间模型后，用 (source, external_id) 复合唯一键隔离不同来源，写入走 upsert。", note: "重复导入只更新时间戳，不产生重复行，天然幂等。" },
+            9: { title: "难点二 · 封面必须本地化", desc: "Tauri 的 WebView 不继承宿主进程代理，直连 B 站 / 知乎 CDN 必然失败——表现为界面全是空白图。", note: "改由 Rust 侧经系统代理下载到 covers/，前端优先加载本地文件。" },
+            10: { title: "难点三 · Windows 路径陷阱", desc: "canonicalize() 给已存在的目录加 \\\\?\\ 前缀，而首次写入的目标路径没有，前缀比较恒为 false，导致所有导出被误判为越界而拒绝。", note: "改为纯词法规范化，并补 4 个回归测试钉死路径边界。" },
+            11: { title: "难点四 · 发布版启动闪退", desc: "GitHub Actions 的 Windows runner 开启 autocrlf，把迁移文件从 LF 转成 CRLF，与数据库记录的校验值不符，sqlx 启动时直接 panic。", note: "教训：CI 构建成功 ≠ 能运行。此后所有产物必须下载实测。" },
+            12: { title: "总结", desc: "一个库管五个平台的收藏，8.6k 行 Rust + 5.6k 行 TS，55 个测试全绿，打包 5 MB，数据完全留在本机、零上传。", note: "答辩要点：想清楚为什么只存元数据，以及四个坑带来的工程方法论。" }
+        };
+
+        const swiper = new Swiper(".mySwiper", {
+            effect: "coverflow",
+            grabCursor: true,
+            centeredSlides: true,
+            slidesPerView: "auto",
+            spaceBetween: 45,
+            initialSlide: 0,
+            coverflowEffect: { rotate: 32, stretch: 0, depth: 140, modifier: 1, slideShadows: true },
+            keyboard: { enabled: true, onlyInViewport: false },
+            mousewheel: { thresholdDelta: 50, sensitivity: 1 },
+            speed: 600,
+            on: { slideChange: function () { updateSidebar(this); } }
+        });
+
+        const titleEl = document.getElementById('info-title');
+        const descEl = document.getElementById('info-desc');
+        const noteEl = document.getElementById('info-note');
+        const idxEl = document.getElementById('info-index');
+        const infoPanel = document.getElementById('info-panel');
+        const progressBar = document.getElementById('progress-bar');
+
+        let isTechMode = false;
+
+        function currentIndexOf(sw) {
+            const el = sw.slides[sw.activeIndex];
+            return el ? parseInt(el.getAttribute('data-idx'), 10) : 0;
+        }
+
+        function visibleSlides(sw) {
+            return Array.from(sw.slides).filter(s => !s.classList.contains('tech-slide') || isTechMode);
+        }
+
+        function updateSidebar(sw) {
+            const idx = currentIndexOf(sw);
+            const visible = visibleSlides(sw);
+            const pos = visible.findIndex(s => parseInt(s.getAttribute('data-idx'), 10) === idx) + 1;
+
+            renderProgress(visible.length, pos);
+
+            infoPanel.style.opacity = '0';
+            infoPanel.style.transform = 'translateY(10px)';
+            setTimeout(() => {
+                if (contentData[idx]) {
+                    titleEl.innerText = contentData[idx].title;
+                    descEl.innerText = contentData[idx].desc;
+                    noteEl.innerText = contentData[idx].note;
+                    idxEl.innerText = String(pos).padStart(2, '0') + ' / ' + String(visible.length).padStart(2, '0');
+                    const c = sw.slides[sw.activeIndex].style.getPropertyValue('--hl').trim() || '#0A84FF';
+                    titleEl.style.color = c;
+                }
+                infoPanel.style.opacity = '1';
+                infoPanel.style.transform = 'translateY(0)';
+            }, 280);
+        }
+
+        function renderProgress(total, active) {
+            progressBar.innerHTML = '';
+            for (let i = 1; i <= total; i++) {
+                const d = document.createElement('div');
+                d.className = 'progress-dot' + (i === active ? ' active' : '');
+                progressBar.appendChild(d);
+            }
+        }
+
+        updateSidebar(swiper);
+
+        const techSlides = document.querySelectorAll('.tech-slide');
+        const toggleBtn = document.getElementById('mode-toggle');
+        const modeText = document.getElementById('mode-text');
+        const indicator = document.getElementById('mode-indicator');
+        const modeTag = document.getElementById('info-mode');
+
+        toggleBtn.addEventListener('click', () => {
+            isTechMode = !isTechMode;
+
+            if (isTechMode) {
+                modeText.innerText = "切回功能演示模式";
+                indicator.classList.remove('bg-gray-600');
+                indicator.classList.add('bg-purple', 'animate-pulse');
+                toggleBtn.classList.add('border-purple');
+                modeTag.innerText = "技术实现";
+                modeTag.className = "text-[10px] font-mono px-2 py-0.5 rounded bg-purple/20 text-purple";
+
+                techSlides.forEach(s => s.style.display = 'flex');
+                swiper.update();
+                swiper.slideTo(8);
+            } else {
+                modeText.innerText = "切换到技术实现模式";
+                indicator.classList.add('bg-gray-600');
+                indicator.classList.remove('bg-purple', 'animate-pulse');
+                toggleBtn.classList.remove('border-purple');
+                modeTag.innerText = "功能演示";
+                modeTag.className = "text-[10px] font-mono px-2 py-0.5 rounded bg-primary/20 text-primary";
+
+                const idx = currentIndexOf(swiper);
+                const onTech = idx >= 8 && idx <= 11;
+                const hide = () => { techSlides.forEach(s => s.style.display = 'none'); swiper.update(); updateSidebar(swiper); };
+                if (onTech) { swiper.slideTo(7); setTimeout(hide, 600); } else { hide(); }
+            }
+        });
+    </script>
+</body>
+</html>
