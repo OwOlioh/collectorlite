@@ -66,6 +66,7 @@ export default function App() {
             <LibraryPage
               tags={tags}
               refreshToken={libraryVersion}
+              isActive={active === "library"}
               onTagsChanged={refreshTags}
               onTrashChanged={refreshTrashCount}
             />
@@ -74,7 +75,7 @@ export default function App() {
             <ImportPage tagPool={tags} onTagsChanged={refreshTags} />
           </div>
           <div className={`view-panel ${active === "trash" ? "is-active" : ""}`}>
-            <TrashPage onTrashChanged={refreshTrashCount} />
+            <TrashPage onTrashChanged={refreshTrashCount} isActive={active === "trash"} />
           </div>
           <div className={`view-panel ${active === "settings" ? "is-active" : ""}`}>
             <SettingsPage

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { History, RotateCcw, Trash2, Undo2 } from "lucide-react";
 import { api, resolveCoverUrl } from "../lib/api";
 import type { VideoItem } from "../types";
@@ -7,6 +7,8 @@ import { getRetentionDays } from "../lib/retention";
 
 interface TrashPageProps {
   onTrashChanged: () => void;
+  /** 当前是否显示本视图（App 按 active view 传入）。从其他页切回时自动静默刷新。 */
+  isActive?: boolean;
 }
 
 function formatRemaining(deletedAt: number, retentionDays: number, now: number): string {
@@ -21,7 +23,7 @@ function formatRemaining(deletedAt: number, retentionDays: number, now: number):
   return `剩余约 ${minutes} 分钟`;
 }
 
-export function TrashPage({ onTrashChanged }: TrashPageProps) {
+export function TrashPage({ onTrashChanged, isActive = true }: TrashPageProps) {
   const [items, setItems] = useState<VideoItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<number | null>(null);
@@ -38,9 +40,28 @@ export function TrashPage({ onTrashChanged }: TrashPageProps) {
     }
   }, []);
 
+  // 静默刷新：不切 loading 态，避免从其他页面切回时列表闪一下。
+  const reloadSilently = useCallback(async () => {
+    try {
+      setItems(await api.listTrash());
+    } catch {
+      /* 静默失败：保留现状，下次刷新兜底 */
+    }
+  }, []);
+
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 从其他页面切回回收站视图时自动静默刷新（删除/恢复的新状态即时可见）
+  const wasActiveRef = useRef(isActive);
+  useEffect(() => {
+    if (isActive && !wasActiveRef.current) {
+      void reloadSilently();
+      onTrashChanged();
+    }
+    wasActiveRef.current = isActive;
+  }, [isActive, reloadSilently, onTrashChanged]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Math.floor(Date.now() / 1000)), 30000);

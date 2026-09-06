@@ -3,6 +3,7 @@ import { Check, ChevronLeft, ChevronRight, LoaderCircle, RotateCcw, Trash2, Undo
 import type { ImportPreview, ImportResult, ItemTagAssignment, Tag as AppTag, TagInput, TagNamespace, VideoItem } from "../../types";
 import { TagPoolInput } from "../TagPoolInput";
 import { api } from "../../lib/api";
+import { authorProfileUrl } from "../../lib/format";
 import { useToast } from "../Toast";
 
 interface PerVideoTagState {
@@ -308,12 +309,52 @@ export function TagEditor({ preview, tagPool, onTagsChanged, onBack, onExecute, 
                 </button>
               </div>
               <div className="video-tag-summary">
-                <div className="preview-cover">
+                <div
+                  className="preview-cover preview-cover-link"
+                  role="button"
+                  tabIndex={0}
+                  title={item.sourceUrl ? "在浏览器打开原页面" : undefined}
+                  onClick={() => {
+                    if (item.sourceUrl) void api.openUrl(item.sourceUrl);
+                  }}
+                  onKeyDown={(event) => {
+                    if (item.sourceUrl && (event.key === "Enter" || event.key === " ")) {
+                      event.preventDefault();
+                      void api.openUrl(item.sourceUrl);
+                    }
+                  }}
+                >
                   {item.coverUrl ? <img src={item.coverUrl} alt="" /> : <span>无封面</span>}
                 </div>
                 <div>
-                  <strong>{item.title}</strong>
-                  <span>{item.authorName} · {item.partitionName || "未分区"}</span>
+                  <button
+                    type="button"
+                    className="video-title preview-title-link"
+                    title={item.sourceUrl ? "在浏览器打开原页面" : undefined}
+                    onClick={() => {
+                      if (item.sourceUrl) void api.openUrl(item.sourceUrl);
+                    }}
+                  >
+                    {item.title}
+                  </button>
+                  <span className="preview-meta-line">
+                    {authorProfileUrl(item.source, item.authorId) && item.authorName ? (
+                      <button
+                        type="button"
+                        className="author-link"
+                        title="在浏览器打开作者主页"
+                        onClick={() => {
+                          const authorUrl = authorProfileUrl(item.source, item.authorId);
+                          if (authorUrl) void api.openUrl(authorUrl);
+                        }}
+                      >
+                        {item.authorName}
+                      </button>
+                    ) : (
+                      <span>{item.authorName || "未知作者"}</span>
+                    )}
+                    {item.partitionName ? ` · ${item.partitionName}` : ""}
+                  </span>
                 </div>
               </div>
               <div className="video-tag-fields">
