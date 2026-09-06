@@ -43,7 +43,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: "收藏管理器 ${{ github.ref_name }}"
+          releaseName: "collectorlite ${{ github.ref_name }}"
           releaseBody: >-
             Windows 安装包：NSIS 安装器（x64-setup.exe）与免安装 zip 便携版。
             安装包未做代码签名，首次运行若提示「未知发布者」，请点「更多信息」→「仍要运行」。
@@ -57,7 +57,7 @@ jobs:
         shell: pwsh
         run: |
           $ver = "${{ github.ref_name }}".TrimStart('v')
-          $zip = "收藏管理器_${ver}_x64.zip"
+          $zip = "collectorlite_${ver}_x64.zip"
           Compress-Archive -Path "src-tauri/target/release/bili-collector.exe" -DestinationPath $zip -Force
           "PORTABLE_ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Upload portable zip
