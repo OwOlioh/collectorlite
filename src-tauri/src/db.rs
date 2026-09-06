@@ -796,6 +796,13 @@ pub async fn merge_tags(
         return Err(AppError::InvalidInput("不能合并到同一个标签".into()));
     }
     let mut tx = pool.begin().await?;
+    // 先收集源标签挂过的 item（合并后这些 item 的标签集合变了，FTS 需要重建）
+    let affected: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT item_id FROM item_tags WHERE tag_id = ?",
+    )
+    .bind(source_tag_id)
+    .fetch_all(&mut *tx)
+    .await?;
     sqlx::query(
         "INSERT OR IGNORE INTO item_tags (item_id, tag_id, created_at)
          SELECT item_id, ?, ? FROM item_tags WHERE tag_id = ?",
@@ -814,6 +821,10 @@ pub async fn merge_tags(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    // 合并改变了受影响 item 的标签集合，逐个重建 FTS 索引（items_fts 无触发器）
+    for item_id in affected {
+        rebuild_item_fts(pool, item_id).await?;
+    }
     Ok(())
 }
 
@@ -2455,5 +2466,79 @@ mod tests {
             .expect("导出应有 A");
         assert!(exported_a.starred, "导出应携带 starred=true");
         assert!(exported_a.starred_at.is_some(), "导出应携带 starred_at");
+    }
+
+    /// 标签合并：源标签视频并入目标（去重），源标签被删除。
+    #[tokio::test]
+    async fn merge_tags_moves_items_and_removes_source() {
+        use super::{attach_tag, get_or_create_tag, merge_tags, SqlitePoolOptions};
+        use crate::models::TagInput;
+
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("内存库连接失败");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("迁移失败");
+
+        let input_a = TagInput {
+            id: None,
+            namespace: "manual".into(),
+            name: "a".to_string(),
+            color: None,
+            description: None,
+            category_id: None,
+        };
+        let input_b = TagInput {
+            id: None,
+            namespace: "manual".into(),
+            name: "b".to_string(),
+            color: None,
+            description: None,
+            category_id: None,
+        };
+        let tag_a = get_or_create_tag(&pool, &input_a).await.expect("建标签失败");
+        let tag_b = get_or_create_tag(&pool, &input_b).await.expect("建标签失败");
+
+        // item1 同时挂 a、b；item2 只挂 a
+        let mut item_ids = Vec::new();
+        for i in 1..=2i64 {
+            let item_id = sqlx::query_scalar::<_, i64>(
+                "INSERT INTO items (source, external_id, source_url, title, created_at, updated_at) \
+                 VALUES ('bilibili', ?, ?, ?, 1, 1) RETURNING id",
+            )
+            .bind(format!("BV{i:06}"))
+            .bind(format!("https://example.com/{i}"))
+            .bind(format!("标题 {i}"))
+            .fetch_one(&pool)
+            .await
+            .expect("插 item 失败");
+            item_ids.push(item_id);
+        }
+        attach_tag(&pool, item_ids[0], tag_a).await.expect("挂 a 失败");
+        attach_tag(&pool, item_ids[0], tag_b).await.expect("挂 b 失败");
+        attach_tag(&pool, item_ids[1], tag_a).await.expect("挂 a 失败");
+
+        merge_tags(&pool, tag_a, tag_b).await.expect("合并失败");
+
+        // 源标签 a 已删除
+        let a_exists: Option<i64> = sqlx::query_scalar("SELECT id FROM tags WHERE id = ?")
+            .bind(tag_a)
+            .fetch_optional(&pool)
+            .await
+            .expect("查询失败");
+        assert!(a_exists.is_none(), "源标签应被删除");
+
+        // 目标 b 名下应有 2 条（item1 原本就有 b，去重后仍只一条）
+        let b_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM item_tags WHERE tag_id = ?",
+        )
+        .bind(tag_b)
+        .fetch_one(&pool)
+        .await
+        .expect("查询失败");
+        assert_eq!(b_count, 2, "合并后 b 名下应有 2 条视频");
     }
 }

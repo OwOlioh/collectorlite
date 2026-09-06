@@ -3386,3 +3386,63 @@ textarea {
   font-size: 11px;
   color: var(--text);
 }
+
+/* 标签合并弹窗 */
+.merge-tag-modal {
+  width: min(420px, calc(100vw - 48px));
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+}
+
+.merge-tag-hint {
+  margin: 10px 0 14px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.merge-target-list {
+  display: grid;
+  gap: 4px;
+  max-height: 300px;
+  overflow: auto;
+  margin-top: 6px;
+}
+
+.merge-target-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color var(--transition-base), background var(--transition-base);
+}
+
+.merge-target-item:hover {
+  border-color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.merge-target-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.merge-target-count {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+}

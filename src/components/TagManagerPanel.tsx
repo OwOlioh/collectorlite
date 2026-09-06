@@ -38,6 +38,7 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
   } | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editingName, setEditingName] = useState("");
+  const [mergingTag, setMergingTag] = useState<Tag | null>(null);
   const [renamingCategoryId, setRenamingCategoryId] = useState<number | null>(null);
   const [renamingCategoryName, setRenamingCategoryName] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -460,6 +461,19 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
     await onTagsChanged?.();
   };
 
+  // 合并标签：把 source 名下的收藏全部并入 target，随后删除 source
+  const mergeTagInto = async (source: Tag, target: Tag) => {
+    setMergingTag(null);
+    try {
+      await api.mergeTags(source.id, target.id);
+      setExpandedCategoryId((current) => (current === source.id ? null : current));
+      await onTagsChanged?.();
+      toast("success", `已将「${source.name}」合并到「${target.name}」`);
+    } catch (error) {
+      toast("error", `合并失败：${String(error)}`);
+    }
+  };
+
   const uncategorized = tags.filter((tag) => !tag.categoryId);
   const activeCategory = categories.find((category) => category.id === expandedCategoryId) || null;
   const categoryById = new Map(categories.map((category) => [category.id, category]));
@@ -526,6 +540,14 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
           {(tag.categoryId ? categoryById.get(tag.categoryId)?.name : null) || "未分类"}
         </span>
       )}
+      <button
+        className="ghost-button small"
+        type="button"
+        title="把该标签合并到另一个标签（两者视频并入目标名下）"
+        onClick={() => setMergingTag(tag)}
+      >
+        合并
+      </button>
       <button
         className="ghost-button small"
         type="button"
@@ -781,6 +803,56 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
           </div>
         </section>
       </div>
+
+      {mergingTag && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setMergingTag(null)}>
+          <div
+            className="merge-tag-modal"
+            role="dialog"
+            aria-modal="true"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="modal-head">
+              <strong>合并标签</strong>
+              <button className="icon-button" type="button" onClick={() => setMergingTag(null)}>
+                <X size={16} />
+              </button>
+            </div>
+            <p className="merge-tag-hint">
+              将「{mergingTag.name}」（{mergingTag.count ?? 0} 条收藏）并入另一个标签：
+              两个标签下的视频将合并到目标标签名下，「{mergingTag.name}」随后被删除。
+            </p>
+            <label className="field-label">合并到</label>
+            <div className="merge-target-list">
+              {tags
+                .filter((candidate) => candidate.id !== mergingTag.id)
+                .map((candidate) => (
+                  <button
+                    type="button"
+                    className="merge-target-item"
+                    key={candidate.id}
+                    onClick={() => void mergeTagInto(mergingTag, candidate)}
+                  >
+                    <span
+                      className="category-color"
+                      style={{
+                        background:
+                          (candidate.categoryId
+                            ? categoryById.get(candidate.categoryId)?.color
+                            : null) || "#64748b"
+                      }}
+                    />
+                    <span className="merge-target-name">{candidate.name}</span>
+                    <span className="merge-target-count">{candidate.count ?? 0}</span>
+                  </button>
+                ))}
+            </div>
+            {tags.length <= 1 && (
+              <p className="muted">标签池里没有其它标签可合并。</p>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
