@@ -37,6 +37,7 @@ const initialFilters: ItemFilters = {
   query: "",
   tagIds: [],
   tagMode: "and",
+  strict: false,
   sort: "favorite_desc",
   sources: []
 };
@@ -441,6 +442,27 @@ export function LibraryPage({
                 placeholder="输入标签名称进行检索筛选"
               />
             </div>
+
+            <label
+              className={`checkbox-line strict-match-line${
+                filters.tagIds.length === 0 ? " is-disabled" : ""
+              }`}
+            >
+              <input
+                type="checkbox"
+                checked={filters.strict === true}
+                disabled={filters.tagIds.length === 0}
+                onChange={(event) =>
+                  setFilters((current) => ({ ...current, strict: event.target.checked }))
+                }
+              />
+              <span>
+                严格匹配（仅含所选标签）
+                <small>
+                  只返回标签集合恰好等于所选的收藏。例如只选了「a」，就排除同时含「a、b」的内容。
+                </small>
+              </span>
+            </label>
 
             {selectedFilterTags.length === 1 && (
               <button

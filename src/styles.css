@@ -1850,6 +1850,20 @@ button,
   font-weight: 400;
 }
 
+.strict-match-line {
+  margin-top: 2px;
+}
+
+.strict-match-line.is-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.strict-match-line input {
+  accent-color: var(--blue);
+  cursor: inherit;
+}
+
 .warning-line {
   margin-top: 14px;
   padding: 12px;

@@ -1113,7 +1113,32 @@ pub async fn search_items(
     }
 
     if !filters.tag_ids.is_empty() {
-        if filters.tag_mode == "or" {
+        if filters.strict {
+            // 严格匹配：item 的标签集合「恰好等于」输入的 tag_ids。
+            // (1) 必须包含所有输入标签：按 item_id 分组后，命中的不同标签数 == 输入标签数。
+            // (2) 不能包含任何输入之外的标签：排除掉那些挂了「非输入标签」的 item。
+            // 两个条件合起来即「标签集合完全相等」——例如输入 {a} 时过滤掉同时含 a、b 的 item。
+            let n = filters.tag_ids.len() as i64;
+            query.push(" AND i.id IN (SELECT item_id FROM item_tags WHERE tag_id IN (");
+            {
+                let mut separated = query.separated(", ");
+                for tag_id in &filters.tag_ids {
+                    separated.push_bind(tag_id);
+                }
+            }
+            query
+                .push(") GROUP BY item_id HAVING COUNT(DISTINCT tag_id) = ")
+                .push_bind(n)
+                .push(")");
+            query.push(" AND i.id NOT IN (SELECT item_id FROM item_tags WHERE tag_id NOT IN (");
+            {
+                let mut separated = query.separated(", ");
+                for tag_id in &filters.tag_ids {
+                    separated.push_bind(tag_id);
+                }
+            }
+            query.push("))");
+        } else if filters.tag_mode == "or" {
             query.push(" AND i.id IN (SELECT item_id FROM item_tags WHERE tag_id IN (");
             let mut separated = query.separated(", ");
             for tag_id in &filters.tag_ids {
@@ -1847,6 +1872,7 @@ mod tests {
             query: None,
             tag_ids: vec![],
             tag_mode: "and".to_string(),
+            strict: false,
             sort: "favorite_desc".to_string(),
             sources: vec![],
             trash: None,
@@ -1942,6 +1968,7 @@ mod tests {
             query: None,
             tag_ids: vec![],
             tag_mode: "and".to_string(),
+            strict: false,
             sort: "favorite_desc".to_string(),
             sources: vec![],
             trash: None,
@@ -1962,6 +1989,116 @@ mod tests {
         eprintln!(
             "[bench] search_items({n} 条, 无 LIMIT, 全局 count + 批量水合) 总耗时: {:.2?}",
             total
+        );
+    }
+
+    /// 辅助：按 strict / tag_ids 查询，返回按 id 升序排列的结果集。
+    async fn run_strict_search(pool: &sqlx::SqlitePool, strict: bool, ids: Vec<i64>) -> Vec<i64> {
+        use super::search_items;
+        use crate::models::ItemFilters;
+
+        let f = ItemFilters {
+            query: None,
+            tag_ids: ids,
+            tag_mode: "and".to_string(),
+            strict,
+            sort: "favorite_desc".to_string(),
+            sources: vec![],
+            trash: None,
+        };
+        let list = search_items(pool, &f).await.expect("search_items 失败");
+        let mut got: Vec<i64> = list.iter().map(|v| v.id).collect();
+        got.sort();
+        got
+    }
+
+    /// 严格匹配：item 的标签集合必须「恰好等于」输入的 tag_ids。
+    /// 输入 {a} 时只返回仅含 a 的 item，过滤掉同时含 a、b 的 item；
+    /// 关闭 strict（and 模式）时则返回含 a 的所有 item。
+    #[tokio::test]
+    async fn strict_tag_match_filters_supersets() {
+        use super::SqlitePoolOptions;
+
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("内存库连接失败");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("迁移失败");
+
+        // 三个标签 a / b / c
+        let mut tag_ids: Vec<i64> = Vec::new();
+        for name in ["a", "b", "c"] {
+            sqlx::query(
+                "INSERT INTO tags (namespace, name, normalized, created_at) VALUES ('user', ?, ?, 1)",
+            )
+            .bind(name)
+            .bind(name)
+            .execute(&pool)
+            .await
+            .expect("插标签失败");
+            tag_ids.push(tag_ids.len() as i64 + 1);
+        }
+        let [a, b, c] = [tag_ids[0], tag_ids[1], tag_ids[2]];
+
+        // item1: 仅 a；item2: a + b；item3: 仅 b；item4: a + b + c
+        let cases: &[(i64, &[i64])] = &[
+            (1, &[a]),
+            (2, &[a, b]),
+            (3, &[b]),
+            (4, &[a, b, c]),
+        ];
+        let mut tx = pool.begin().await.expect("开事务失败");
+        for (id, tgs) in cases {
+            sqlx::query(
+                "INSERT INTO items (id, source, external_id, source_url, title, created_at, updated_at, favorite_time) \
+                 VALUES (?, 'bilibili', ?, ?, ?, 1, 1, 1)",
+            )
+            .bind(id)
+            .bind(format!("BV{id:06}"))
+            .bind(format!("https://example.com/{id}"))
+            .bind(format!("标题 {id}"))
+            .execute(&mut *tx)
+            .await
+            .expect("插 item 失败");
+            for t in *tgs {
+                sqlx::query("INSERT INTO item_tags (item_id, tag_id, created_at) VALUES (?, ?, 1)")
+                    .bind(id)
+                    .bind(t)
+                    .execute(&mut *tx)
+                    .await
+                    .expect("插 item_tags 失败");
+            }
+        }
+        tx.commit().await.expect("提交失败");
+
+        // 查询走模块级 helper run_strict_search（闭包捕获 &pool 会引入生命周期错误，故改为顶层 async fn）
+
+        // 输入 {a} 严格：仅 item1（只含 a），排除 item2(a,b)、item4(a,b,c)
+        assert_eq!(
+            run_strict_search(&pool, true, vec![a]).await,
+            vec![1],
+            "严格「a」应只返回 item1"
+        );
+        // 输入 {a} 非严格(and)：含 a 的所有 item → 1,2,4
+        assert_eq!(
+            run_strict_search(&pool, false, vec![a]).await,
+            vec![1, 2, 4],
+            "非严格「a」应返回 1,2,4"
+        );
+        // 输入 {a,b} 严格：仅 item2（恰好 a+b），排除 item4(a+b+c)
+        assert_eq!(
+            run_strict_search(&pool, true, vec![a, b]).await,
+            vec![2],
+            "严格「a、b」应只返回 item2"
+        );
+        // 输入 {b} 严格：仅 item3（只含 b）
+        assert_eq!(
+            run_strict_search(&pool, true, vec![b]).await,
+            vec![3],
+            "严格「b」应只返回 item3"
         );
     }
 }

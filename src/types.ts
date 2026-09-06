@@ -139,6 +139,8 @@ export interface ItemFilters {
   query?: string;
   tagIds: number[];
   tagMode: "and" | "or";
+  /** 严格匹配：item 的标签集合必须恰好等于所选标签（既包含所选、又不含其他）。与 tagMode 互斥，开启后忽略 and/or。 */
+  strict?: boolean;
   sort: "favorite_desc" | "published_desc" | "duration_desc" | "title_asc" | "imported_desc";
   sources: string[];
   trash?: boolean;

@@ -209,6 +209,10 @@ pub struct ItemFilters {
     pub query: Option<String>,
     pub tag_ids: Vec<i64>,
     pub tag_mode: String,
+    /// 严格匹配：item 的标签集合必须「恰好等于」输入的 tag_ids（既包含所有输入标签、又不含任何输入之外的标签）。
+    /// 与 tag_mode 互斥——开启后忽略 and/or，仅按精确集合筛选。默认关闭。
+    #[serde(default)]
+    pub strict: bool,
     pub sort: String,
     #[serde(default)]
     pub sources: Vec<String>,
