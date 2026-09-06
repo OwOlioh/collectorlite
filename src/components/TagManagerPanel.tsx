@@ -3,7 +3,9 @@ import {
   ChevronDown,
   ChevronRight,
   FolderPlus,
+  GitMerge,
   GripVertical,
+  Layers,
   Pencil,
   Save,
   Search,
@@ -17,6 +19,17 @@ import { TagPoolInput } from "./TagPoolInput";
 import { useToast } from "./Toast";
 
 const categoryColors = ["#64748b", "#0f766e", "#b45309", "#7c3aed", "#be123c"];
+// 分类编辑调色板（与标签颜色选择一致，另支持原生取色器自定义任意颜色）
+const categoryColorOptions = [
+  "#3b82f6",
+  "#ef4444",
+  "#f97316",
+  "#10b981",
+  "#8b5cf6",
+  "#0891b2",
+  "#db2777",
+  "#ca8a04"
+];
 
 interface TagManagerPanelProps {
   tags: Tag[];
@@ -28,6 +41,12 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
   const { toast } = useToast();
   const [newCategory, setNewCategory] = useState("");
   const [expandedCategoryId, setExpandedCategoryId] = useState<number | null>(null);
+  // 分类多选（Ctrl+左键）与右键合并菜单
+  const [multiSelectedCategoryIds, setMultiSelectedCategoryIds] = useState<number[]>([]);
+  const [categoryContextMenu, setCategoryContextMenu] = useState<{
+    x: number;
+    y: number;
+  } | null>(null);
   const [draggedTagId, setDraggedTagId] = useState<number | null>(null);
   const [dragOverCategoryId, setDragOverCategoryId] = useState<number | null>(null);
   const [dragOverUncategorized, setDragOverUncategorized] = useState(false);
@@ -38,9 +57,12 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
   } | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editingName, setEditingName] = useState("");
-  const [mergingTag, setMergingTag] = useState<Tag | null>(null);
+  const [mergeSource, setMergeSource] = useState<Tag | null>(null);
+  const [mergeTargetName, setMergeTargetName] = useState("");
+  const [merging, setMerging] = useState(false);
   const [renamingCategoryId, setRenamingCategoryId] = useState<number | null>(null);
   const [renamingCategoryName, setRenamingCategoryName] = useState("");
+  const [renamingCategoryColor, setRenamingCategoryColor] = useState<string>(categoryColorOptions[0]);
   const [searchQuery, setSearchQuery] = useState("");
   const suppressCategoryClick = useRef(false);
   const draggedTagRef = useRef<number | null>(null);
@@ -112,6 +134,7 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
   const beginRenameCategory = (category: TagCategory) => {
     setRenamingCategoryId(category.id);
     setRenamingCategoryName(category.name);
+    setRenamingCategoryColor(category.color ?? categoryColorOptions[0]);
   };
 
   const renameCategory = async (category: TagCategory) => {
@@ -119,7 +142,7 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
     await api.renameTagCategory(
       category.id,
       renamingCategoryName.trim(),
-      category.color
+      renamingCategoryColor
     );
     setRenamingCategoryId(null);
     setRenamingCategoryName("");
@@ -129,6 +152,64 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
   const assignCategory = async (tagId: number, categoryId: number | null) => {
     await api.assignTagCategory(tagId, categoryId);
     await onTagsChanged?.();
+  };
+
+  // ---- 分类多选（Ctrl+左键）与右键「合并为组」----
+  const toggleCategoryMultiSelect = (categoryId: number) => {
+    setMultiSelectedCategoryIds((current) =>
+      current.includes(categoryId)
+        ? current.filter((id) => id !== categoryId)
+        : [...current, categoryId]
+    );
+  };
+
+  const clearMultiSelect = () => setMultiSelectedCategoryIds([]);
+
+  const openCategoryContextMenu = (
+    category: TagCategory,
+    event: React.MouseEvent<HTMLElement>
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    // 右键落在未选中行上：把它设为唯一选中；已在集合中则保持多选
+    if (!multiSelectedCategoryIds.includes(category.id)) {
+      setMultiSelectedCategoryIds([category.id]);
+    }
+    setCategoryContextMenu({ x: event.clientX, y: event.clientY });
+  };
+
+  // 任意点击 / Esc 关闭右键菜单
+  useEffect(() => {
+    if (!categoryContextMenu) return;
+    const close = () => setCategoryContextMenu(null);
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("blur", close);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("blur", close);
+    };
+  }, [categoryContextMenu]);
+
+  const mergeSelectedIntoGroup = async () => {
+    const ids = multiSelectedCategoryIds;
+    setCategoryContextMenu(null);
+    if (ids.length < 2) {
+      toast("info", "按住 Ctrl 多选至少 2 个分类后再合并为组");
+      return;
+    }
+    setMultiSelectedCategoryIds([]);
+    try {
+      await api.groupTagCategories(ids);
+      await refreshCategories();
+      toast("success", `已把 ${ids.length} 个分类合并为组（颜色已统一为最上层分类颜色）`);
+    } catch (error) {
+      toast("error", `合并分组失败：${String(error)}`);
+    }
   };
 
   // ---- 分类顺序拖拽（pointer 自实现，与标签拖拽同构）。
@@ -240,20 +321,38 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
     addCategoryPointerListeners();
   };
 
+  // 分类组作为连续块：返回 anchor 所在块的 [start, end]（未分组 = 单行块）
+  const blockRange = (list: TagCategory[], anchorId: number) => {
+    const index = list.findIndex((category) => category.id === anchorId);
+    if (index < 0) return null;
+    const gid = list[index].groupId ?? null;
+    if (gid === null) return { start: index, end: index };
+    let start = index;
+    while (start > 0 && (list[start - 1].groupId ?? null) === gid) start--;
+    let end = index;
+    while (end + 1 < list.length && (list[end + 1].groupId ?? null) === gid) end++;
+    return { start, end };
+  };
+
   const commitCategoryReorder = async (
     draggedId: number,
     targetId: number,
     before: boolean
   ) => {
     if (draggedId === targetId) return;
+    const src = blockRange(categories, draggedId);
+    const tgt = blockRange(categories, targetId);
+    if (!src || !tgt) return;
+    // 拖动块与目标块重叠（目标在组内）时视为无效
+    if (src.start <= tgt.end && tgt.start <= src.end) return;
     const next = [...categories];
-    const from = next.findIndex((category) => category.id === draggedId);
-    if (from < 0) return;
-    const [moved] = next.splice(from, 1);
-    const targetIndex = next.findIndex((category) => category.id === targetId);
+    const srcBlock = next.splice(src.start, src.end - src.start + 1);
+    const tgtBlockLen = tgt.end - tgt.start + 1;
+    const targetHead = categories[tgt.start].id;
+    const targetIndex = next.findIndex((category) => category.id === targetHead);
     if (targetIndex < 0) return;
-    next.splice(before ? targetIndex : targetIndex + 1, 0, moved);
-    setCategories(next); // 乐观更新，松开即见新顺序
+    next.splice(before ? targetIndex : targetIndex + tgtBlockLen, 0, ...srcBlock);
+    setCategories(next); // 乐观更新，松开即见新顺序（整组一起移动）
     try {
       await api.reorderTagCategories(next.map((category) => category.id));
     } catch (error) {
@@ -461,16 +560,37 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
     await onTagsChanged?.();
   };
 
-  // 合并标签：把 source 名下的收藏全部并入 target，随后删除 source
-  const mergeTagInto = async (source: Tag, target: Tag) => {
-    setMergingTag(null);
+  // 执行合并：源标签视频并入目标；目标名匹配池中已有标签则并入之，否则自动生成新标签
+  const executeMerge = async () => {
+    if (!mergeSource) {
+      toast("info", "请先选择要合并的源标签");
+      return;
+    }
+    const name = mergeTargetName.trim();
+    if (!name) {
+      toast("info", "请输入合并后的目标标签名");
+      return;
+    }
+    if (mergeSource.name.toLowerCase() === name.toLowerCase()) {
+      toast("info", "目标标签不能与源标签同名");
+      return;
+    }
+    if (merging) return;
+    setMerging(true);
     try {
-      await api.mergeTags(source.id, target.id);
-      setExpandedCategoryId((current) => (current === source.id ? null : current));
+      const existing = tags.find((tag) => tag.name.toLowerCase() === name.toLowerCase());
+      const target =
+        existing ?? (await api.upsertTag({ namespace: "manual", name }));
+      await api.mergeTags(mergeSource.id, target.id);
+      setMergeSource(null);
+      setMergeTargetName("");
+      setExpandedCategoryId((current) => (current === mergeSource.id ? null : current));
       await onTagsChanged?.();
-      toast("success", `已将「${source.name}」合并到「${target.name}」`);
+      toast("success", `已将「${mergeSource.name}」合并到「${target.name}」`);
     } catch (error) {
       toast("error", `合并失败：${String(error)}`);
+    } finally {
+      setMerging(false);
     }
   };
 
@@ -543,14 +663,6 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
       <button
         className="ghost-button small"
         type="button"
-        title="把该标签合并到另一个标签（两者视频并入目标名下）"
-        onClick={() => setMergingTag(tag)}
-      >
-        合并
-      </button>
-      <button
-        className="ghost-button small"
-        type="button"
         onClick={() => {
           setEditingId(tag.id);
           setEditingName(tag.name);
@@ -611,6 +723,7 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
               }`}
               onClick={() => {
                 if (suppressCategoryClick.current) return;
+                if (multiSelectedCategoryIds.length > 0) clearMultiSelect();
                 clearSearch();
                 setExpandedCategoryId(null);
               }}
@@ -628,6 +741,7 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
             {categories.map((category) => {
               const categoryTags = tags.filter((tag) => tag.categoryId === category.id);
               const expanded = expandedCategoryId === category.id;
+              const multiSelected = multiSelectedCategoryIds.includes(category.id);
               return (
                 <div
                   role="button"
@@ -635,8 +749,10 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
                   data-drop-target="category"
                   data-category-id={category.id}
                   className={`category-accordion-item ${expanded ? "is-active" : ""} ${
-                    dragOverCategoryId === category.id ? "is-drag-over" : ""
-                  } ${draggedCategoryId === category.id ? "is-sort-source" : ""} ${
+                    multiSelected ? "is-multi-selected" : ""
+                  } ${dragOverCategoryId === category.id ? "is-drag-over" : ""} ${
+                    draggedCategoryId === category.id ? "is-sort-source" : ""
+                  } ${
                     categorySortIndicator?.id === category.id
                       ? categorySortIndicator.before
                         ? "is-sort-before"
@@ -644,8 +760,16 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
                       : ""
                   }`}
                   key={category.id}
-                  onClick={() => {
+                  onClick={(event) => {
                     if (suppressCategoryClick.current) return;
+                    // Ctrl / Cmd + 左键：多选切换（不改变展开），用于右键合并为组
+                    if (event.ctrlKey || event.metaKey) {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      toggleCategoryMultiSelect(category.id);
+                      return;
+                    }
+                    if (multiSelectedCategoryIds.length > 0) clearMultiSelect();
                     clearSearch();
                     setExpandedCategoryId(expanded ? null : category.id);
                   }}
@@ -655,6 +779,7 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
                       setExpandedCategoryId(expanded ? null : category.id);
                     }
                   }}
+                  onContextMenu={(event) => openCategoryContextMenu(category, event)}
                   onPointerDown={(event) => beginCategoryPointerDrag(category.id, event)}
                   title="拖动调整分类顺序"
                 >
@@ -665,6 +790,14 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
                   />
                   <span className="category-accordion-name">{category.name}</span>
                   <span className="category-count">{categoryTags.length}</span>
+                  {category.groupId != null && (
+                    <span
+                      className="category-group-mark"
+                      title="已分组（拖动会移动整组；改色会整组同步）"
+                    >
+                      <Layers size={12} />
+                    </span>
+                  )}
                   <span
                     className="category-drag-handle"
                     title="拖动调整分类顺序"
@@ -711,41 +844,112 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
             )}
           </label>
 
+          {/* 独立合并操作行：源标签检索 + 目标命名 + 执行 */}
+          <div className="tag-merge-bar">
+            <TagPoolInput
+              pool={tags}
+              selected={mergeSource ? [mergeSource] : []}
+              single
+              onAdd={(tag) => setMergeSource(tag)}
+              onRemove={() => setMergeSource(null)}
+              onCreate={() => undefined}
+              placeholder="合并：检索或选择源标签"
+            />
+            <input
+              className="merge-target-name-input"
+              value={mergeTargetName}
+              onChange={(event) => setMergeTargetName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void executeMerge();
+                }
+              }}
+              placeholder="目标标签名（不存在将自动新建）"
+            />
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={merging || !mergeSource || !mergeTargetName.trim()}
+              onClick={() => void executeMerge()}
+            >
+              {merging ? "合并中..." : "合并"}
+            </button>
+          </div>
+          {mergeSource && (
+            <p className="merge-bar-hint">
+              将把「{mergeSource.name}」（{mergeSource.count ?? 0} 条收藏）合并到：
+              {mergeTargetName.trim()
+                ? tags.some(
+                    (tag) =>
+                      tag.name.toLowerCase() === mergeTargetName.trim().toLowerCase()
+                  )
+                  ? `已有标签「${mergeTargetName.trim()}」`
+                  : `新标签「${mergeTargetName.trim()}」（自动创建）`
+                : "（请输入目标标签名）"}
+            </p>
+          )}
+
           <div className="category-detail-head">
             <div>
               {activeCategory && renamingCategoryId === activeCategory.id && !isSearching ? (
-                <div className="category-rename-line">
-                  <input
-                    autoFocus
-                    value={renamingCategoryName}
-                    onChange={(event) => setRenamingCategoryName(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") void renameCategory(activeCategory);
-                      if (event.key === "Escape") {
+                <div className="category-rename-panel">
+                  <div className="category-rename-line">
+                    <input
+                      autoFocus
+                      value={renamingCategoryName}
+                      onChange={(event) => setRenamingCategoryName(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") void renameCategory(activeCategory);
+                        if (event.key === "Escape") {
+                          setRenamingCategoryId(null);
+                          setRenamingCategoryName("");
+                        }
+                      }}
+                    />
+                    <button
+                      className="icon-button"
+                      type="button"
+                      onClick={() => renameCategory(activeCategory)}
+                      title="保存分类名称与颜色"
+                    >
+                      <Save size={16} />
+                    </button>
+                    <button
+                      className="icon-button"
+                      type="button"
+                      onClick={() => {
                         setRenamingCategoryId(null);
                         setRenamingCategoryName("");
-                      }
-                    }}
-                  />
-                  <button
-                    className="icon-button"
-                    type="button"
-                    onClick={() => renameCategory(activeCategory)}
-                    title="保存分类名称"
-                  >
-                    <Save size={16} />
-                  </button>
-                  <button
-                    className="icon-button"
-                    type="button"
-                    onClick={() => {
-                      setRenamingCategoryId(null);
-                      setRenamingCategoryName("");
-                    }}
-                    title="取消重命名"
-                  >
-                    <X size={16} />
-                  </button>
+                      }}
+                      title="取消重命名"
+                    >
+                      <X size={16} />
+                    </button>
+                  </div>
+                  <div className="color-picker category-color-picker">
+                    {categoryColorOptions.map((item) => (
+                      <button
+                        type="button"
+                        key={item}
+                        className={renamingCategoryColor === item ? "is-active" : ""}
+                        style={{ background: item }}
+                        onClick={() => setRenamingCategoryColor(item)}
+                        aria-label={`选择分类颜色 ${item}`}
+                      />
+                    ))}
+                    <label
+                      className="category-color-custom"
+                      title="自定义任意颜色"
+                      aria-label="自定义分类颜色"
+                    >
+                      <input
+                        type="color"
+                        value={renamingCategoryColor}
+                        onChange={(event) => setRenamingCategoryColor(event.target.value)}
+                      />
+                    </label>
+                  </div>
                 </div>
               ) : (
                 <h2>{isSearching ? "检索结果" : activeCategory?.name || "未分类标签"}</h2>
@@ -804,53 +1008,29 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
         </section>
       </div>
 
-      {mergingTag && (
-        <div className="modal-backdrop" role="presentation" onMouseDown={() => setMergingTag(null)}>
-          <div
-            className="merge-tag-modal"
-            role="dialog"
-            aria-modal="true"
-            onMouseDown={(event) => event.stopPropagation()}
+      {categoryContextMenu && (
+        <div
+          className="category-context-menu"
+          style={{ left: categoryContextMenu.x, top: categoryContextMenu.y }}
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            className="category-context-item"
+            disabled={multiSelectedCategoryIds.length < 2}
+            onClick={() => void mergeSelectedIntoGroup()}
+            title={
+              multiSelectedCategoryIds.length < 2
+                ? "按住 Ctrl 逐个点击分类进行多选后再合并"
+                : undefined
+            }
           >
-            <div className="modal-head">
-              <strong>合并标签</strong>
-              <button className="icon-button" type="button" onClick={() => setMergingTag(null)}>
-                <X size={16} />
-              </button>
-            </div>
-            <p className="merge-tag-hint">
-              将「{mergingTag.name}」（{mergingTag.count ?? 0} 条收藏）并入另一个标签：
-              两个标签下的视频将合并到目标标签名下，「{mergingTag.name}」随后被删除。
-            </p>
-            <label className="field-label">合并到</label>
-            <div className="merge-target-list">
-              {tags
-                .filter((candidate) => candidate.id !== mergingTag.id)
-                .map((candidate) => (
-                  <button
-                    type="button"
-                    className="merge-target-item"
-                    key={candidate.id}
-                    onClick={() => void mergeTagInto(mergingTag, candidate)}
-                  >
-                    <span
-                      className="category-color"
-                      style={{
-                        background:
-                          (candidate.categoryId
-                            ? categoryById.get(candidate.categoryId)?.color
-                            : null) || "#64748b"
-                      }}
-                    />
-                    <span className="merge-target-name">{candidate.name}</span>
-                    <span className="merge-target-count">{candidate.count ?? 0}</span>
-                  </button>
-                ))}
-            </div>
-            {tags.length <= 1 && (
-              <p className="muted">标签池里没有其它标签可合并。</p>
-            )}
-          </div>
+            <GitMerge size={15} />
+            合并为组（{multiSelectedCategoryIds.length}）
+            <span className="category-context-hint">
+              颜色统一为最上层；整组一起拖动排序
+            </span>
+          </button>
         </div>
       )}
     </div>
