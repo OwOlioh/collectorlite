@@ -141,6 +141,8 @@ export interface ItemFilters {
   tagMode: "and" | "or";
   /** 严格匹配：item 的标签集合必须恰好等于所选标签（既包含所选、又不含其他）。与 tagMode 互斥，开启后忽略 and/or。 */
   strict?: boolean;
+  /** 无标签筛选：仅显示未挂任何标签的收藏。与 tagIds 互斥（开启时忽略 tagIds）。 */
+  untagged?: boolean;
   sort: "favorite_desc" | "published_desc" | "duration_desc" | "title_asc" | "imported_desc";
   sources: string[];
   trash?: boolean;

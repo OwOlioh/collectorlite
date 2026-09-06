@@ -213,6 +213,9 @@ pub struct ItemFilters {
     /// 与 tag_mode 互斥——开启后忽略 and/or，仅按精确集合筛选。默认关闭。
     #[serde(default)]
     pub strict: bool,
+    /// 无标签筛选：item 未挂任何标签（item_tags 无关联行）。与 tag_ids 互斥——开启时忽略 tag_ids。默认关闭。
+    #[serde(default)]
+    pub untagged: bool,
     pub sort: String,
     #[serde(default)]
     pub sources: Vec<String>,

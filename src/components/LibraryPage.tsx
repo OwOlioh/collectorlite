@@ -38,6 +38,7 @@ const initialFilters: ItemFilters = {
   tagIds: [],
   tagMode: "and",
   strict: false,
+  untagged: false,
   sort: "favorite_desc",
   sources: []
 };
@@ -135,7 +136,8 @@ export function LibraryPage({
     onTagsChanged();
     setFilters((current) => ({
       ...current,
-      tagIds: [...current.tagIds, tag.id]
+      tagIds: [...current.tagIds, tag.id],
+      untagged: false
     }));
     return tag;
   };
@@ -429,7 +431,8 @@ export function LibraryPage({
                     ...current,
                     tagIds: current.tagIds.includes(tag.id)
                       ? current.tagIds
-                      : [...current.tagIds, tag.id]
+                      : [...current.tagIds, tag.id],
+                    untagged: false
                   }))
                 }
                 onRemove={(tag) =>
@@ -441,6 +444,33 @@ export function LibraryPage({
                 onCreate={createFilterTag}
                 placeholder="输入标签名称进行检索筛选"
               />
+              <label
+                className={`untagged-toggle${
+                  filters.tagIds.length === 0 ? "" : " is-disabled"
+                }`}
+                title={
+                  filters.tagIds.length === 0
+                    ? "仅显示未挂任何标签的收藏"
+                    : "先清空标签筛选后可用"
+                }
+              >
+                <input
+                  type="checkbox"
+                  checked={filters.untagged === true}
+                  disabled={filters.tagIds.length > 0}
+                  onChange={(event) => {
+                    const checked = event.target.checked;
+                    setFilters((current) => ({
+                      ...current,
+                      untagged: checked,
+                      // 与标签筛选互斥：勾选无标签时清空已选标签并关闭严格匹配
+                      tagIds: checked ? [] : current.tagIds,
+                      strict: checked ? false : current.strict
+                    }));
+                  }}
+                />
+                无标签
+              </label>
               <label
                 className={`strict-match-toggle${
                   filters.tagIds.length === 0 ? " is-disabled" : ""

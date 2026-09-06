@@ -1128,7 +1128,11 @@ pub async fn search_items(
         }
     }
 
-    if !filters.tag_ids.is_empty() {
+    // 无标签筛选：item 未挂任何标签（item_tags 无关联行）。
+    // 与 tag_ids 互斥——前端在 UI 上已保证，这里再做防御：开启时忽略 tag_ids。
+    if filters.untagged {
+        query.push(" AND NOT EXISTS (SELECT 1 FROM item_tags it WHERE it.item_id = i.id)");
+    } else if !filters.tag_ids.is_empty() {
         if filters.strict {
             // 严格匹配：item 的标签集合「恰好等于」输入的 tag_ids。
             // (1) 必须包含所有输入标签：按 item_id 分组后，命中的不同标签数 == 输入标签数。
@@ -1889,6 +1893,7 @@ mod tests {
             tag_ids: vec![],
             tag_mode: "and".to_string(),
             strict: false,
+            untagged: false,
             sort: "favorite_desc".to_string(),
             sources: vec![],
             trash: None,
@@ -1985,6 +1990,7 @@ mod tests {
             tag_ids: vec![],
             tag_mode: "and".to_string(),
             strict: false,
+            untagged: false,
             sort: "favorite_desc".to_string(),
             sources: vec![],
             trash: None,
@@ -2018,6 +2024,7 @@ mod tests {
             tag_ids: ids,
             tag_mode: "and".to_string(),
             strict,
+            untagged: false,
             sort: "favorite_desc".to_string(),
             sources: vec![],
             trash: None,
@@ -2179,5 +2186,80 @@ mod tests {
             .expect("upsert_tag 失败");
         assert_eq!(edited.id, tag_a);
         assert_eq!(edited.category_id, None, "显式编辑可清空分类（语义不同）");
+    }
+
+    /// 无标签筛选：仅返回未挂任何标签的 item；与 tag_ids 互斥（untagged 优先）。
+    #[tokio::test]
+    async fn untagged_filter_returns_items_without_tags() {
+        use super::{attach_tag, get_or_create_tag, search_items, SqlitePoolOptions};
+        use crate::models::{ItemFilters, TagInput};
+
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("内存库连接失败");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("迁移失败");
+
+        // 一个标签 a；item1 无标签；item2 / item3 挂 a
+        let tag_a = get_or_create_tag(
+            &pool,
+            &TagInput {
+                id: None,
+                namespace: "manual".into(),
+                name: "a".into(),
+                color: None,
+                description: None,
+                category_id: None,
+            },
+        )
+        .await
+        .expect("建标签失败");
+        let mut ids = Vec::new();
+        for i in 1..=3i64 {
+            let item_id = sqlx::query_scalar::<_, i64>(
+                "INSERT INTO items (source, external_id, source_url, title, created_at, updated_at)
+                 VALUES ('bilibili', ?, ?, ?, 1, 1) RETURNING id",
+            )
+            .bind(format!("BV{id:06}", id = i))
+            .bind(format!("https://example.com/{i}"))
+            .bind(format!("标题 {i}"))
+            .fetch_one(&pool)
+            .await
+            .expect("插 item 失败");
+            ids.push(item_id);
+        }
+        attach_tag(&pool, ids[1], tag_a).await.expect("挂标签失败");
+        attach_tag(&pool, ids[2], tag_a).await.expect("挂标签失败");
+
+        let base = |untagged: bool| ItemFilters {
+            query: None,
+            tag_ids: if untagged { vec![] } else { vec![tag_a] },
+            tag_mode: "and".to_string(),
+            strict: false,
+            untagged,
+            sort: "favorite_desc".to_string(),
+            sources: vec![],
+            trash: None,
+        };
+        let list = search_items(&pool, &base(true))
+            .await
+            .expect("search_items 失败");
+        assert_eq!(list.len(), 1, "无标签筛选应只返回 item1");
+        assert_eq!(list[0].id, ids[0]);
+        assert_eq!(list[0].tags.len(), 0, "返回项应确实无标签");
+
+        // untagged 优先于 tag_ids：即使携带 tag_ids 也只按无标签过滤
+        let mut mixed = base(true);
+        mixed.tag_ids = vec![tag_a];
+        let list2 = search_items(&pool, &mixed).await.expect("search_items 失败");
+        assert_eq!(list2.len(), 1, "untagged=true 时应忽略 tag_ids");
+
+        let list3 = search_items(&pool, &base(false))
+            .await
+            .expect("search_items 失败");
+        assert_eq!(list3.len(), 2, "按标签 a 应返回 item2、item3");
     }
 }

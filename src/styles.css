@@ -1853,7 +1853,8 @@ button,
   font-weight: 400;
 }
 
-.strict-match-toggle {
+.strict-match-toggle,
+.untagged-toggle {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -1865,12 +1866,14 @@ button,
   white-space: nowrap;
 }
 
-.strict-match-toggle.is-disabled {
+.strict-match-toggle.is-disabled,
+.untagged-toggle.is-disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-.strict-match-toggle input {
+.strict-match-toggle input,
+.untagged-toggle input {
   width: 13px;
   height: 13px;
   margin: 0;
