@@ -441,28 +441,27 @@ export function LibraryPage({
                 onCreate={createFilterTag}
                 placeholder="输入标签名称进行检索筛选"
               />
-            </div>
-
-            <label
-              className={`checkbox-line strict-match-line${
-                filters.tagIds.length === 0 ? " is-disabled" : ""
-              }`}
-            >
-              <input
-                type="checkbox"
-                checked={filters.strict === true}
-                disabled={filters.tagIds.length === 0}
-                onChange={(event) =>
-                  setFilters((current) => ({ ...current, strict: event.target.checked }))
+              <label
+                className={`strict-match-toggle${
+                  filters.tagIds.length === 0 ? " is-disabled" : ""
+                }`}
+                title={
+                  filters.tagIds.length === 0
+                    ? "先选择标签后可用"
+                    : "仅匹配恰好含有所选标签的内容"
                 }
-              />
-              <span>
-                严格匹配（仅含所选标签）
-                <small>
-                  只返回标签集合恰好等于所选的收藏。例如只选了「a」，就排除同时含「a、b」的内容。
-                </small>
-              </span>
-            </label>
+              >
+                <input
+                  type="checkbox"
+                  checked={filters.strict === true}
+                  disabled={filters.tagIds.length === 0}
+                  onChange={(event) =>
+                    setFilters((current) => ({ ...current, strict: event.target.checked }))
+                  }
+                />
+                严格匹配
+              </label>
+            </div>
 
             {selectedFilterTags.length === 1 && (
               <button

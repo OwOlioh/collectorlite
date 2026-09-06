@@ -495,10 +495,13 @@ button,
 }
 
 .tag-filter-line {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .tag-filter-line .tag-pool-input {
+  flex: 1 1 auto;
   min-width: 0;
 }
 
@@ -1850,16 +1853,27 @@ button,
   font-weight: 400;
 }
 
-.strict-match-line {
-  margin-top: 2px;
+.strict-match-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
 }
 
-.strict-match-line.is-disabled {
+.strict-match-toggle.is-disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-.strict-match-line input {
+.strict-match-toggle input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
   accent-color: var(--blue);
   cursor: inherit;
 }
