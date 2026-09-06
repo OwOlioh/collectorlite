@@ -110,6 +110,10 @@ export const api = {
     call<ImportResult>("import_collection", { payload }),
   saveExportFile: (content: string, suggestedName: string) =>
     call<string>("save_export_file", { content, suggestedName }),
+  // 自动备份：整库 JSON 直接写入备份文件夹；pickBackupFolder 让用户选文件夹
+  backupNow: (folder: string, fileName: string) =>
+    call<string>("backup_now", { folder, fileName }),
+  pickBackupFolder: () => call<string | null>("pick_backup_folder"),
   // 维护：重新缓存封面
   recacheCovers: () => call<RecacheResult>("recache_covers", {}),
   // Zhihu
@@ -717,6 +721,13 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
     case "save_export_file":
       // 浏览器 mock 环境没有系统对话框，退化为触发下载并返回一个示意路径
       return "已保存（示例路径）" as T;
+    case "backup_now": {
+      const folder = String(args?.folder ?? "");
+      const fileName = String(args?.fileName ?? "bili-collector-backup.json");
+      return `${folder.replace(/[\\/]+$/, "")}/${fileName}` as T;
+    }
+    case "pick_backup_folder":
+      return "C:/示例备份文件夹" as T;
     // ── 知乎 mock（浏览器模式开发时能跑通完整导入流程） ──
     case "zhihu_set_cookie":
       return null as T;

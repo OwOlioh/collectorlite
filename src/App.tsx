@@ -8,6 +8,7 @@ import { TrashPage } from "./components/TrashPage";
 import { Sidebar } from "./components/Sidebar";
 import { CaptureBridgeListener } from "./components/CaptureBridgeListener";
 import { ToastProvider } from "./components/Toast";
+import { AutoBackupRunner } from "./components/AutoBackupRunner";
 import { applyTheme, getStoredTheme, watchSystemTheme } from "./lib/theme";
 import { getRetentionDays } from "./lib/retention";
 
@@ -56,6 +57,7 @@ export default function App() {
 
   return (
     <ToastProvider>
+      <AutoBackupRunner />
       <CaptureBridgeListener onCaptured={handleCaptured} />
       <div className="app-shell">
         <Sidebar active={active} trashCount={trashCount} onChange={setActive} />

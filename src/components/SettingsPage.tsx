@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import {
+  Archive,
   Check,
   Copy,
   Database,
   FileText,
+  FolderPlus,
   LogOut,
   Puzzle,
   RefreshCw,
@@ -16,6 +18,13 @@ import { useToast } from "./Toast";
 import type { BilibiliProfile, BridgeInfo, ObsidianSettings } from "../types";
 import { applyTheme, getStoredTheme, storeTheme, type ThemeMode } from "../lib/theme";
 import { getRetentionDays, setRetentionDays, RETENTION_OPTIONS } from "../lib/retention";
+import {
+  buildBackupFileName,
+  formatBackupTime,
+  getBackupSettings,
+  setBackupSettings,
+  type BackupSettings
+} from "../lib/backup";
 
 interface SettingsPageProps {
   onOpenTrash?: () => void;
@@ -36,6 +45,8 @@ export function SettingsPage({ onOpenTrash, onObsidianChanged }: SettingsPagePro
     vaultName: "",
     subdir: "收藏"
   });
+  const [backup, setBackup] = useState<BackupSettings>(getBackupSettings());
+  const [backingUp, setBackingUp] = useState(false);
   const { toast } = useToast();
 
   useEffect(() => {
@@ -100,6 +111,58 @@ export function SettingsPage({ onOpenTrash, onObsidianChanged }: SettingsPagePro
       }
     } catch (e) {
       toast("error", `选择目录失败: ${String(e)}`);
+    }
+  };
+
+  const updateBackup = (patch: Partial<BackupSettings>) => {
+    const next = { ...backup, ...patch };
+    setBackup(next);
+    setBackupSettings(next);
+  };
+
+  const toggleBackup = async (enabled: boolean) => {
+    if (enabled && !backup.folder) {
+      // 还没选过文件夹：先引导选择，选完自动启用
+      try {
+        const folder = await api.pickBackupFolder();
+        if (!folder) {
+          toast("info", "未启用自动备份：请先选择备份文件夹");
+          return;
+        }
+        updateBackup({ enabled: true, folder });
+        toast("success", "已启用自动备份（每 3 天一次）");
+      } catch (e) {
+        toast("error", `选择文件夹失败: ${String(e)}`);
+      }
+      return;
+    }
+    updateBackup({ enabled });
+    if (!enabled) toast("info", "已关闭自动备份");
+  };
+
+  const changeBackupFolder = async () => {
+    try {
+      const folder = await api.pickBackupFolder();
+      if (folder) updateBackup({ folder });
+    } catch (e) {
+      toast("error", `选择文件夹失败: ${String(e)}`);
+    }
+  };
+
+  const backupNow = async () => {
+    if (!backup.folder) {
+      toast("info", "请先选择备份文件夹");
+      return;
+    }
+    setBackingUp(true);
+    try {
+      const path = await api.backupNow(backup.folder, buildBackupFileName());
+      updateBackup({ lastRunAt: Date.now() });
+      toast("success", `备份完成：${path}`);
+    } catch (e) {
+      toast("error", `备份失败：${String(e)}`);
+    } finally {
+      setBackingUp(false);
     }
   };
 
@@ -225,6 +288,46 @@ export function SettingsPage({ onOpenTrash, onObsidianChanged }: SettingsPagePro
             <Trash2 size={16} />
             打开回收站
           </button>
+        </div>
+
+        <div className="settings-card is-wide">
+          <div className="settings-icon"><Archive size={20} /></div>
+          <div style={{ minWidth: 0 }}>
+            <h2>自动备份</h2>
+            <p>
+              启用后应用会每 3 天自动把整库（收藏、标签、分类）导出一份 JSON 备份到指定文件夹。
+              备份内容与手动「导出全部」一致，可在导入页恢复。
+            </p>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, margin: "8px 0 12px" }}>
+              <input
+                type="checkbox"
+                checked={backup.enabled}
+                onChange={(e) => void toggleBackup(e.target.checked)}
+              />
+              <span>启用自动备份（每 3 天一次）</span>
+            </label>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+              <span className="muted" style={{ minWidth: 0, wordBreak: "break-all" }}>
+                {backup.folder || "尚未选择备份文件夹"}
+              </span>
+              <button className="ghost-button small" type="button" onClick={changeBackupFolder}>
+                <FolderPlus size={14} />
+                选择文件夹
+              </button>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span className="muted">上次备份：{formatBackupTime(backup.lastRunAt)}</span>
+              <button
+                className="ghost-button small"
+                type="button"
+                disabled={backingUp || !backup.folder}
+                onClick={backupNow}
+              >
+                <RefreshCw size={14} className={backingUp ? "spin" : ""} />
+                {backingUp ? "备份中..." : "立即备份"}
+              </button>
+            </div>
+          </div>
         </div>
 
         <div className="settings-card is-wide">

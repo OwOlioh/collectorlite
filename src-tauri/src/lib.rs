@@ -14,11 +14,11 @@ mod wbi;
 use tauri::Manager;
 
 use commands::{
-    assign_tag_category, auto_purge_trash, bilibili_poll_qr_login, bilibili_profile,
+    assign_tag_category, auto_purge_trash, backup_now, bilibili_poll_qr_login, bilibili_profile,
     bilibili_start_qr_login, create_tag_category, delete_item, delete_items, delete_items_by_tag,
     delete_tag, delete_tag_category, empty_trash, execute_csdn_import, execute_github_import,
-    execute_import, get_bridge_info, get_trash_count, list_trash, purge_item, purge_items,
-    restore_item, restore_items,
+    execute_import, get_bridge_info, get_trash_count, list_trash, pick_backup_folder,
+    purge_item, purge_items, restore_item, restore_items,
     execute_zhihu_import, export_collection, import_browser_bookmarks, import_collection,
     list_bilibili_favorites, list_bilibili_opus_favorite, list_csdn_collections,
     list_github_stars, list_tag_categories,
@@ -110,6 +110,8 @@ pub fn run() {
             import_collection,
             recache_covers,
             save_export_file,
+            backup_now,
+            pick_backup_folder,
             // 浏览器扩展「快速入库」本地桥
             get_bridge_info,
             regenerate_bridge_token,

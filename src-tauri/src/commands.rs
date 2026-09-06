@@ -1470,6 +1470,53 @@ pub async fn save_export_file(
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// 自动备份：把整库（含标签与分类）导出为 JSON，直接写入指定备份文件夹，
+/// 内容与设置页手动「导出全部」（export_items 全量）一致。
+/// 文件名由前端按本地时间生成；后端只取文件名部分，杜绝路径分隔符/上级目录注入。
+#[tauri::command]
+pub async fn backup_now(
+    state: State<'_, AppState>,
+    folder: String,
+    file_name: String,
+) -> Result<String, String> {
+    let dir = std::path::PathBuf::from(&folder);
+    if !dir.is_dir() {
+        return Err(format!("备份文件夹不存在：{folder}"));
+    }
+    let file_name = std::path::Path::new(&file_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "非法的备份文件名".to_string())?;
+    let export = db::export_items(&state.pool, None)
+        .await
+        .map_err(|e| e.to_string())?;
+    let json = serde_json::to_string_pretty(&export).map_err(|e| e.to_string())?;
+    let path = dir.join(file_name);
+    std::fs::write(&path, json).map_err(|e| format!("写入备份文件失败：{e}"))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// 弹出「选择文件夹」对话框（自动备份用）。阻塞式对话框放在 spawn_blocking 后台线程，
+/// 避免在主线程阻塞整个 UI（与 pick_obsidian_vault 同款处理）。
+#[tauri::command]
+pub async fn pick_backup_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_title("选择自动备份文件夹")
+            .blocking_pick_folder()
+    })
+    .await
+    .map_err(|e| format!("选择文件夹失败: {e}"))?;
+
+    Ok(picked
+        .and_then(|fp| fp.into_path().ok())
+        .map(|p| p.to_string_lossy().to_string()))
+}
+
 #[tauri::command]
 pub async fn import_collection(
     state: State<'_, AppState>,
