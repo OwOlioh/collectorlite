@@ -1035,6 +1035,29 @@ pub async fn group_tag_categories(
     Ok(())
 }
 
+/// 拆分组：把某个分类所属的整组解除（该组全部成员的 group_id 置 NULL）。
+/// 颜色保留现状（拆分后各成员可各自改色）。未分组的分类调用为 no-op。
+pub async fn ungroup_tag_category(
+    pool: &SqlitePool,
+    category_id: i64,
+) -> Result<(), AppError> {
+    let group: Option<i64> = sqlx::query_scalar(
+        "SELECT group_id FROM tag_categories WHERE id = ?",
+    )
+    .bind(category_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+    let Some(g) = group else {
+        return Ok(());
+    };
+    sqlx::query("UPDATE tag_categories SET group_id = NULL WHERE group_id = ?")
+        .bind(g)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn rename_tag_category(
     pool: &SqlitePool,
     id: i64,
@@ -2794,5 +2817,40 @@ mod tests {
         let list3 = list_tag_categories(&pool).await.expect("list 失败");
         let row_c3 = list3.iter().find(|x| x.id == c.id).unwrap();
         assert_eq!(row_c3.group_id, None, "组长删除后仅剩一个成员应解组");
+    }
+
+    /// 拆分整组：任一组内成员触发 ungroup，整组成员 group_id 全部清空。
+    #[tokio::test]
+    async fn ungroup_tag_category_splits_whole_group() {
+        use super::{
+            create_tag_category, group_tag_categories, list_tag_categories, ungroup_tag_category,
+            SqlitePoolOptions,
+        };
+
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("内存库连接失败");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("迁移失败");
+
+        let a = create_tag_category(&pool, "甲", None).await.expect("建分类失败");
+        let b = create_tag_category(&pool, "乙", None).await.expect("建分类失败");
+        let c = create_tag_category(&pool, "丙", None).await.expect("建分类失败");
+        group_tag_categories(&pool, &[a.id, b.id])
+            .await
+            .expect("合并失败");
+
+        // 从非组长成员触发拆分
+        ungroup_tag_category(&pool, b.id).await.expect("拆分失败");
+        let list = list_tag_categories(&pool).await.expect("list 失败");
+        let row_a = list.iter().find(|x| x.id == a.id).unwrap();
+        let row_b = list.iter().find(|x| x.id == b.id).unwrap();
+        assert_eq!(row_a.group_id, None, "组长也应被解除");
+        assert_eq!(row_b.group_id, None, "触发成员解除");
+        // 无关分类不受影响
+        assert!(c.group_id.is_none());
     }
 }

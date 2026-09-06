@@ -3515,3 +3515,36 @@ textarea {
   color: var(--muted);
   font-size: 11px;
 }
+
+/* 分类组块视觉分隔：组首行上缘、末行下缘画高亮细线 */
+.category-accordion-item {
+  position: relative;
+}
+
+.category-accordion-item.is-group-start::before,
+.category-accordion-item.is-group-end::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  left: 6px;
+  right: 6px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--blue);
+  opacity: 0.85;
+  pointer-events: none;
+}
+
+.category-accordion-item.is-group-start::before {
+  top: -4px;
+}
+
+.category-accordion-item.is-group-end::after {
+  bottom: -4px;
+}
+
+.category-context-sep {
+  height: 1px;
+  margin: 2px 4px;
+  background: var(--border);
+}

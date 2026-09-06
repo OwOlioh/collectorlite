@@ -47,6 +47,7 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
     x: number;
     y: number;
   } | null>(null);
+  const [contextCategoryId, setContextCategoryId] = useState<number | null>(null);
   const [draggedTagId, setDraggedTagId] = useState<number | null>(null);
   const [dragOverCategoryId, setDragOverCategoryId] = useState<number | null>(null);
   const [dragOverUncategorized, setDragOverUncategorized] = useState(false);
@@ -175,6 +176,7 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
     if (!multiSelectedCategoryIds.includes(category.id)) {
       setMultiSelectedCategoryIds([category.id]);
     }
+    setContextCategoryId(category.id);
     setCategoryContextMenu({ x: event.clientX, y: event.clientY });
   };
 
@@ -209,6 +211,23 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
       toast("success", `已把 ${ids.length} 个分类合并为组（颜色已统一为最上层分类颜色）`);
     } catch (error) {
       toast("error", `合并分组失败：${String(error)}`);
+    }
+  };
+
+  // 拆分组：右键所在分类若属于某组，把该整组解除（各成员恢复独立）
+  const ungroupContextCategory = async () => {
+    if (contextCategoryId === null) return;
+    const contextGroup = categories.find((c) => c.id === contextCategoryId)?.groupId ?? null;
+    if (contextGroup === null) return;
+    setCategoryContextMenu(null);
+    setMultiSelectedCategoryIds([]);
+    setContextCategoryId(null);
+    try {
+      await api.ungroupTagCategory(contextCategoryId);
+      await refreshCategories();
+      toast("success", "已拆分该组，分类恢复独立（颜色各自保留，可分别修改）");
+    } catch (error) {
+      toast("error", `拆分失败：${String(error)}`);
     }
   };
 
@@ -738,10 +757,18 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
               <span>未分类</span>
               <span className="category-count">{uncategorized.length}</span>
             </div>
-            {categories.map((category) => {
+            {categories.map((category, index) => {
               const categoryTags = tags.filter((tag) => tag.categoryId === category.id);
               const expanded = expandedCategoryId === category.id;
               const multiSelected = multiSelectedCategoryIds.includes(category.id);
+              // 组块视觉分隔：连续 group 块的首行顶部与末行底部画高亮分隔线
+              const prevCategory = index > 0 ? categories[index - 1] : null;
+              const nextCategory = index < categories.length - 1 ? categories[index + 1] : null;
+              const groupId = category.groupId ?? null;
+              const groupStart =
+                groupId !== null && (prevCategory?.groupId ?? null) !== groupId;
+              const groupEnd =
+                groupId !== null && (nextCategory?.groupId ?? null) !== groupId;
               return (
                 <div
                   role="button"
@@ -750,6 +777,8 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
                   data-category-id={category.id}
                   className={`category-accordion-item ${expanded ? "is-active" : ""} ${
                     multiSelected ? "is-multi-selected" : ""
+                  } ${groupStart ? "is-group-start" : ""} ${
+                    groupEnd ? "is-group-end" : ""
                   } ${dragOverCategoryId === category.id ? "is-drag-over" : ""} ${
                     draggedCategoryId === category.id ? "is-sort-source" : ""
                   } ${
@@ -1031,6 +1060,22 @@ export function TagManagerPanel({ tags, onTagsChanged }: TagManagerPanelProps) {
               颜色统一为最上层；整组一起拖动排序
             </span>
           </button>
+          {categories.find((c) => c.id === contextCategoryId)?.groupId != null && (
+            <>
+              <div className="category-context-sep" />
+              <button
+                type="button"
+                className="category-context-item"
+                onClick={() => void ungroupContextCategory()}
+              >
+                <Layers size={15} />
+                拆分该组
+                <span className="category-context-hint">
+                  解除整组分组，各分类恢复独立（颜色各自保留）
+                </span>
+              </button>
+            </>
+          )}
         </div>
       )}
     </div>

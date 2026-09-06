@@ -655,6 +655,16 @@ pub async fn group_tag_categories(
 }
 
 #[tauri::command]
+pub async fn ungroup_tag_category(
+    state: State<'_, AppState>,
+    category_id: i64,
+) -> Result<(), String> {
+    db::ungroup_tag_category(&state.pool, category_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn update_item_tags(
     state: State<'_, AppState>,
     item_id: i64,

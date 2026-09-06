@@ -94,6 +94,8 @@ export const api = {
     call<null>("reorder_tag_categories", { orderedIds }),
   groupTagCategories: (categoryIds: number[]) =>
     call<null>("group_tag_categories", { categoryIds }),
+  ungroupTagCategory: (categoryId: number) =>
+    call<null>("ungroup_tag_category", { categoryId }),
   updateItemTags: (itemId: number, tagSpecs: TagInput[]) =>
     call<VideoItem>("update_item_tags", { itemId, tagSpecs }),
   setItemStar: (itemId: number, starred: boolean) =>
@@ -464,6 +466,17 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
       mockCategories = mockCategories.map((c) =>
         ids.has(c.id) ? { ...c, groupId: leader.id, color: leaderColor } : c
       );
+      return null as T;
+    }
+    case "ungroup_tag_category": {
+      const categoryId = Number(args?.categoryId);
+      const target = mockCategories.find((c) => c.id === categoryId);
+      const groupId = target?.groupId ?? null;
+      if (groupId !== null) {
+        mockCategories = mockCategories.map((c) =>
+          c.groupId === groupId ? { ...c, groupId: null } : c
+        );
+      }
       return null as T;
     }
     case "update_item_tags": {
