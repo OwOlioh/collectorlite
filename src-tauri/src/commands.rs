@@ -39,6 +39,8 @@ fn to_video_item(item: &crate::models::ExternalItem, local_id: i64) -> VideoItem
         favorite_time: item.favorite_time,
         deleted_at: None,
         obsidian_path: None,
+        starred: false,
+        starred_at: None,
         tags: vec![],
     }
 }
@@ -649,6 +651,17 @@ pub async fn update_item_tags(
     tag_specs: Vec<TagInput>,
 ) -> Result<VideoItem, String> {
     db::replace_item_tags(&state.pool, item_id, &tag_specs)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn set_item_star(
+    state: State<'_, AppState>,
+    item_id: i64,
+    starred: bool,
+) -> Result<VideoItem, String> {
+    db::set_item_starred(&state.pool, item_id, starred)
         .await
         .map_err(|error| error.to_string())
 }

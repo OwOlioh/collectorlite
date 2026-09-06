@@ -262,7 +262,7 @@ fn opus_mid_to_string(value: &serde_json::Value) -> Option<String> {
 /// 与回收站页面全空）。所以所有 `ItemRow` 查询都必须引用这个常量，禁止手写列清单。
 const ITEM_ROW_COLUMNS: &str = "id, source, external_id, source_url, title, description, notes, \
      cover_url, cover_local_path, author_name, author_id, partition_name, published_at, duration, \
-     favorite_time, deleted_at, obsidian_path";
+     favorite_time, deleted_at, obsidian_path, starred, starred_at";
 
 #[derive(Debug, Clone, FromRow)]
 struct ItemRow {
@@ -283,6 +283,8 @@ struct ItemRow {
     favorite_time: Option<i64>,
     deleted_at: Option<i64>,
     obsidian_path: Option<String>,
+    starred: bool,
+    starred_at: Option<i64>,
 }
 
 impl ItemRow {
@@ -305,6 +307,8 @@ impl ItemRow {
             favorite_time: self.favorite_time,
             deleted_at: self.deleted_at,
             obsidian_path: self.obsidian_path.clone(),
+            starred: self.starred,
+            starred_at: self.starred_at,
             tags,
         }
     }
@@ -663,6 +667,35 @@ pub async fn get_item(pool: &SqlitePool, item_id: i64) -> Result<VideoItem, AppE
     Ok(row.to_item(tags))
 }
 
+/// 打星 / 取消星标。打星时记录时间（首次打星保留原时间，重复置顶不刷新次序），
+/// 取消时清空 starred 与 starred_at。
+pub async fn set_item_starred(
+    pool: &SqlitePool,
+    item_id: i64,
+    starred: bool,
+) -> Result<VideoItem, AppError> {
+    let now = now_seconds();
+    if starred {
+        sqlx::query(
+            "UPDATE items SET starred = 1, starred_at = COALESCE(starred_at, ?), updated_at = ? \
+             WHERE id = ?",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(item_id)
+        .execute(pool)
+        .await?;
+    } else {
+        sqlx::query(
+            "UPDATE items SET starred = 0, starred_at = NULL, updated_at = ? WHERE id = ?",
+        )
+        .bind(now)
+        .bind(item_id)
+        .execute(pool)
+        .await?;
+    }
+    get_item(pool, item_id).await
+}
 /// 回写该收藏同步到的 Obsidian 笔记相对路径（相对 vault 根）。
 pub async fn set_item_obsidian_path(
     pool: &SqlitePool,
@@ -1227,7 +1260,15 @@ pub async fn search_items(
         "imported_desc" => "i.id DESC",
         _ => "i.favorite_time DESC",
     };
-    query.push(" ORDER BY ").push(sort_sql);
+    // 星标置顶：任何排序下星标项都排在前面（星标组内部按打星时间倒序）。
+    // 非星标行在第二个键上为 NULL——SQLite 中 DESC 排序 NULL 落在最后，
+    // 因此它们继续按用户所选 sort_sql 排序，互不干扰。
+    query
+        .push(
+            " ORDER BY i.starred DESC, \
+             CASE WHEN i.starred = 1 THEN COALESCE(i.starred_at, i.favorite_time) END DESC, ",
+        )
+        .push(sort_sql);
 
     let rows = query.build_query_as::<ItemRow>().fetch_all(pool).await?;
     hydrate_items(pool, rows).await
@@ -1347,6 +1388,8 @@ struct ExportRow {
     favorite_time: Option<i64>,
     obsidian_path: Option<String>,
     extra_json: String,
+    starred: bool,
+    starred_at: Option<i64>,
 }
 
 /// 把收藏库导出为 `CollectionExport`。`item_ids` 为 None 时导出全部，为空数组时不导出任何项。
@@ -1357,7 +1400,7 @@ pub async fn export_items(
     let mut qb = QueryBuilder::<Sqlite>::new(
         "SELECT id, source, external_id, source_url, title, description, notes, cover_url,
                 author_name, author_id, partition_name, published_at, duration, favorite_time,
-                obsidian_path, extra_json
+                obsidian_path, extra_json, starred, starred_at
          FROM items WHERE 1 = 1 AND deleted_at IS NULL",
     );
     match &item_ids {
@@ -1415,6 +1458,8 @@ pub async fn export_items(
             favorite_time: row.favorite_time,
             notes: row.notes,
             obsidian_path: row.obsidian_path,
+            starred: row.starred,
+            starred_at: row.starred_at,
             extra,
             tags,
         });
@@ -1583,8 +1628,8 @@ pub async fn import_collection(
             "INSERT INTO items (
                 source, external_id, source_url, title, description, cover_url, cover_local_path, author_name,
                 author_id, partition_name, published_at, duration, favorite_time, notes, obsidian_path, extra_json,
-                created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                starred, starred_at, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              RETURNING id",
         )
         .bind(&item.source)
@@ -1602,6 +1647,8 @@ pub async fn import_collection(
         .bind(&item.notes)
         .bind(&item.obsidian_path)
         .bind(&extra_str)
+        .bind(item.starred)
+        .bind(item.starred_at)
         .bind(now)
         .bind(now)
         .fetch_one(pool)
@@ -2323,5 +2370,90 @@ mod tests {
         assert_eq!(d.position, 3);
         let final_list = list_tag_categories(&pool).await.expect("list 失败");
         assert_eq!(names(&final_list), vec!["丙", "甲", "乙", "丁"]);
+    }
+
+    /// 按指定排序返回全部 item id（星标测试用）。
+    async fn search_ids_sorted(pool: &sqlx::SqlitePool, sort: &str) -> Vec<i64> {
+        use super::search_items;
+        use crate::models::ItemFilters;
+
+        let filters = ItemFilters {
+            query: None,
+            tag_ids: vec![],
+            tag_mode: "and".to_string(),
+            strict: false,
+            untagged: false,
+            sort: sort.to_string(),
+            sources: vec![],
+            trash: None,
+        };
+        let list = search_items(pool, &filters).await.expect("search_items 失败");
+        list.iter().map(|v| v.id).collect()
+    }
+
+    /// 星标置顶：任何排序下星标项排最前；导出文件携带 starred 状态。
+    #[tokio::test]
+    async fn starred_items_pinned_and_exported() {
+        use super::{export_items, set_item_starred, SqlitePoolOptions};
+
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("内存库连接失败");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("迁移失败");
+
+        // 三个 item：favorite_time 越大越靠前（无星时 A 最后）
+        let mut ids = Vec::new();
+        for (i, fav) in [(1i64, 100i64), (2, 200), (3, 300)] {
+            let item_id = sqlx::query_scalar::<_, i64>(
+                "INSERT INTO items (source, external_id, source_url, title, favorite_time, created_at, updated_at) \
+                 VALUES ('bilibili', ?, ?, ?, ?, 1, 1) RETURNING id",
+            )
+            .bind(format!("BV{i:06}"))
+            .bind(format!("https://example.com/{i}"))
+            .bind(format!("标题 {i}"))
+            .bind(fav)
+            .fetch_one(&pool)
+            .await
+            .expect("插 item 失败");
+            ids.push(item_id);
+        }
+        let [a, b, c] = [ids[0], ids[1], ids[2]];
+
+        // 给收藏时间最小的两条打星（A 与 B），C 不打星
+        set_item_starred(&pool, a, true).await.expect("打星失败");
+        set_item_starred(&pool, b, true).await.expect("打星失败");
+
+        // favorite_desc 下星标两条仍压过收藏时间最大的 C
+        let by_fav = search_ids_sorted(&pool, "favorite_desc").await;
+        assert!(
+            by_fav[0] != c && by_fav[1] != c,
+            "前两条应为星标项 A/B，实际 {by_fav:?}"
+        );
+        assert_eq!(by_fav.len(), 3);
+        // title_asc 下星标同样置顶
+        let by_title = search_ids_sorted(&pool, "title_asc").await;
+        let first_two: Vec<i64> = by_title.iter().take(2).copied().collect();
+        assert!(!first_two.contains(&c), "title_asc 星标也应置顶，实际 {first_two:?}");
+
+        // 取消星标后回到常规排序（C 最前）
+        set_item_starred(&pool, a, false).await.expect("取消打星失败");
+        set_item_starred(&pool, b, false).await.expect("取消打星失败");
+        let normal = search_ids_sorted(&pool, "favorite_desc").await;
+        assert_eq!(normal, vec![c, b, a], "取消星标后按 favorite_time desc");
+
+        // 导出文件携带 starred 状态（含打星时间列）
+        set_item_starred(&pool, a, true).await.expect("重新打星失败");
+        let export = export_items(&pool, None).await.expect("导出失败");
+        let exported_a = export
+            .items
+            .iter()
+            .find(|it| it.external_id == "BV000001")
+            .expect("导出应有 A");
+        assert!(exported_a.starred, "导出应携带 starred=true");
+        assert!(exported_a.starred_at.is_some(), "导出应携带 starred_at");
     }
 }

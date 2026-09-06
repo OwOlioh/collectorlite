@@ -1,4 +1,4 @@
-import { FileText, Globe, Pencil, Trash2 } from "lucide-react";
+import { FileText, Globe, Pencil, Star, Trash2 } from "lucide-react";
 import { resolveCoverUrl } from "../lib/api";
 import { authorProfileUrl, formatDate, formatDuration } from "../lib/format";
 import type { VideoItem } from "../types";
@@ -13,6 +13,7 @@ interface VideoCardProps {
   onEditTags: (item: VideoItem) => void;
   onEditNote: (item: VideoItem) => void;
   onDelete: (item: VideoItem) => void;
+  onToggleStar?: (item: VideoItem) => void;
 }
 
 export function VideoCard({
@@ -23,10 +24,12 @@ export function VideoCard({
   onEditTags,
   onEditNote,
   onDelete,
+  onToggleStar
 }: VideoCardProps) {
   const isBrowser = item.source === "browser";
   const cover = resolveCoverUrl(item.coverUrl, item.coverLocalPath);
   const authorUrl = authorProfileUrl(item.source, item.authorId);
+  const starred = item.starred === true;
 
   return (
     <article className="video-card">
@@ -63,6 +66,27 @@ export function VideoCard({
         )}
         {!isBrowser && item.duration != null && (
           <span className="duration">{formatDuration(item.duration)}</span>
+        )}
+        {onToggleStar && (
+          <span
+            className={`card-star-button ${starred ? "is-starred" : ""}`}
+            role="button"
+            tabIndex={0}
+            title={starred ? "取消星标（不再置顶）" : "打星置顶"}
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggleStar(item);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                event.stopPropagation();
+                onToggleStar(item);
+              }
+            }}
+          >
+            <Star size={17} fill={starred ? "currentColor" : "none"} />
+          </span>
         )}
       </button>
       <div className="video-card-body">

@@ -26,7 +26,7 @@ use commands::{
     parse_public_favorite_url, parse_zhihu_collection_url, preview_csdn_import,
     preview_github_import, preview_import, preview_zhihu_import, recache_covers,
     regenerate_bridge_token, rename_tag_category, reorder_tag_categories,
-    save_export_file, search_items,     update_item_notes,
+    save_export_file, search_items, set_item_star,     update_item_notes,
     update_item_tags,
     // Obsidian 单向联动
     get_obsidian_settings,
@@ -86,6 +86,7 @@ pub fn run() {
             reorder_tag_categories,
             update_item_notes,
             update_item_tags,
+            set_item_star,
             import_browser_bookmarks,
             open_url,
             // Zhihu

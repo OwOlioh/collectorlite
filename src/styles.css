@@ -821,6 +821,43 @@ button,
   accent-color: var(--blue);
 }
 
+/* 封面右上角的星标按钮：点亮置顶，悬停浮现，深色底保证在任何封面上可见 */
+.card-star-button {
+  position: absolute;
+  z-index: 3;
+  top: 8px;
+  right: 8px;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  border-radius: 7px;
+  background: rgba(15, 23, 42, 0.58);
+  color: #ffffff;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--transition-base), color var(--transition-base);
+}
+
+.card-star-button:focus-visible,
+.video-card:hover .card-star-button {
+  opacity: 1;
+}
+
+.card-star-button:hover {
+  color: #fde68a;
+}
+
+.card-star-button.is-starred {
+  opacity: 1;
+  color: #facc15;
+}
+
+.card-star-button.is-starred:hover {
+  color: #fde047;
+}
+
 .video-grid.is-list .video-card {
   display: grid;
   grid-template-columns: 156px minmax(0, 1fr);
@@ -1531,6 +1568,38 @@ button,
 .video-tag-summary span {
   color: var(--muted);
   font-size: 12px;
+}
+
+/* 配置标签预览：标题/封面可点击打开原页面，作者可点击打开主页 */
+.video-tag-summary .preview-title-link {
+  padding: 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  -webkit-line-clamp: 1;
+}
+
+.video-tag-summary .preview-meta-line {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-cover-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.preview-cover-link:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+  border-radius: 6px;
 }
 
 .video-tag-fields {

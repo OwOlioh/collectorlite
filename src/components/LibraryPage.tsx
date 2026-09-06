@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Code2,
   Download,
@@ -31,6 +31,9 @@ interface LibraryPageProps {
   onTrashChanged: () => void;
   /** 数值变化即重新拉列表。浏览器扩展入库后由 App 递增。 */
   refreshToken?: number;
+  /** 当前是否显示本视图（App 按 active view 传入）。从其他页切回时自动静默刷新，
+   *  让导入/扩展入库的新内容无需手动刷新即可出现。 */
+  isActive?: boolean;
 }
 
 const initialFilters: ItemFilters = {
@@ -55,7 +58,8 @@ export function LibraryPage({
   tags,
   onTagsChanged,
   onTrashChanged,
-  refreshToken
+  refreshToken,
+  isActive = true
 }: LibraryPageProps) {
   const [section, setSection] = useState<LibrarySection>("search");
   const [filters, setFilters] = useState<ItemFilters>(initialFilters);
@@ -88,11 +92,42 @@ export function LibraryPage({
     }
   }, [filters]);
 
+  // 保存标签/批注等「原地修改」后的静默刷新：不切 loading 态、不卸载列表，
+  // VirtuosoGrid 保持挂载与 scrollTop，避免编辑长列表中间的内容后跳回顶部。
+  const reloadSilently = useCallback(async () => {
+    try {
+      setItems(await api.listItems(filters));
+    } catch {
+      /* 静默失败：列表保持现状，下次常规刷新兜底 */
+    }
+  }, [filters]);
+
+  // 检索条件 / 内部分区（检索↔管理标签）变化 → 带 loading 常规加载
   useEffect(() => {
     if (section !== "search") return;
     const timer = window.setTimeout(loadItems, 120);
     return () => window.clearTimeout(timer);
-  }, [loadItems, section, refreshToken]);
+  }, [loadItems, section]);
+
+  // 外部版本号变化（浏览器扩展入库，App 递增 refreshToken）→ 静默刷新，不切 loading、不跳顶
+  const firstTokenRef = useRef(true);
+  useEffect(() => {
+    if (firstTokenRef.current) {
+      firstTokenRef.current = false;
+      return;
+    }
+    if (section !== "search") return;
+    void reloadSilently();
+  }, [refreshToken, section, reloadSilently]);
+
+  // 从其他页面切回收藏库视图时 → 自动静默刷新，新导入/入库内容即时可见
+  const wasActiveRef = useRef(isActive);
+  useEffect(() => {
+    if (isActive && !wasActiveRef.current && section === "search") {
+      void reloadSilently();
+    }
+    wasActiveRef.current = isActive;
+  }, [isActive, section, reloadSilently]);
 
   const selectedFilterTags = tags.filter((tag) => filters.tagIds.includes(tag.id));
 
@@ -167,6 +202,16 @@ export function LibraryPage({
       });
     } catch (error) {
       toast("error", `删除失败：${String(error)}`);
+    }
+  };
+
+  // 打星 / 取消星标：后端更新后静默重拉，让星标项立即置顶（或取消后回到原位）
+  const toggleStar = async (video: VideoItem) => {
+    try {
+      await api.setItemStar(video.id, !(video.starred === true));
+      await reloadSilently();
+    } catch (error) {
+      toast("error", `星标操作失败：${String(error)}`);
     }
   };
 
@@ -275,6 +320,7 @@ export function LibraryPage({
       onTagsChanged();
       setSelectedIds([]);
       setBatchTagging(false);
+      await reloadSilently();
       toast("success", `已为 ${targets.length} 条收藏更新标签`);
     } catch (error) {
       toast("error", `批量打标签失败：${String(error)}`);
@@ -591,6 +637,7 @@ export function LibraryPage({
                       onEditTags={setEditingVideo}
                       onEditNote={setNoteVideo}
                       onDelete={deleteVideo}
+                      onToggleStar={toggleStar}
                     />
                   )}
                 />
@@ -615,7 +662,7 @@ export function LibraryPage({
           item={editingVideo}
           tagPool={tags}
           onClose={() => setEditingVideo(null)}
-          onSaved={() => { loadItems(); toast("success", "标签已保存"); }}
+          onSaved={() => { void reloadSilently(); toast("success", "标签已保存"); }}
           onTagsChanged={onTagsChanged}
         />
       )}
@@ -624,8 +671,8 @@ export function LibraryPage({
         <VideoNoteEditorModal
           item={noteVideo}
           onClose={() => setNoteVideo(null)}
-          onSaved={() => { loadItems(); toast("success", "批注已保存"); }}
-          onExported={() => { loadItems(); }}
+          onSaved={() => { void reloadSilently(); toast("success", "批注已保存"); }}
+          onExported={() => { void reloadSilently(); }}
         />
       )}
     </section>

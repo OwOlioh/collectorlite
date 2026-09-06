@@ -94,6 +94,8 @@ export const api = {
     call<null>("reorder_tag_categories", { orderedIds }),
   updateItemTags: (itemId: number, tagSpecs: TagInput[]) =>
     call<VideoItem>("update_item_tags", { itemId, tagSpecs }),
+  setItemStar: (itemId: number, starred: boolean) =>
+    call<VideoItem>("set_item_star", { itemId, starred }),
   updateItemNotes: (itemId: number, notes: string) =>
     call<VideoItem>("update_item_notes", { itemId, notes }),
   importBrowserBookmarks: (request: BrowserImportRequest) =>
@@ -473,6 +475,17 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
         mockTags.push(tag);
         return tag;
       });
+      return {
+        ...item,
+        tags: item.tags.map((tag) => ({ ...tag }))
+      } as T;
+    }
+    case "set_item_star": {
+      const itemId = Number(args?.itemId);
+      const item = mockItems.find((video) => video.id === itemId);
+      if (!item) return null as T;
+      item.starred = args?.starred === true;
+      item.starredAt = item.starred ? Math.floor(Date.now() / 1000) : null;
       return {
         ...item,
         tags: item.tags.map((tag) => ({ ...tag }))

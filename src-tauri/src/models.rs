@@ -84,6 +84,12 @@ pub struct VideoItem {
     pub duration: Option<i64>,
     pub favorite_time: Option<i64>,
     pub deleted_at: Option<i64>,
+    /// 星标置顶：true = 内容置顶显示（starred_at 记录打星时间）。
+    #[serde(default)]
+    pub starred: bool,
+    /// 打星时间（unix 秒）；未打星为 None。
+    #[serde(default)]
+    pub starred_at: Option<i64>,
     /// 同步到 Obsidian 后，vault 内相对路径（如 `收藏/标题.md`）；未同步为 None。
     pub obsidian_path: Option<String>,
     pub tags: Vec<Tag>,
@@ -189,6 +195,11 @@ pub struct ExportItem {
     pub notes: String,
     /// vault 内相对路径，换机迁移时据此恢复联动；未同步为 None。
     pub obsidian_path: Option<String>,
+    /// 星标状态随导出文件保存，换机/恢复时一并还原。老版本导出文件无此字段 → 默认未星标。
+    #[serde(default)]
+    pub starred: bool,
+    #[serde(default)]
+    pub starred_at: Option<i64>,
     pub extra: Value,
     pub tags: Vec<ExportTag>,
 }

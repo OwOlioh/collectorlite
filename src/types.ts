@@ -49,6 +49,10 @@ export interface VideoItem {
   duration?: number;
   favoriteTime?: number;
   deletedAt?: number;
+  /** 星标置顶：内容置顶显示。 */
+  starred?: boolean;
+  /** 打星时间（unix 秒）。 */
+  starredAt?: number | null;
   /** 同步到 Obsidian 的笔记在 vault 内的相对路径；未同步为 undefined。 */
   obsidianPath?: string;
   tags: Tag[];
