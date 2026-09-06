@@ -4,7 +4,8 @@
 
 Multi-platform local desktop app for collecting favorites (Bilibili, browser bookmarks, Zhihu, etc.) and organizing them with tags.
 
-- **Project path**: `C:\Users\lioh\Documents\GitHub\bilibili_collector`
+- **Product name**: collectorlite（formerly 收藏管理器）
+- **Project path**: `C:\Users\lioh\Documents\GitHub\bilibili_collector`（目录沿用历史名；产品标识符 `com.local.bili-collector` 保持不变以兼容既有数据）
 - App type: Tauri 2 desktop application
 - Frontend: React + TypeScript + Vite
 - Backend: Rust + Tauri commands

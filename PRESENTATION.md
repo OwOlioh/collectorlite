@@ -1,4 +1,4 @@
-# 收藏管理器（bilibili_collector）· 项目答辩文档
+# collectorlite（bilibili_collector）· 项目答辩文档
 
 > 面向答辩的功能全景、架构设计与工程实践说明
 > 版本：v0.1.0　　文档日期：2026-09-05
@@ -17,7 +17,7 @@
 
 ### 项目名片
 
-- 项目名：收藏管理器（内部代号 `bili-collector`）
+- 项目名：collectorlite（原名「收藏管理器」；工程目录与仓库仍沿用历史名 `bilibili_collector`）
 - 技术栈：Tauri 2（Rust 后端）+ React 18 + TypeScript + Vite + SQLite
 - 仓库：https://github.com/OwOlioh/billcollector2.0
 - 分发：GitHub Release（NSIS 安装器 + 免安装 zip + Edge 扩展 zip）

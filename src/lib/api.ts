@@ -722,7 +722,7 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
       const exportObj = {
         formatVersion: 1,
         exportedAt: Math.floor(Date.now() / 1000),
-        app: "bilibili_collector",
+        app: "collectorlite",
         items: mockItems.map((item) => ({
           source: item.source,
           externalId: item.externalId,
@@ -769,7 +769,7 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
       return "已保存（示例路径）" as T;
     case "backup_now": {
       const folder = String(args?.folder ?? "");
-      const fileName = String(args?.fileName ?? "bili-collector-backup.json");
+      const fileName = String(args?.fileName ?? "collectorlite-backup.json");
       return `${folder.replace(/[\\/]+$/, "")}/${fileName}` as T;
     }
     case "pick_backup_folder":

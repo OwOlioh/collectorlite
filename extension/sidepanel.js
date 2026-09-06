@@ -1,4 +1,4 @@
-// Edge 侧边栏：读取当前标签页 → 填标签与批注 → 通过本地桥写入「收藏管理器」。
+// Edge 侧边栏：读取当前标签页 → 填标签与批注 → 通过本地桥写入「collectorlite」。
 //
 // 桥只监听 127.0.0.1，端口在 17820–17829 之间顺延，扩展按顺序探测
 // （扩展读不到本地文件，所以不能靠读端口文件）。
@@ -50,7 +50,7 @@ async function init() {
   try {
     await bridgeFetch('/ping');
   } catch (error) {
-    setStatus('连不上收藏管理器，请先启动应用', 'error');
+    setStatus('连不上collectorlite，请先启动应用', 'error');
     disableForm(true);
     return;
   }
@@ -83,7 +83,7 @@ async function bridgeFetch(path, options = {}) {
     ? [state.port, ...portRange().filter((port) => port !== state.port)]
     : portRange();
 
-  let lastError = new Error('无法连接到收藏管理器');
+  let lastError = new Error('无法连接到collectorlite');
   for (const port of ports) {
     try {
       const response = await fetch(`http://127.0.0.1:${port}${path}`, {

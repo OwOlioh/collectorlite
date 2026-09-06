@@ -1693,7 +1693,7 @@ pub async fn export_items(
     Ok(CollectionExport {
         format_version: 1,
         exported_at: now_seconds(),
-        app: "bilibili_collector".into(),
+        app: "collectorlite".into(),
         items,
     })
 }

@@ -28,7 +28,7 @@ export function Sidebar({ active, trashCount, onChange }: SidebarProps) {
           <Bookmark size={18} />
         </div>
         <div>
-          <div className="brand-name">收藏管理器</div>
+          <div className="brand-name">collectorlite</div>
           <div className="brand-sub">本地标签化收藏</div>
         </div>
       </div>

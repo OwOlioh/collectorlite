@@ -38,13 +38,13 @@ export function setBackupSettings(settings: BackupSettings): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
 }
 
-/** 生成带本地时间的备份文件名，如 bili-collector-backup-20260906-153000.json */
+/** 生成带本地时间的备份文件名，如 collectorlite-backup-20260906-153000.json */
 export function buildBackupFileName(date = new Date()): string {
   const pad = (value: number) => String(value).padStart(2, "0");
   const stamp =
     `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}` +
     `-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
-  return `bili-collector-backup-${stamp}.json`;
+  return `collectorlite-backup-${stamp}.json`;
 }
 
 /** 当前设置是否「应该到期执行一次备份」（启用 + 已选文件夹 + 距上次 ≥ 3 天） */
