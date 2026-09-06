@@ -1,6 +1,9 @@
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use sha2::{Digest, Sha384};
+use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow};
 use sqlx::{FromRow, QueryBuilder, Row, Sqlite, SqlitePool};
 
@@ -38,6 +41,88 @@ fn tag_color(name: &str, requested: Option<String>) -> Option<String> {
     Some(COLORS[(hash as usize) % COLORS.len()].into())
 }
 
+/// 自愈 sqlx 迁移校验和的**行尾漂移**，返回修复的条数。
+///
+/// # 背景
+/// `sqlx::migrate!` 在编译期把 `.sql` 按**字节** embed 进 exe，运行时对数据库
+/// `_sqlx_migrations.checksum`（sha384）逐一比对。CRLF 与 LF 在 SQL 语义上完全等价，
+/// 但字节不同 → sha384 不同 → sqlx 判定"迁移被篡改"并直接 panic
+/// （`migration N was previously applied but has been modified`）。
+///
+/// 只要"建库时的文件行尾"与"当前 exe 内嵌的文件行尾"不一致就会触发，典型场景：
+/// 老数据库 + 新 exe 的升级路径、跨平台 checkout（Windows `autocrlf`）、CI 与本地行尾策略不同。
+///
+/// # 安全边界（重要）
+/// **只修"确认是纯行尾差异"的情况**：把当前 sql 分别归一化成全 LF / 全 CRLF 再算 sha384，
+/// 只有命中其中之一才认定是行尾漂移并更新 checksum。若两者都不匹配，说明 SQL 内容真的被改了，
+/// 此时**不做任何修改**，交由 sqlx 原有的校验照常 panic——防篡改语义完整保留。
+///
+/// # 失败策略
+/// 全部软失败：表不存在（全新库）或查询异常都返回 0 并静默跳过，绝不阻断启动。
+pub(crate) async fn heal_migration_line_endings(pool: &SqlitePool, migrator: &Migrator) -> usize {
+    // 全新数据库还没有迁移表，这是正常情况
+    let rows = match sqlx::query("SELECT version, checksum FROM _sqlx_migrations")
+        .fetch_all(pool)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(_) => return 0,
+    };
+
+    let mut healed = 0usize;
+    for row in rows {
+        // 单行解析失败不应影响其余迁移的自愈
+        let (Ok(version), Ok(applied)) = (
+            row.try_get::<i64, _>("version"),
+            row.try_get::<Vec<u8>, _>("checksum"),
+        ) else {
+            continue;
+        };
+
+        // 数据库记录了但代码里已不存在的迁移：交给 sqlx 自己报 VersionMissing
+        let Some(migration) = migrator.migrations.iter().find(|m| m.version == version) else {
+            continue;
+        };
+
+        // 完全一致，无需处理
+        if migration.checksum.as_ref() == applied.as_slice() {
+            continue;
+        }
+
+        let sql = migration.sql.as_ref();
+        let lf = sql.replace("\r\n", "\n");
+        let crlf = lf.replace('\n', "\r\n");
+        let is_line_ending_drift = [lf.as_bytes(), crlf.as_bytes()]
+            .iter()
+            .any(|candidate| Sha384::digest(candidate).as_slice() == applied.as_slice());
+
+        if !is_line_ending_drift {
+            // 真的改了内容：保留 sqlx 原有的 panic 行为，不静默放过
+            eprintln!(
+                "[db] 警告：迁移 {version} 的 SQL 内容与数据库记录不一致（非行尾差异），\
+                 已保留 sqlx 的原始校验，不做自愈"
+            );
+            continue;
+        }
+
+        match sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
+            .bind(migration.checksum.as_ref().to_vec())
+            .bind(version)
+            .execute(pool)
+            .await
+        {
+            Ok(_) => {
+                healed += 1;
+                eprintln!("[db] 已自愈迁移 {version} 的校验和（行尾 CRLF/LF 漂移，非内容变更）");
+            }
+            Err(error) => {
+                eprintln!("[db] 迁移 {version} 校验和自愈失败（已忽略）：{error}");
+            }
+        }
+    }
+    healed
+}
+
 pub async fn connect(path: &std::path::Path) -> Result<SqlitePool, AppError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -50,7 +135,14 @@ pub async fn connect(path: &std::path::Path) -> Result<SqlitePool, AppError> {
         .max_connections(4)
         .connect_with(options)
         .await?;
-    sqlx::migrate!("./migrations")
+    let migrator = sqlx::migrate!("./migrations");
+    // 先自愈行尾漂移（老库 + 新 exe 时 checksum 可能只是 CRLF/LF 差异），再让 sqlx 正常校验。
+    // 自愈只处理确认的纯行尾差异，SQL 内容真被篡改时不动，由 sqlx 照常 panic。
+    let healed = heal_migration_line_endings(&pool, &migrator).await;
+    if healed > 0 {
+        eprintln!("[db] 迁移校验和自愈完成，共修正 {healed} 条（行尾 CRLF/LF 漂移）");
+    }
+    migrator
         .run(&pool)
         .await
         .map_err(|error| AppError::Other(error.to_string()))?;
@@ -1072,29 +1164,78 @@ pub async fn search_items(
         "imported_desc" => "i.id DESC",
         _ => "i.favorite_time DESC",
     };
-    query.push(" ORDER BY ").push(sort_sql).push(" LIMIT 1000");
+    query.push(" ORDER BY ").push(sort_sql);
 
     let rows = query.build_query_as::<ItemRow>().fetch_all(pool).await?;
     hydrate_items(pool, rows).await
 }
 
 async fn hydrate_items(pool: &SqlitePool, rows: Vec<ItemRow>) -> Result<Vec<VideoItem>, AppError> {
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // 一次性取出每个标签的「全局使用次数」：对整张 item_tags 做一次 GROUP BY 即可。
+    // 这与旧实现「逐条查询时 COUNT(it2.item_id) 且 it2 不受 item_id 限制」的语义完全一致
+    // （count 是该标签在所有 item 上的总次数，而非当前结果集内次数），
+    // 但成本是 O(总 item_tags 行数)，与本次返回多少 item 无关 —— 不会随收藏量膨胀。
+    let counts: HashMap<i64, i64> = sqlx::query("SELECT tag_id, COUNT(*) AS cnt FROM item_tags GROUP BY tag_id")
+        .map(|row: SqliteRow| {
+            (
+                row.get::<i64, _>("tag_id"),
+                row.get::<i64, _>("cnt"),
+            )
+        })
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .collect();
+
+    // 按 item_id 批量取标签，避免逐条查询（N+1）。
+    // IN 子句按 500 个一批切分，既把查询次数压到「行数/500」，
+    // 又不超过 SQLite 默认 999 绑定变量上限。查询本身只 JOIN 命中的 (item,tag) 行，
+    // 不再自连接全表，因此成本随返回量线性增长而非爆炸。
+    let mut tags_by_item: HashMap<i64, Vec<Tag>> = HashMap::with_capacity(rows.len());
+    let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+    for chunk in ids.chunks(500) {
+        let mut qb = QueryBuilder::new(
+            "SELECT it.item_id AS item_id, t.id, t.namespace, t.name, t.normalized, t.color, \
+             t.description, t.category_id \
+             FROM tags t \
+             JOIN item_tags it ON it.tag_id = t.id \
+             WHERE it.item_id IN (",
+        );
+        let mut separated = qb.separated(", ");
+        for id in chunk {
+            separated.push_bind(*id);
+        }
+        qb.push(") ORDER BY t.name COLLATE NOCASE");
+        let pairs = qb
+            .build()
+            .map(|row: SqliteRow| {
+                let tag_id: i64 = row.get("id");
+                let tag = Tag {
+                    id: tag_id,
+                    namespace: row.get("namespace"),
+                    name: row.get("name"),
+                    normalized: row.get("normalized"),
+                    color: row.get("color"),
+                    description: row.get("description"),
+                    count: *counts.get(&tag_id).unwrap_or(&0),
+                    category_id: row.get("category_id"),
+                };
+                (row.get::<i64, _>("item_id"), tag)
+            })
+            .fetch_all(pool)
+            .await?;
+        for (item_id, tag) in pairs {
+            tags_by_item.entry(item_id).or_default().push(tag);
+        }
+    }
+
     let mut items = Vec::with_capacity(rows.len());
     for row in rows {
-        let tags = sqlx::query(
-            "SELECT t.id, t.namespace, t.name, t.normalized, t.color, t.description, t.category_id,
-                    COUNT(it2.item_id) AS count
-             FROM tags t
-             JOIN item_tags it ON it.tag_id = t.id
-             LEFT JOIN item_tags it2 ON it2.tag_id = t.id
-             WHERE it.item_id = ?
-             GROUP BY t.id
-             ORDER BY t.name COLLATE NOCASE",
-        )
-        .bind(row.id)
-        .map(tag_from_row)
-        .fetch_all(pool)
-        .await?;
+        let tags = tags_by_item.remove(&row.id).unwrap_or_default();
         items.push(row.to_item(tags));
     }
     Ok(items)
@@ -1473,8 +1614,163 @@ pub async fn import_collection(
 
 #[cfg(test)]
 mod tests {
-    use super::{github_owner_from_url, opus_mid_to_string};
+    use super::{github_owner_from_url, heal_migration_line_endings, opus_mid_to_string};
     use serde_json::json;
+    use sha2::{Digest, Sha384};
+    use sqlx::migrate::{Migration, MigrationType, Migrator};
+    use std::borrow::Cow;
+
+    /// 建一张只含 `version` / `checksum` 的迁移表（`heal_migration_line_endings` 只用到这两列）。
+    async fn seed_migration_table(pool: &sqlx::SqlitePool) {
+        sqlx::query(
+            "CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, checksum BLOB NOT NULL)",
+        )
+        .execute(pool)
+        .await
+        .expect("建迁移表失败");
+    }
+
+    fn migrator_with(version: i64, sql: &str) -> Migrator {
+        Migrator {
+            migrations: Cow::Owned(vec![Migration::new(
+                version,
+                "test".into(),
+                MigrationType::Simple,
+                Cow::Owned(sql.to_string()),
+                false,
+            )]),
+            ignore_missing: false,
+            locking: true,
+            no_tx: false,
+        }
+    }
+
+    async fn stored_checksum(pool: &sqlx::SqlitePool, version: i64) -> Vec<u8> {
+        sqlx::query_as::<_, (Vec<u8>,)>("SELECT checksum FROM _sqlx_migrations WHERE version = ?")
+            .bind(version)
+            .fetch_one(pool)
+            .await
+            .expect("读取 checksum 失败")
+            .0
+    }
+
+    /// 场景：库里记的是 LF 版校验和，当前 exe 内嵌的是 CRLF 版 → 应自愈成 CRLF 版。
+    /// 这正是本次本地 `cargo run` panic 的真实形态。
+    #[tokio::test]
+    async fn heals_checksum_when_db_has_lf_and_binary_has_crlf() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("内存库连接失败");
+        seed_migration_table(&pool).await;
+
+        let sql_crlf = "CREATE TABLE demo (id INTEGER PRIMARY KEY);\r\n";
+        let lf_digest = Sha384::digest(sql_crlf.replace("\r\n", "\n").as_bytes()).to_vec();
+        sqlx::query("INSERT INTO _sqlx_migrations (version, checksum) VALUES (?, ?)")
+            .bind(1i64)
+            .bind(&lf_digest)
+            .execute(&pool)
+            .await
+            .expect("插入失败");
+
+        let migrator = migrator_with(1, sql_crlf);
+        let healed = heal_migration_line_endings(&pool, &migrator).await;
+
+        assert_eq!(healed, 1, "应自愈 1 条");
+        assert_eq!(
+            stored_checksum(&pool, 1).await,
+            migrator.migrations[0].checksum.as_ref(),
+            "checksum 应更新为当前 exe 内嵌（CRLF）版本"
+        );
+    }
+
+    /// 反方向：库里记的是 CRLF 版，当前 exe 内嵌的是 LF 版 → 同样应自愈。
+    #[tokio::test]
+    async fn heals_checksum_when_db_has_crlf_and_binary_has_lf() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("内存库连接失败");
+        seed_migration_table(&pool).await;
+
+        let sql_lf = "CREATE TABLE demo (id INTEGER PRIMARY KEY);\n";
+        let crlf_digest = Sha384::digest(sql_lf.replace('\n', "\r\n").as_bytes()).to_vec();
+        sqlx::query("INSERT INTO _sqlx_migrations (version, checksum) VALUES (?, ?)")
+            .bind(1i64)
+            .bind(&crlf_digest)
+            .execute(&pool)
+            .await
+            .expect("插入失败");
+
+        let migrator = migrator_with(1, sql_lf);
+        let healed = heal_migration_line_endings(&pool, &migrator).await;
+
+        assert_eq!(healed, 1, "应自愈 1 条");
+        assert_eq!(
+            stored_checksum(&pool, 1).await,
+            migrator.migrations[0].checksum.as_ref()
+        );
+    }
+
+    /// 关键安全边界：SQL 内容真被篡改时**绝不能**静默放行，
+    /// 必须交还给 sqlx 原有的校验去 panic。
+    #[tokio::test]
+    async fn leaves_genuinely_modified_migration_alone() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("内存库连接失败");
+        seed_migration_table(&pool).await;
+
+        let tampered = Sha384::digest(b"DROP TABLE items;").to_vec();
+        sqlx::query("INSERT INTO _sqlx_migrations (version, checksum) VALUES (?, ?)")
+            .bind(1i64)
+            .bind(&tampered)
+            .execute(&pool)
+            .await
+            .expect("插入失败");
+
+        let migrator = migrator_with(1, "CREATE TABLE demo (id INTEGER PRIMARY KEY);\n");
+        let healed = heal_migration_line_endings(&pool, &migrator).await;
+
+        assert_eq!(healed, 0, "内容篡改不得自愈");
+        assert_eq!(
+            stored_checksum(&pool, 1).await,
+            tampered,
+            "checksum 必须保持原样，让 sqlx 照常报错"
+        );
+    }
+
+    /// 全新数据库没有迁移表：应静默返回 0，不能因为表不存在就阻断启动。
+    #[tokio::test]
+    async fn no_op_on_fresh_database_without_migration_table() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("内存库连接失败");
+        let migrator = migrator_with(1, "CREATE TABLE demo (id INTEGER PRIMARY KEY);\n");
+        assert_eq!(heal_migration_line_endings(&pool, &migrator).await, 0);
+    }
+
+    /// 校验和本就一致时不应产生任何写入。
+    #[tokio::test]
+    async fn no_op_when_checksums_already_match() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("内存库连接失败");
+        seed_migration_table(&pool).await;
+
+        let sql = "CREATE TABLE demo (id INTEGER PRIMARY KEY);\n";
+        let digest = Sha384::digest(sql.as_bytes()).to_vec();
+        sqlx::query("INSERT INTO _sqlx_migrations (version, checksum) VALUES (?, ?)")
+            .bind(1i64)
+            .bind(&digest)
+            .execute(&pool)
+            .await
+            .expect("插入失败");
+
+        assert_eq!(
+            heal_migration_line_endings(&pool, &migrator_with(1, sql)).await,
+            0
+        );
+        assert_eq!(stored_checksum(&pool, 1).await, digest);
+    }
 
     #[test]
     fn parses_github_owner_from_repo_url() {
@@ -1576,5 +1872,96 @@ mod tests {
             .await
             .expect("list_trash 缺列会抛 ColumnNotFound");
         assert_eq!(trash.len(), 1, "回收站应返回 1 条");
+    }
+
+    /// 基准：大规模数据下验证 `search_items` 仍高效（验证「批量水合」修复）。
+    ///
+    /// 测的是无 LIMIT + 批量 `IN (...)` 取标签的路径：一次性返回全部行，
+    /// 标签分批（每批 500）一次取回，而非逐条 N+1。打印耗时，便于直观对比
+    /// 「裸删 LIMIT 但保留 N+1」时 ~1 万次串行查询的秒级卡顿。
+    /// 建数据（1 万 item + 标签关联）在计时外，只计时 `search_items` 本身。
+    #[tokio::test]
+    async fn search_items_scales_to_ten_thousand() {
+        use super::{search_items, SqlitePoolOptions};
+        use crate::models::ItemFilters;
+        use std::time::Instant;
+
+        // 用共享缓存内存库（cache=shared），跨连接池可见同一份数据，
+        // 既贴近「单库 + 连接池」的真实场景，又避开文件路径中冒号导致的 URL 解析问题。
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:?cache=shared")
+            .await
+            .expect("连接失败");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("迁移失败");
+
+        let n: usize = 10_000;
+        // 建 8 个标签
+        let mut tag_ids: Vec<i64> = Vec::new();
+        for i in 0..8u32 {
+            sqlx::query(
+                "INSERT INTO tags (namespace, name, normalized, created_at) VALUES ('user', ?, ?, 1)",
+            )
+            .bind(format!("tag{i}"))
+            .bind(format!("tag{i}"))
+            .execute(&pool)
+            .await
+            .expect("插标签失败");
+            tag_ids.push((i + 1) as i64);
+        }
+
+        // 批量插入 n 条 item（每条挂 2 个标签），单事务加速
+        let mut tx = pool.begin().await.expect("开事务失败");
+        for i in 0..n {
+            sqlx::query(
+                "INSERT INTO items (source, external_id, source_url, title, created_at, updated_at, favorite_time) \
+                 VALUES ('bilibili', ?, ?, ?, 1, 1, 1)",
+            )
+            .bind(format!("BV{i:06}"))
+            .bind(format!("https://example.com/{i}"))
+            .bind(format!("标题 {i}"))
+            .execute(&mut *tx)
+            .await
+            .expect("插 item 失败");
+            let item_id = (i + 1) as i64; // 自增 id 从 1 起
+            // 第二标签取 tag1..tag7，永远不等于第一标签 tag0，避免 (item_id,tag_id) 唯一冲突
+            for t in [tag_ids[0], tag_ids[1 + (i % 7) as usize]] {
+                sqlx::query("INSERT INTO item_tags (item_id, tag_id, created_at) VALUES (?, ?, 1)")
+                    .bind(item_id)
+                    .bind(t)
+                    .execute(&mut *tx)
+                    .await
+                    .expect("插 item_tags 失败");
+            }
+        }
+        tx.commit().await.expect("提交失败");
+
+        let filters = ItemFilters {
+            query: None,
+            tag_ids: vec![],
+            tag_mode: "and".to_string(),
+            sort: "favorite_desc".to_string(),
+            sources: vec![],
+            trash: None,
+        };
+
+        // 预热一次（建索引缓存、JIT 等），不计入
+        let _ = search_items(&pool, &filters).await.expect("warmup 失败");
+
+        // search_items 总耗时（含「全局 count 一次」+「批量 IN 取标签」+ 序列化）
+        let t0 = Instant::now();
+        let list = search_items(&pool, &filters).await.expect("search_items 失败");
+        let total = t0.elapsed();
+
+        assert_eq!(list.len(), n, "应返回全部 {n} 条");
+        let sample = &list[5000];
+        assert_eq!(sample.tags.len(), 2, "每条应挂 2 个标签");
+
+        eprintln!(
+            "[bench] search_items({n} 条, 无 LIMIT, 全局 count + 批量水合) 总耗时: {:.2?}",
+            total
+        );
     }
 }

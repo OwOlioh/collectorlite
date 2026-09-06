@@ -296,6 +296,66 @@ const [zhihuCollections, setZhihuCollections] = useState(...);
 - **commit 聚焦**：提交前若 `cargo fmt` 误改了无关文件的纯格式差异，用 `git checkout -- <file>` 回退，保持 commit 只含本次相关改动。
 - 这条约定是为了避免 AI 在未被确认的情况下就把半成品 / 阶段性改动固化进 git 历史；用户希望保留"先 review、后落盘"的掌控感。
 
+### 3.14 数据库迁移的行尾漂移（会导致启动panic）
+
+#### 现象
+
+```
+Failed to setup app: error encountered during setup hook:
+migration N was previously applied but has been modified
+```
+
+`N` 是**第一个校验失败**的版本号（sqlx 从小到大校验，遇到不匹配即停）——**它通常不是"坏掉"的那个文件，只是排在队首**。
+
+#### 原理
+
+`sqlx::migrate!` 在**编译期**把 `.sql` 按**字节** embed 进 exe，运行时对数据库 `_sqlx_migrations.checksum`（sha384）逐一比对。CRLF 与 LF 在 SQL 语义上完全等价，但字节不同 → sha384 不同 → 判定"迁移被篡改" → panic。
+
+三个来源的字节只要有一个不一致就炸：
+
+| 来源 | 字节由谁决定 |
+|---|---|
+| 数据库记录的 checksum | **当初建库那台机器**上的文件 |
+| CI 构建的 exe | CI runner checkout 出来的文件 |
+| 本地 `cargo run` | 本地磁盘上的文件 |
+
+因此**只发生在"老数据库 + 新 exe"的升级路径**；全新安装不会遇到（建库即用当前字节写入，天然一致）。
+
+#### 三层防护（均已在位，勿拆）
+
+1. `.gitattributes`：`*.sql text eol=lf`（规范化策略）。**注意它只对新的 checkout/add 生效，不会改写磁盘上已存在的老文件。**
+2. 历史数据库一次性修复：把 `_sqlx_migrations` 的旧 checksum 重算为 LF 版（务必先备份 db + wal + shm）。
+3. **运行时自愈**：`db::heal_migration_line_endings(&pool, &migrator)`，在 `migrator.run()` **之前**调用（`db::connect` 已接好）。
+
+   判定逻辑：把当前 SQL 分别归一化成**全 LF / 全 CRLF** 各算一次 sha384，**只有命中其中之一**才认定是行尾漂移并 UPDATE checksum；两者都不匹配说明内容真被改了，**不做任何修改**，交由 sqlx 照常 panic。防篡改语义完整保留。
+
+#### ⚠️ 操作陷阱：刷新磁盘行尾的正确姿势
+
+加完 `.gitattributes` 后，要刷新磁盘上已有的老文件：
+
+```bash
+# ❌ 无效：git 的 clean filter 双向转换会判定「工作区 CRLF」与「索引 LF」内容相同，
+#         checkout 直接跳过重写，行尾纹丝不动且 git status 依然干净
+git add --renormalize src-tauri/migrations/
+git checkout -- src-tauri/migrations/
+
+# ✅ 有效：先删掉再检出，强制 git 走 smudge 按 eol=lf 重写
+rm src-tauri/migrations/*.sql
+git checkout -- src-tauri/migrations/
+```
+
+改完 `git status` 应仍然**干净**——因为仓库里存的本来就是 LF，磁盘只是残留了 CRLF。所以这类修复**通常不需要提交**。
+
+#### 纪律
+
+- **迁移文件一旦合并进主分支即视为不可变。** 要改 schema 就加新版本，绝不回头编辑已发布的文件。
+- 改动 `heal_migration_line_endings` 或任何 migrate 相关代码后，必须跑：
+  ```bash
+  cargo test db::tests
+  ```
+  其中 5 个迁移自愈测试覆盖了：LF↔CRLF 双向漂移能自愈、真篡改**不得**自愈、全新库（无表）不报错、checksum 已一致时不产生写入。
+- 排查脚本思路：Python 对每个 `.sql` 算 sha384，与 DB 记录对比，并额外算"转 LF 后"的值，用于区分**行尾差异**与**真篡改**。
+
 ---
 
 ## 四、新增来源检查清单
