@@ -450,28 +450,11 @@ pub async fn get_or_create_tag(pool: &SqlitePool, input: &TagInput) -> Result<i6
         return Err(AppError::InvalidInput("标签名称不能为空".into()));
     }
     let color = tag_color(&input.name, input.color.clone());
-    if let Some(id) = input.id {
-        let exists = sqlx::query_scalar::<_, i64>("SELECT id FROM tags WHERE id = ?")
-            .bind(id)
-            .fetch_optional(pool)
-            .await?;
-        if exists.is_some() {
-            sqlx::query(
-                "UPDATE tags SET name = ?, normalized = ?, color = ?, description = ?, category_id = ?
-                 WHERE id = ?",
-            )
-            .bind(input.name.trim())
-            .bind(&normalized)
-            .bind(&color)
-            .bind(&input.description)
-            .bind(input.category_id)
-            .bind(id)
-            .execute(pool)
-            .await?;
-            return Ok(id);
-        }
-    }
 
+    // 纯 find-or-create：已有同名（normalized）标签直接复用，绝不改动其任何字段
+    // （名称/颜色/描述/分类）。此前若调用方携带 id 会触发全字段 UPDATE 覆盖，
+    // 导致导入/挂接标签时把「已分类标签」打回未分类（category_id 被写成 NULL）。
+    // 编辑标签本体请走 upsert_tag（显式 id = 全字段更新）。
     if let Some(id) =
         sqlx::query_scalar::<_, i64>("SELECT id FROM tags WHERE normalized = ? ORDER BY id LIMIT 1")
             .bind(&normalized)
@@ -537,7 +520,40 @@ fn tag_from_row(row: SqliteRow) -> Tag {
 }
 
 pub async fn upsert_tag(pool: &SqlitePool, input: &TagInput) -> Result<Tag, AppError> {
-    let id = get_or_create_tag(pool, input).await?;
+    // 显式 id = 编辑既有标签：允许全字段覆盖（改名 / 改色 / 改描述 / 移出分类都可行）。
+    // 这是唯一允许覆盖既有标签字段的入口；其余 find-or-create 路径一律不动已有行。
+    // 若 id 在库中已不存在（被删过），退化为 find-or-create 兜底。
+    let tag_id = match input.id {
+        Some(id) => {
+            let exists = sqlx::query_scalar::<_, i64>("SELECT id FROM tags WHERE id = ?")
+                .bind(id)
+                .fetch_optional(pool)
+                .await?;
+            if exists.is_some() {
+                let normalized = normalize_tag(&input.name);
+                if normalized.is_empty() {
+                    return Err(AppError::InvalidInput("标签名称不能为空".into()));
+                }
+                let color = tag_color(&input.name, input.color.clone());
+                sqlx::query(
+                    "UPDATE tags SET name = ?, normalized = ?, color = ?, description = ?, category_id = ?
+                     WHERE id = ?",
+                )
+                .bind(input.name.trim())
+                .bind(&normalized)
+                .bind(&color)
+                .bind(&input.description)
+                .bind(input.category_id)
+                .bind(id)
+                .execute(pool)
+                .await?;
+                id
+            } else {
+                get_or_create_tag(pool, input).await?
+            }
+        }
+        None => get_or_create_tag(pool, input).await?,
+    };
     let tag = sqlx::query(
         "SELECT t.id, t.namespace, t.name, t.normalized, t.color, t.description, t.category_id,
                 COUNT(it.item_id) AS count
@@ -546,7 +562,7 @@ pub async fn upsert_tag(pool: &SqlitePool, input: &TagInput) -> Result<Tag, AppE
          WHERE t.id = ?
          GROUP BY t.id",
     )
-    .bind(id)
+    .bind(tag_id)
     .map(tag_from_row)
     .fetch_one(pool)
     .await?;
@@ -2100,5 +2116,68 @@ mod tests {
             vec![3],
             "严格「b」应只返回 item3"
         );
+    }
+
+    /// 回归测试：引用既有标签不得重置其分类。
+    /// 曾因 get_or_create_tag 携带 id 即全字段 UPDATE（category_id 绑成 NULL），
+    /// 导致导入 / 给视频补标签时把「已分类标签」打回未分类。
+    #[tokio::test]
+    async fn referencing_existing_tag_preserves_its_category() {
+        use super::{create_tag_category, get_or_create_tag, upsert_tag, SqlitePoolOptions};
+        use crate::models::TagInput;
+
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("内存库连接失败");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("迁移失败");
+
+        // 建分类 + 已分类标签 a
+        let cat = create_tag_category(&pool, "我的分类", None)
+            .await
+            .expect("建分类失败");
+        let tag_a = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO tags (namespace, name, normalized, color, category_id, created_at)
+             VALUES ('user', 'a', 'a', NULL, ?, 1)
+             RETURNING id",
+        )
+        .bind(cat.id)
+        .fetch_one(&pool)
+        .await
+        .expect("插标签失败");
+
+        // 模拟导入/挂接路径：spec 携带 id 但不带 category_id —— 不得清掉分类
+        let reference = TagInput {
+            id: Some(tag_a),
+            namespace: "manual".into(),
+            name: "a".into(),
+            color: None,
+            description: None,
+            category_id: None,
+        };
+        let got = get_or_create_tag(&pool, &reference)
+            .await
+            .expect("get_or_create_tag 失败");
+        assert_eq!(got, tag_a, "应复用既有标签");
+        let cat_now: Option<i64> = sqlx::query_scalar("SELECT category_id FROM tags WHERE id = ?")
+            .bind(tag_a)
+            .fetch_one(&pool)
+            .await
+            .expect("查分类失败");
+        assert_eq!(
+            cat_now,
+            Some(cat.id),
+            "find-or-create 引用标签不得重置其分类"
+        );
+
+        // 显式编辑（upsert_tag 带 id 且 category_id=None）才允许移出分类
+        let edited = upsert_tag(&pool, &reference)
+            .await
+            .expect("upsert_tag 失败");
+        assert_eq!(edited.id, tag_a);
+        assert_eq!(edited.category_id, None, "显式编辑可清空分类（语义不同）");
     }
 }
