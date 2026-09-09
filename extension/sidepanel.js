@@ -22,6 +22,7 @@ const state = {
   exists: false,
   item: null, // { id, source, title, notes, tags, obsidianPath, updatedAt }
   view: 'collect',
+  noteMode: 'edit', // 'edit' | 'preview'
   conflict: null, // { remoteNotes, remoteUpdatedAt }
   obsidian: null, // { enabled, vaultPath }
   savedAt: null,
@@ -52,6 +53,8 @@ document.addEventListener('DOMContentLoaded', () => {
   els.mkPos = document.getElementById('mk-pos');
   els.mkList = document.getElementById('mk-list');
   els.mkCount = document.getElementById('mk-count');
+  els.mkPreview = document.getElementById('mk-preview');
+  els.notePreview = document.getElementById('note-preview');
   els.openObsidian = document.getElementById('open-obsidian');
   els.saveDot = document.getElementById('save-dot');
   els.saveText = document.getElementById('save-text');
@@ -75,6 +78,9 @@ function bind() {
   });
   els.mkTime.addEventListener('click', insertTimestamp);
   els.mkPos.addEventListener('click', insertPosition);
+  els.mkPreview.addEventListener('click', () =>
+    setNoteMode(state.noteMode === 'edit' ? 'preview' : 'edit'),
+  );
   els.openObsidian.addEventListener('click', openInObsidian);
   els.cfOverwrite.addEventListener('click', () => {
     // 用服务端当前值当基准再发一次，等于「我确认覆盖」
@@ -95,6 +101,7 @@ function bind() {
     hideConflict();
     state.dirty = false;
     renderMarkers();
+    if (state.noteMode === 'preview') renderPreview();
     setSaved('已保存');
   });
 
@@ -118,6 +125,7 @@ async function init() {
   state.token = (stored.bridgeToken || '').trim();
   state.port = stored.bridgePort || null;
   state.view = stored.sidebarView === 'note' ? 'note' : 'collect';
+  state.noteMode = stored.sidebarNoteMode === 'preview' ? 'preview' : 'edit';
 
   if (!state.token) {
     setStatus('请先在扩展选项页填写本机令牌', 'error');
@@ -406,6 +414,8 @@ async function loadPage() {
     markDirty();
   }
 
+  if (state.noteMode === 'preview') renderPreview();
+
   state.dirty = false;
   render();
   renderNoteChrome();
@@ -424,6 +434,11 @@ function setView(view) {
   chrome.storage.local.set({ sidebarView: view });
   if (view === 'note') {
     renderNoteChrome();
+    // 进入笔记视图时同步预览/编辑显隐（init 时 noteMode 可能已是 preview）
+    els.note.hidden = state.noteMode !== 'edit';
+    els.notePreview.hidden = state.noteMode === 'edit';
+    els.mkPreview.textContent = state.noteMode === 'edit' ? '预览' : '编辑';
+    if (state.noteMode === 'preview') renderPreview();
   }
 }
 
@@ -594,13 +609,48 @@ function formatTime(seconds) {
   return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
 }
 
+// 镜像 Rust 端 normalize_url：剥掉追踪参数、保留 p（B站分P）、去掉 fragment。
+// 否则写进笔记的标记 URL 会带上整串 spm_id_from/vd_source，而且页面自带的 ?t=
+// 会和插入的跳秒参数撞车导致定位错乱。
+const STRIP_PARAMS = [
+  'spm_id_from',
+  'from_spm_id',
+  'vd_source',
+  'share_source',
+  'share_tag',
+  'share_from',
+  'unique_k',
+  't',
+  'timestamp',
+  'bsource',
+  'bsource_type',
+  'utm_source',
+  'utm_medium',
+  'utm_campaign',
+  'utm_term',
+  'utm_content',
+  'utm_id',
+];
+
+function cleanUrl(url) {
+  const h = url.indexOf('#');
+  const base = h >= 0 ? url.slice(0, h) : url;
+  const q = base.indexOf('?');
+  if (q < 0) return base; // 无 query：直接返回干净路径
+  const path = base.slice(0, q);
+  const params = new URLSearchParams(base.slice(q + 1));
+  for (const key of STRIP_PARAMS) params.delete(key);
+  const s = params.toString();
+  return s ? `${path}?${s}` : path;
+}
+
 function withTimeParam(url, seconds) {
-  const base = url.split('#')[0];
+  const base = cleanUrl(url);
   return `${base}${base.includes('?') ? '&' : '?'}t=${seconds}`;
 }
 
 function withTextFragment(url, quote, anchorId) {
-  const base = url.split('#')[0];
+  const base = cleanUrl(url);
   const fragment = `${anchorId ? `#${anchorId}` : ''}:~:text=${encodeURIComponent(quote)}`;
   return base + fragment;
 }
@@ -622,6 +672,76 @@ function insertLine(text) {
   markDirty();
 }
 
+// ── 笔记：编辑 / 预览切换 ──
+// 编辑态看到原始 Markdown（方便手写）；预览态把时间戳 / 位置标记渲染成可点的
+// 干净按钮，把长 URL 完全藏起来，笔记读起来清爽。两种形态存的是同一份文本。
+
+function setNoteMode(mode) {
+  state.noteMode = mode;
+  if (mode === 'preview') flushSave(); // 进预览前先落盘，免得看到旧内容
+  const edit = mode === 'edit';
+  els.note.hidden = !edit;
+  els.notePreview.hidden = edit;
+  els.mkPreview.textContent = edit ? '预览' : '编辑';
+  if (!edit) renderPreview();
+  chrome.storage.local.set({ sidebarNoteMode: mode });
+}
+
+// 把笔记文本渲染成预览：标记行 → 可点按钮（URL 隐藏），其余行原样展示。
+function renderPreview() {
+  const box = els.notePreview;
+  box.textContent = '';
+  const lines = (els.note.value || '').split('\n');
+  if (lines.length === 1 && lines[0].trim() === '') {
+    const ph = document.createElement('p');
+    ph.className = 'ph';
+    ph.textContent = '预览：时间戳与位置标记会显示为可点击的干净按钮，链接本身被隐藏。';
+    box.appendChild(ph);
+    return;
+  }
+  lines.forEach((line) => {
+    const div = document.createElement('div');
+    div.className = 'ln';
+    const m = line.match(MARKER_RE);
+    let marker = null;
+    if (m) {
+      const url = m[2];
+      let kind = null;
+      if (/[:~]text=/.test(url)) kind = 'pos';
+      else if (/[?&]t=/.test(url)) kind = 'time';
+      if (kind) {
+        marker = {
+          kind,
+          seconds: kind === 'time' ? parseInt((url.match(/[?&]t=(\d+)/) || [0, 0])[1], 10) || 0 : 0,
+          anchor: kind === 'pos' ? (url.split('#')[1] || '').split(':~:')[0] || null : null,
+          quote: kind === 'pos' ? decodeURIComponent((url.split('text=')[1] || '').split('&')[0]) : '',
+          url,
+          label: m[1],
+          desc: m[3] || '',
+        };
+      }
+    }
+    if (marker) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = `mk-chip ${marker.kind}`;
+      chip.textContent = marker.kind === 'time' ? formatTime(marker.seconds) : '位置';
+      chip.title = marker.kind === 'time' ? `跳到 ${formatTime(marker.seconds)}` : '跳到该位置';
+      chip.addEventListener('click', () => jump(marker));
+      div.appendChild(chip);
+      if (marker.desc) {
+        const span = document.createElement('span');
+        span.className = 'desc';
+        span.textContent = ` ${marker.desc}`;
+        div.appendChild(span);
+      }
+    } else {
+      div.textContent = line;
+    }
+    box.appendChild(div);
+  });
+}
+
 async function insertTimestamp() {
   if (!state.page) return;
   let seconds = 0;
@@ -639,6 +759,7 @@ async function insertTimestamp() {
   }
   const url = withTimeParam(state.page.url, seconds);
   insertLine(`- [${formatTime(seconds)}](${url}) `);
+  if (state.noteMode === 'preview') setNoteMode('edit'); // 插入后回到编辑，方便接着写说明
   setStatus(`已插入 ${formatTime(seconds)}，直接接着打字`, 'success');
 }
 
@@ -657,6 +778,7 @@ async function insertPosition() {
   }
   const url = withTextFragment(state.page.url, selection.text, selection.anchorId);
   insertLine(`- [位置](${url}) `);
+  if (state.noteMode === 'preview') setNoteMode('edit');
   setStatus(
     selection.anchorId ? `已用锚点 #${selection.anchorId} + 文本片段` : '没有可用锚点，已用文本片段',
     'success',

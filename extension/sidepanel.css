@@ -161,9 +161,71 @@ button.link:hover {
   line-height: 1.7;
 }
 
+/* 预览态：标记渲染成可点按钮，长 URL 被隐藏，笔记读起来清爽 */
+.nb-preview {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.nb-preview .ln {
+  line-height: 1.75;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.nb-preview .ph {
+  margin: 0;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.mk-chip {
+  display: inline-block;
+  margin-right: 5px;
+  padding: 1px 9px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  vertical-align: baseline;
+}
+
+.mk-chip:hover {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.mk-chip.pos {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.mk-chip.pos:hover {
+  background: var(--success);
+  color: var(--bg);
+}
+
+.nb-preview .desc {
+  color: var(--text);
+}
+
 .nb-tools {
   display: flex;
   gap: 6px;
+}
+
+.nb-tools #mk-preview {
+  margin-left: auto;
 }
 
 .nb-tools button {

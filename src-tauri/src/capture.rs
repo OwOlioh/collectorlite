@@ -450,7 +450,9 @@ fn handle_capture(
             let item = crate::models::ExternalItem {
                 source: "browser".into(),
                 external_id: external_id.clone(),
-                source_url: url.clone(),
+                // 存归一化后的链接：剥掉 spm_id_from / vd_source 等追踪参数、保留 p，
+                // 否则同一页面从搜索卡片 / 观看历史等不同入口进来，source_url 对不上会查重失配。
+                source_url: normalize_url(&url),
                 title,
                 description: payload.description,
                 cover_url: cover_url.clone(),
@@ -658,18 +660,30 @@ pub fn base_url(raw: &str) -> String {
 
 /// 按地址栏 URL 定位收藏条目，优先级从高到低：
 ///
+/// 0. B站：从 URL 抽 BV 号直接匹配 `bilibili/BVxxx`。彻底摆脱 `source_url` 上
+///    `spm_id_from` / `vd_source` 等追踪参数差异——同一条视频从搜索卡片、观看历史等不同
+///    入口进来，BV 永远相同，所以无论库里那条 `source_url` 带的是哪种 spm 变体都能命中。
 /// 1. `source_url` 精确等于原始 URL
 /// 2. `source_url` 等于归一化后的 URL（剥掉追踪参数）
 /// 3. `source_url` 等于去参数后的 URL
 /// 4. `browser/bk_<sha256(原始 URL)>`（扩展快速入库写的键）
 /// 5. `browser/bk_<sha256(归一化 URL)>`
 ///
-/// 前三级能覆盖**所有来源**（B站 / 知乎 / CSDN / GitHub 入库时都会写 `source_url`），
-/// 后两级是给扩展自己的快速入库兜底的。
+/// 第 1~3 级能覆盖**所有来源**（B站 / 知乎 / CSDN / GitHub 入库时都会写 `source_url`），
+/// 第 4~5 级是给扩展自己的快速入库兜底的。
 async fn lookup_item(
     pool: &SqlitePool,
     raw_url: &str,
 ) -> Result<Option<db::CapturedItem>, AppError> {
+    // B站：先按 BV 号直查，不受 source_url 上追踪参数差异影响。
+    // 库里那条 bilibili/BVxxx 的 source_url 可能带着任一种 spm 变体，按 BV 直查都能命中。
+    if raw_url.contains("bilibili.com") {
+        if let Some(bvid) = capture_bvid(raw_url) {
+            if let Some(item) = db::find_item_by_source_id(pool, "bilibili", &bvid).await? {
+                return Ok(Some(item));
+            }
+        }
+    }
     let normalized = normalize_url(raw_url);
     let base = base_url(raw_url);
     let mut candidates: Vec<String> = Vec::with_capacity(3);
@@ -716,7 +730,9 @@ fn route_capture(
             let minimal = ExternalItem {
                 source: "bilibili".into(),
                 external_id: bvid,
-                source_url: url.to_string(),
+                // 归一化：追踪参数（spm_id_from / vd_source 等）差异不应进入 source_url，
+                // 与 lookup_item 的「按 BV 直查」互补，让库里存的链接也干净。
+                source_url: normalize_url(url),
                 favorite_time: Some(db::now_seconds()),
                 ..Default::default()
             };
@@ -1174,6 +1190,47 @@ mod tests {
             "https://www.bilibili.com/video/BV1xx411c7mD"
         );
         assert_eq!(base_url("bad input"), "bad input");
+    }
+
+    /// 复现用户的真实坑：库里那条 bilibili 记录的 `source_url` 带着某个 spm 变体，
+    /// 之后从另一个入口（不同 `spm_id_from`）打开同一视频，按 BV 直查仍应命中。
+    #[tokio::test]
+    async fn lookup_item_matches_bilibili_by_bvid_despite_different_spm() {
+        use sqlx::sqlite::SqlitePoolOptions;
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("内存库连接失败");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("迁移失败");
+
+        let bvid = "BV1XB4y1g7ix";
+        // 入库时地址栏是「搜索卡片」入口（spm_id_from=333.337...）
+        sqlx::query(
+            "INSERT INTO items (source, external_id, source_url, title, created_at, updated_at)
+             VALUES ('bilibili', ?, 'https://www.bilibili.com/video/BV1XB4y1g7ix/?spm_id_from=333.337.search-card.all.click&vd_source=8886d87fa5f363b3db03d4f89021b0a0', '同一条视频', 1, 1)",
+        )
+        .bind(bvid)
+        .execute(&pool)
+        .await
+        .expect("插入失败");
+
+        // 之后从「观看历史」入口打开（spm_id_from=333.1387...）—— 与库里不同
+        let other_entry = "https://www.bilibili.com/video/BV1XB4y1g7ix/?spm_id_from=333.1387.top_right_bar_window_history.content.click&vd_source=8886d87fa5f363b3db03d4f89021b0a0";
+        let found = lookup_item(&pool, other_entry).await.expect("lookup 失败");
+        let item = found.expect("应命中库里那条 bilibili 记录");
+        assert_eq!(item.external_id, bvid, "应按 BV 命中，不受 spm 差异影响");
+
+        // 另一条视频不应误命中
+        let different = lookup_item(
+            &pool,
+            "https://www.bilibili.com/video/BV9999999999/?spm_id_from=333.337",
+        )
+        .await
+        .expect("lookup 失败");
+        assert!(different.is_none(), "不同视频不应命中");
     }
 
     #[test]

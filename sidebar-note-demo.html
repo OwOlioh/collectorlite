@@ -163,6 +163,25 @@ body{
 body.page-video .nb-tools .t-only{display:inline-flex}
 .nb-tools .p-only{display:none}
 body.page-article .nb-tools .p-only{display:inline-flex}
+.nb-tools #btn-preview{margin-left:auto}
+
+/* 预览态：标记渲染成可点按钮，长 URL 被隐藏 */
+.n-preview{
+  flex:1 1 auto;min-height:0;overflow-y:auto;
+  padding:11px 12px;border:1px solid var(--border);border-radius:8px;
+  background:var(--surface);color:var(--text);line-height:1.75;
+}
+.n-preview .ln{white-space:pre-wrap;word-break:break-word}
+.n-preview .ph{color:var(--side-muted);font-style:italic;font-size:12px}
+.mk-chip{
+  display:inline-block;margin-right:5px;padding:1px 9px;vertical-align:baseline;
+  border:1px solid var(--blue);border-radius:6px;background:transparent;color:var(--blue);
+  font:inherit;font-size:12px;font-weight:700;cursor:pointer;
+}
+.mk-chip:hover{background:var(--blue);color:#fff}
+.mk-chip.pos{border-color:var(--green);color:var(--green)}
+.mk-chip.pos:hover{background:var(--green);color:#fff}
+.n-preview .desc{color:var(--text)}
 
 /* 标记列表 */
 .mk-head{display:flex;align-items:center;justify-content:space-between;margin:14px 0 7px}
@@ -363,9 +382,11 @@ pre.raw{
                 <div class="nb-tools">
                   <button class="t-only" id="btn-ts">+ 时间戳</button>
                   <button class="p-only" id="btn-pos">+ 位置标记</button>
+                  <button id="btn-preview" class="right">预览</button>
                 </div>
                 <div class="field grow">
                   <textarea id="n-text" placeholder="记点什么？"></textarea>
+                  <div id="n-preview" class="n-preview" hidden></div>
                 </div>
 
                 <div class="mk-head">
@@ -490,9 +511,21 @@ pre.raw{
   var ARTICLE_URL = 'https://zhuanlan.zhihu.com/p/123456789';
   var DURATION = 600;
 
+  // 镜像扩展端：剥追踪参数、保留 p、去 fragment，让写进笔记的标记 URL 干净
+  var STRIP = ['spm_id_from','from_spm_id','vd_source','share_source','share_tag','share_from',
+    'unique_k','t','timestamp','bsource','bsource_type','utm_source','utm_medium',
+    'utm_campaign','utm_term','utm_content','utm_id'];
+  function cleanUrl(u){
+    var h = u.indexOf('#'); var base = h>=0 ? u.slice(0,h) : u;
+    var q = base.indexOf('?'); if(q<0) return base;
+    var path = base.slice(0,q); var p = new URLSearchParams(base.slice(q+1));
+    STRIP.forEach(function(k){ p.delete(k); });
+    var s = p.toString(); return s ? path+'?'+s : path;
+  }
+
   var DEFAULT_NOTES =
-    '- [00:42](' + VIDEO_URL + '&t=42) WBI 的两个参数 img_key / sub_key 在哪\n' +
-    '- [01:15](' + VIDEO_URL + '&t=75) 混合密钥表的 64 位重排\n';
+    '- [' + fmt(42) + '](' + cleanUrl(VIDEO_URL) + '?t=42) WBI 的两个参数 img_key / sub_key 在哪\n' +
+    '- [' + fmt(75) + '](' + cleanUrl(VIDEO_URL) + '?t=75) 混合密钥表的 64 位重排\n';
 
   var state = {
     view:'collect',
@@ -502,6 +535,7 @@ pre.raw{
     tags:['前端','逆向','B站'],
     pool:['前端','逆向','B站','抓包','待读'],
     notes:DEFAULT_NOTES,
+    noteMode:'edit',
     videoTime:48,
     playing:false,
     conflictArmed:false,
@@ -535,6 +569,11 @@ pre.raw{
     $('view-collect').classList.toggle('on', v==='collect');
     $('view-note').classList.toggle('on', v==='note');
     if(v==='collect'){ $('f-title').focus(); }
+    // 进入笔记视图时同步预览/编辑显隐
+    $('n-text').hidden = state.noteMode !== 'edit';
+    $('n-preview').hidden = state.noteMode === 'edit';
+    $('btn-preview').textContent = state.noteMode === 'edit' ? '预览' : '编辑';
+    if(state.noteMode === 'preview') renderSidePreview();
   }
 
   function setPage(p){
@@ -619,6 +658,53 @@ pre.raw{
     return out;
   }
 
+  // ── 侧边栏：编辑 / 预览 切换（隐藏 URL，让笔记清爽）──
+  function setNoteMode(mode){
+    state.noteMode = mode;
+    var edit = mode === 'edit';
+    $('n-text').hidden = !edit;
+    $('n-preview').hidden = edit;
+    $('btn-preview').textContent = edit ? '预览' : '编辑';
+    if(!edit) renderSidePreview();
+  }
+
+  function renderSidePreview(){
+    var box = $('n-preview'); box.innerHTML = '';
+    var lines = ($('n-text').value || state.notes || '').split('\n');
+    if(lines.length === 1 && !lines[0].trim()){
+      box.innerHTML = '<span class="ph">预览：时间戳与位置标记会显示为可点击的干净按钮，链接本身被隐藏。</span>';
+      return;
+    }
+    lines.forEach(function(line){
+      var div = document.createElement('div'); div.className = 'ln';
+      var m = line.match(MARKER_RE); var marker = null;
+      if(m){
+        var url = m[2], kind = null;
+        if(/[:~]text=/.test(url)) kind = 'pos';
+        else if(/[?&]t=/.test(url)) kind = 'time';
+        if(kind) marker = {
+          kind:kind,
+          seconds: kind==='time' ? (parseInt((url.match(/[?&]t=(\d+)/)||[0,0])[1],10)||0) : 0,
+          anchor: kind==='pos' ? ((url.split('#')[1]||'').split(':~:')[0]||null) : null,
+          quote: kind==='pos' ? decodeURIComponent((url.split('text=')[1]||'').split('&')[0]) : '',
+          url:url, label:m[1], desc:m[3]||''
+        };
+      }
+      if(marker){
+        var chip = document.createElement('button'); chip.type='button';
+        chip.className = 'mk-chip ' + marker.kind;
+        chip.textContent = marker.kind==='time' ? fmt(marker.seconds) : '位置';
+        chip.title = marker.kind==='time' ? '跳到 ' + fmt(marker.seconds) : '跳到该位置';
+        chip.addEventListener('click', function(){ jump(marker); });
+        div.appendChild(chip);
+        if(marker.desc){ var s = document.createElement('span'); s.className='desc'; s.textContent=' '+marker.desc; div.appendChild(s); }
+      }else{
+        div.textContent = line;
+      }
+      box.appendChild(div);
+    });
+  }
+
   function renderMarkers(){
     var list = parseMarkers();
     var box = $('mk-list'); box.innerHTML = '';
@@ -690,12 +776,13 @@ pre.raw{
     ta.focus();
     ta.setSelectionRange(caret, caret);
     renderMarkers(); renderPreview();
+    if(state.noteMode === 'preview') setNoteMode('edit'); // 插入后回到编辑，方便接着写说明
     markDirty();
   }
 
   function insertTimestamp(){
     var t = Math.max(0, Math.floor(state.videoTime) - 3);
-    var url = VIDEO_URL + (VIDEO_URL.indexOf('?')>=0 ? '&' : '?') + 't=' + t;
+    var url = cleanUrl(VIDEO_URL) + (cleanUrl(VIDEO_URL).indexOf('?')>=0 ? '&' : '?') + 't=' + t;
     insertLine('- [' + fmt(t) + '](' + url + ') ');
     toast('插入 ' + fmt(t) + '（回退 3 秒补偿点击延迟）· 光标已停在行尾，可直接打字');
   }
@@ -819,6 +906,9 @@ pre.raw{
 
   $('btn-ts').addEventListener('click', insertTimestamp);
   $('btn-pos').addEventListener('click', insertPosition);
+  $('btn-preview').addEventListener('click', function(){
+    setNoteMode(state.noteMode === 'edit' ? 'preview' : 'edit');
+  });
 
   $('n-text').addEventListener('input', function(){
     state.notes = this.value;
