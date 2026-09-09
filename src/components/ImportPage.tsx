@@ -509,17 +509,20 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
       if (result.failed > 0) toast("error", summary);
       else toast("success", summary);
 
-      // 导入后自动补一次封面缓存，覆盖新导入项以及库中历史遗留的缺封面项，
-      // 保证封面都能正常显示（B站/CSDN 会下载到本地，其余来源走远程 https 封面）。
+      // 封面不再阻塞导入：Rust 端已经把任务丢到后台，这里查一下队列长度告诉用户。
+      // 中途关掉应用也安全——队列就存在数据库里，下次启动会接着缓存。
       void api
-        .recacheCovers()
-        .then((recache) => {
-          if (recache.cached > 0) {
-            toast("info", `已自动缓存 ${recache.cached} 张封面`);
+        .coverCacheStatus()
+        .then((status) => {
+          if (status.pending > 0) {
+            toast(
+              "info",
+              `数据已导入。${status.pending} 张封面正在后台缓存，期间界面可能出现卡顿`
+            );
           }
         })
         .catch(() => {
-          // 封面缓存失败不阻断导入结果，静默忽略
+          // 查不到队列长度不影响导入结果，静默忽略
         });
 
       onTagsChanged();

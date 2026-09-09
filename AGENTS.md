@@ -40,6 +40,7 @@ Multi-platform local desktop app for collecting favorites (Bilibili, browser boo
 | `src/components/SettingsPage.tsx` | Account status, privacy info, **appearance (theme) selector** |
 | `src/components/Sidebar.tsx` | Navigation sidebar |
 | `src/components/TrashPage.tsx` | 回收站页面：列出已删除项，支持单条/批量恢复与永久删除/清空，显示保留期倒计时 |
+| `src/components/CoverCacheListener.tsx` | 后台封面缓存的进度提示（启动续传提示 + 完成提示 + 触发列表刷新） |
 | `src/lib/api.ts` | Tauri invoke wrapper with mock fallback |
 | `src/lib/format.ts` | Shared `formatDuration` / `formatDate` helpers |
 | `src/lib/theme.ts` | Theme persistence (localStorage + system preference) and `applyTheme` |
@@ -62,6 +63,7 @@ Multi-platform local desktop app for collecting favorites (Bilibili, browser boo
 | `src-tauri/src/source/csdn.rs` | CSDN client: username → collections, article covers via `og:image` |
 | `src-tauri/src/source/github.rs` | GitHub client: Stars import, uses `native-tls` (system proxy) |
 | `src-tauri/src/state.rs` | App state, cookie/token persistence (file + keyring) |
+| `src-tauri/src/cover_cache.rs` | 后台封面缓存队列：并发下载 + 批量回写 + 进度广播，导入与启动都会拉起 |
 | `src-tauri/src/wbi.rs` | Bilibili WBI signing |
 | `src-tauri/src/error.rs` | `AppError` enum |
 
@@ -93,6 +95,7 @@ Multi-platform local desktop app for collecting favorites (Bilibili, browser boo
 - FTS5 full-text search index
 - Website favicon service for browser bookmarks (`favicon.im`)
 - **Trash / 回收站**: 单条 / 批量 / 按标签删除均为软删除，先进入回收站，保留期内可恢复；超期在应用启动时自动清除；永久删除才真正删库并清理封面文件
+- **封面后台缓存（断点续传）**: 导入只写数据库、不等封面，封面交给后台队列并发下载；"cover_url 有值但 cover_local_path 为空"即待办，中途关掉应用不丢任务，下次启动自动接着缓存
 
 ## Frontend Features (added later)
 

@@ -130,6 +130,12 @@ export interface RecacheResult {
   errors?: string[];
 }
 
+/** 封面缓存队列状态：还有多少张没缓存、后台任务是否在跑。 */
+export interface CoverCacheStatus {
+  pending: number;
+  running: boolean;
+}
+
 export interface QrSession {
   qrcodeKey: string;
   qrcodeUrl: string;

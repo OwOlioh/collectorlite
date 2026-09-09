@@ -1,10 +1,16 @@
-// Edge 侧边栏：读取当前标签页 → 填标签与批注 → 通过本地桥写入「collectorlite」。
+// Edge 侧边栏：读当前页 → 收藏 / 笔记两个视图 → 通过本地桥写入「collectorlite」。
 //
 // 桥只监听 127.0.0.1，端口在 17820–17829 之间顺延，扩展按顺序探测
 // （扩展读不到本地文件，所以不能靠读端口文件）。
+//
+// 两个视图共享同一条收藏：
+//   「收藏」= 标题 + 标签（提交到 /capture）
+//   「笔记」= items.notes（提交到 /note，带乐观锁）
+// 笔记不再出现在收藏视图里 —— 同一个字段不该有两个编辑器，否则必然互相覆盖。
 
 const PORT_START = 17820;
 const PORT_END = 17829;
+const AUTOSAVE_MS = 1200;
 
 const state = {
   token: '',
@@ -14,6 +20,12 @@ const state = {
   page: null,
   tabId: null,
   exists: false,
+  item: null, // { id, source, title, notes, tags, obsidianPath, updatedAt }
+  view: 'collect',
+  conflict: null, // { remoteNotes, remoteUpdatedAt }
+  obsidian: null, // { enabled, vaultPath }
+  savedAt: null,
+  dirty: false,
 };
 
 const els = {};
@@ -28,21 +40,88 @@ document.addEventListener('DOMContentLoaded', () => {
   els.save = document.getElementById('save');
   els.url = document.getElementById('url');
   els.openOptions = document.getElementById('open-options');
+  els.tabCollect = document.getElementById('tab-collect');
+  els.tabNote = document.getElementById('tab-note');
+  els.viewCollect = document.getElementById('view-collect');
+  els.viewNote = document.getElementById('view-note');
+  els.nbLocked = document.getElementById('nb-locked');
+  els.nbOpen = document.getElementById('nb-open');
+  els.conflict = document.getElementById('conflict');
+  els.goCollect = document.getElementById('go-collect');
+  els.mkTime = document.getElementById('mk-time');
+  els.mkPos = document.getElementById('mk-pos');
+  els.mkList = document.getElementById('mk-list');
+  els.mkCount = document.getElementById('mk-count');
+  els.openObsidian = document.getElementById('open-obsidian');
+  els.saveDot = document.getElementById('save-dot');
+  els.saveText = document.getElementById('save-text');
+  els.cfOverwrite = document.getElementById('cf-overwrite');
+  els.cfReload = document.getElementById('cf-reload');
 
-  els.tagInput.addEventListener('keydown', onTagInput);
-  els.save.addEventListener('click', onSave);
-  els.openOptions.addEventListener('click', () => chrome.runtime.openOptionsPage());
-
+  bind();
   init();
 });
 
+function bind() {
+  els.tagInput.addEventListener('keydown', onTagInput);
+  els.save.addEventListener('click', onSave);
+  els.openOptions.addEventListener('click', () => chrome.runtime.openOptionsPage());
+  els.tabCollect.addEventListener('click', () => setView('collect'));
+  els.tabNote.addEventListener('click', () => setView('note'));
+  els.goCollect.addEventListener('click', () => {
+    setView('collect');
+    els.title.focus();
+    els.title.select();
+  });
+  els.mkTime.addEventListener('click', insertTimestamp);
+  els.mkPos.addEventListener('click', insertPosition);
+  els.openObsidian.addEventListener('click', openInObsidian);
+  els.cfOverwrite.addEventListener('click', () => {
+    // 用服务端当前值当基准再发一次，等于「我确认覆盖」
+    if (state.conflict) {
+      state.item = { ...state.item, updatedAt: state.conflict.remoteUpdatedAt };
+    }
+    hideConflict();
+    saveNote();
+  });
+  els.cfReload.addEventListener('click', () => {
+    if (!state.conflict) return;
+    els.note.value = state.conflict.remoteNotes || '';
+    state.item = {
+      ...state.item,
+      notes: els.note.value,
+      updatedAt: state.conflict.remoteUpdatedAt,
+    };
+    hideConflict();
+    state.dirty = false;
+    renderMarkers();
+    setSaved('已保存');
+  });
+
+  els.note.addEventListener('input', () => {
+    renderMarkers();
+    markDirty();
+  });
+
+  // 侧边栏随时会被卸载（切站点、关面板）—— 走之前把没保存的内容推出去。
+  // MV3 下普通 fetch 会被杀掉，keepalive 才能发出去；token 走查询参数，
+  // 这样将来即使降级到 sendBeacon 也不会丢鉴权。
+  const flush = () => flushSave();
+  window.addEventListener('pagehide', flush);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flush();
+  });
+}
+
 async function init() {
-  const stored = await chrome.storage.local.get(['bridgeToken', 'bridgePort']);
+  const stored = await chrome.storage.local.get(['bridgeToken', 'bridgePort', 'sidebarView']);
   state.token = (stored.bridgeToken || '').trim();
   state.port = stored.bridgePort || null;
+  state.view = stored.sidebarView === 'note' ? 'note' : 'collect';
 
   if (!state.token) {
     setStatus('请先在扩展选项页填写本机令牌', 'error');
+    setView(state.view);
     disableForm(true);
     return;
   }
@@ -51,22 +130,30 @@ async function init() {
     await bridgeFetch('/ping');
   } catch (error) {
     setStatus('连不上collectorlite，请先启动应用', 'error');
+    setView(state.view);
     disableForm(true);
     return;
   }
 
+  setView(state.view);
   await loadPage();
-  // 页面切换 / 刷新时同步热更新当前页内容（仅对当前侧边栏对应的那个标签页响应）。
-  chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+
+  // 页面切换 / 刷新时热更新（仅对侧边栏当前对应的那个标签页响应）。
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (changeInfo.status === 'complete' && tabId === state.tabId) {
-      loadPage();
+      reload();
     }
   });
   chrome.tabs.onActivated.addListener((activeInfo) => {
     if (activeInfo.tabId !== state.tabId) {
-      loadPage();
+      reload();
     }
   });
+}
+
+async function reload() {
+  flushSave();
+  await loadPage();
 }
 
 // ── 与本地桥通信 ──
@@ -113,11 +200,81 @@ function portRange() {
   return ports;
 }
 
+// ── 注入脚本 ──
+// 下面几个函数会被序列化后注入页面，**不能引用外部作用域的任何变量**。
+
+// eslint-disable-next-line no-unused-vars
+function pageVideoState() {
+  const videos = Array.from(document.querySelectorAll('video')).filter(
+    (v) => Number.isFinite(v.duration) && v.duration > 0,
+  );
+  if (!videos.length) return null;
+  const pick = videos.sort(
+    (a, b) => b.offsetWidth * b.offsetHeight - a.offsetWidth * a.offsetHeight,
+  )[0];
+  return { currentTime: pick.currentTime, duration: pick.duration };
+}
+
+// eslint-disable-next-line no-unused-vars
+function pageSeek(seconds) {
+  const videos = Array.from(document.querySelectorAll('video')).filter((v) =>
+    Number.isFinite(v.duration),
+  );
+  if (!videos.length) return false;
+  const pick = videos.sort(
+    (a, b) => b.offsetWidth * b.offsetHeight - a.offsetWidth * a.offsetHeight,
+  )[0];
+  pick.currentTime = Math.max(0, Math.min(pick.duration, seconds));
+  const played = pick.play();
+  if (played && typeof played.catch === 'function') played.catch(() => {});
+  return true;
+}
+
+// eslint-disable-next-line no-unused-vars
+function pageSelection() {
+  const selection = window.getSelection();
+  const text = (selection && selection.toString() ? selection.toString() : '').trim();
+  if (!text) return null;
+  let node = selection.anchorNode;
+  if (node && node.nodeType === 3) node = node.parentElement;
+  const withId = node && node.closest ? node.closest('[id]') : null;
+  return { text: text.slice(0, 60), anchorId: withId && withId.id ? withId.id : null };
+}
+
+// eslint-disable-next-line no-unused-vars
+function pageScrollToText(quote, anchorId) {
+  let target = anchorId ? document.getElementById(anchorId) : null;
+  if (!target) {
+    const nodes = document.querySelectorAll('p, li, h1, h2, h3, h4, blockquote, td');
+    const needle = quote.slice(0, 12);
+    for (const node of nodes) {
+      if (node.textContent.includes(needle)) {
+        target = node;
+        break;
+      }
+    }
+  }
+  if (!target) return false;
+  target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  return true;
+}
+
+async function callPage(fn, args = []) {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!tab || !tab.id) throw new Error('找不到当前标签页');
+  const [injected] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: fn,
+    args,
+  });
+  return injected ? injected.result : null;
+}
+
 // ── 读取当前页面 ──
 
 async function readCurrentTab() {
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (!tab?.id) {
+  if (!tab || !tab.id) {
     throw new Error('找不到当前标签页');
   }
   // 浏览器内部页面（chrome://、edge://、about:、扩展自身页）扩展永远无法注入脚本，
@@ -127,43 +284,51 @@ async function readCurrentTab() {
     error.code = 'PROTECTED';
     throw error;
   }
-  // 有 <all_urls> host 权限，注入脚本可读取标题 / 选中文字 / 描述。
-  // 极个别注入失败时，再用 tabs API 的 url/title 兜底，保证至少能入库。
   try {
     const [injected] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: () => {
-        const meta = (selector) =>
-          document.querySelector(selector)?.content || '';
-        const ogTitle = meta('meta[property="og:title"]');
-        const ogImage = meta('meta[property="og:image"]');
-        const ogDesc = meta('meta[property="og:description"]');
-        const metaDesc = meta('meta[name="description"]');
+        const pick = (selector) => {
+          const node = document.querySelector(selector);
+          return node ? node.content : '';
+        };
+        const ogTitle = pick('meta[property="og:title"]');
+        const ogImage = pick('meta[property="og:image"]');
+        const ogDesc = pick('meta[property="og:description"]');
+        const metaDesc = pick('meta[name="description"]');
         // 知乎登录后 document.title 会带未读提示，如「(8封私信/10条消息) 标题 - 知乎」。
-        // 优先用干净的 og:title；清洗是幂等的，对干净标题无害，所以无条件执行。
         const title = (ogTitle || document.title || '')
-          // 去掉开头的未读提示括号（含「私信」或「消息」），如 (8封私信/10条消息)
           .replace(/^[（(][^)）]*(?:私信|消息)[^)）]*[)）]\s*/, '')
-          // 去掉结尾的「 - 知乎」
           .replace(/\s*[-–—]\s*知乎\s*$/, '')
           .trim();
+        const videos = Array.from(document.querySelectorAll('video')).filter(
+          (v) => Number.isFinite(v.duration) && v.duration > 0,
+        );
         return {
           url: location.href,
           title,
           ogImage,
           description: ogDesc || metaDesc,
-          selection: (window.getSelection()?.toString() || '').trim(),
+          selection: (window.getSelection() ? window.getSelection().toString() : '').trim(),
+          hasVideo: videos.length > 0,
         };
       },
     });
-    if (injected?.result) {
+    if (injected && injected.result) {
       return { id: tab.id, ...injected.result };
     }
   } catch (error) {
     // 落到下面的 tabs 兜底。
   }
   if (tab.url) {
-    return { id: tab.id, url: tab.url, title: tab.title || tab.url, description: '', selection: '' };
+    return {
+      id: tab.id,
+      url: tab.url,
+      title: tab.title || tab.url,
+      description: '',
+      selection: '',
+      hasVideo: false,
+    };
   }
   throw new Error('读取当前页面失败：拿不到页面地址');
 }
@@ -173,7 +338,7 @@ async function loadPage() {
   try {
     page = await readCurrentTab();
   } catch (error) {
-    if (error?.code === 'PROTECTED') {
+    if (error && error.code === 'PROTECTED') {
       setStatus('这个页面无法收藏（浏览器内部页面）', 'error');
     } else {
       setStatus(`读取当前页面失败：${error.message}`, 'error');
@@ -181,7 +346,7 @@ async function loadPage() {
     disableForm(true);
     return;
   }
-  if (!page?.url) {
+  if (!page.url) {
     setStatus('这个页面无法收藏（浏览器内部页面）', 'error');
     disableForm(true);
     return;
@@ -198,35 +363,87 @@ async function loadPage() {
       bridgeFetch('/tags'),
       bridgeFetch(`/item?url=${encodeURIComponent(page.url)}`),
     ]);
-    tags = (await tagsResponse.json()).tags || [];
+    tags = ((await tagsResponse.json()).tags || []).map((tag) => tag.name);
     const looked = await itemResponse.json();
     if (looked.exists && looked.item) {
       item = looked.item;
     }
   } catch (error) {
-    setStatus(`读取标签池失败：${error.message}`, 'error');
+    setStatus(`读取收藏信息失败：${error.message}`, 'error');
     disableForm(true);
     return;
   }
 
-  state.pool = tags.map((tag) => tag.name);
+  // Obsidian 联动状态：决定要不要显示「在 Obsidian 中打开」。
+  try {
+    const response = await bridgeFetch('/obsidian/status');
+    state.obsidian = await response.json();
+  } catch (error) {
+    state.obsidian = null; // 老版本 app 没有这个端点，静默降级
+  }
+
+  state.pool = tags;
+  state.exists = Boolean(item);
+  state.item = item;
+  hideConflict();
+
   if (item) {
-    // 已收藏过：回填标签与批注，按钮变「更新」。
-    state.exists = true;
     state.selected = item.tags || [];
     els.title.value = item.title || page.title || page.url;
     els.note.value = item.notes || '';
     els.save.textContent = '更新';
   } else {
-    state.exists = false;
     state.selected = [];
     els.title.value = page.title || page.url;
-    els.note.value = page.selection || '';
+    els.note.value = '';
     els.save.textContent = '收藏';
   }
 
+  // 只在「服务端为空且有本地草稿」时恢复，避免把用户刚清空的内容又捞回来。
+  const draft = await readDraft(page.url);
+  if (draft && !els.note.value) {
+    els.note.value = draft;
+    markDirty();
+  }
+
+  state.dirty = false;
   render();
+  renderNoteChrome();
+  setSaved(item ? '已保存' : '');
   disableForm(false);
+}
+
+// ── 视图切换 ──
+
+function setView(view) {
+  state.view = view;
+  els.tabCollect.classList.toggle('on', view === 'collect');
+  els.tabNote.classList.toggle('on', view === 'note');
+  els.viewCollect.classList.toggle('on', view === 'collect');
+  els.viewNote.classList.toggle('on', view === 'note');
+  chrome.storage.local.set({ sidebarView: view });
+  if (view === 'note') {
+    renderNoteChrome();
+  }
+}
+
+function renderNoteChrome() {
+  const open = Boolean(state.item);
+  els.nbLocked.hidden = open;
+  els.nbOpen.classList.toggle('on', open);
+  // 没有视频就不显示「+ 时间戳」——一个常年灰着的按钮只是噪音。
+  els.mkTime.hidden = !state.page || !state.page.hasVideo;
+  renderObsidianButton();
+  renderMarkers();
+}
+
+function renderObsidianButton() {
+  const configured = state.obsidian && state.obsidian.enabled;
+  els.openObsidian.hidden = !configured;
+  if (!configured) return;
+  const hasNote = Boolean(state.item && state.item.obsidianPath);
+  els.openObsidian.disabled = !hasNote;
+  els.openObsidian.title = hasNote ? '' : '这条还没同步到 Obsidian，先写点笔记保存一次';
 }
 
 // ── 渲染 ──
@@ -243,7 +460,7 @@ function renderSelected() {
       chip(name, true, () => {
         state.selected = state.selected.filter((item) => item !== name);
         render();
-      })
+      }),
     );
   }
 }
@@ -259,7 +476,7 @@ function renderPool() {
         state.selected.push(name);
         els.tagInput.value = '';
         render();
-      })
+      }),
     );
   }
 }
@@ -283,7 +500,291 @@ function chip(name, selected, onClick) {
   return node;
 }
 
-// ── 交互 ──
+// ── 标记 ──
+
+const MARKER_RE = /^[ \t]*[-*][ \t]*\[([^\]]+)\]\(([^)\s]+)\)[ \t]*(.*)$/;
+
+function parseMarkers() {
+  const out = [];
+  (els.note.value || '').split('\n').forEach((line) => {
+    const m = line.match(MARKER_RE);
+    if (!m) return;
+    const url = m[2];
+    let kind = null;
+    if (/[:~]text=/.test(url)) kind = 'pos';
+    else if (/[?&]t=/.test(url)) kind = 'time';
+    if (!kind) return;
+    out.push({
+      label: m[1],
+      url,
+      desc: m[3] || '',
+      kind,
+      seconds: kind === 'time' ? parseInt((url.match(/[?&]t=(\d+)/) || [0, 0])[1], 10) || 0 : 0,
+      anchor: kind === 'pos' ? (url.split('#')[1] || '').split(':~:')[0] || null : null,
+      quote: kind === 'pos' ? decodeURIComponent((url.split('text=')[1] || '').split('&')[0]) : '',
+    });
+  });
+  return out;
+}
+
+function renderMarkers() {
+  const list = parseMarkers();
+  els.mkCount.textContent = list.length ? `${list.length} 条` : '';
+  els.mkList.textContent = '';
+  if (!list.length) {
+    const empty = document.createElement('div');
+    empty.className = 'mk-empty';
+    empty.textContent = '还没有标记。';
+    els.mkList.appendChild(empty);
+    return;
+  }
+  for (const marker of list) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'mk';
+
+    const badge = document.createElement('span');
+    badge.className = 'badge';
+    badge.textContent = marker.kind === 'time' ? formatTime(marker.seconds) : '位置';
+
+    const text = document.createElement('span');
+    text.className = 'txt';
+    text.textContent = marker.desc || (marker.kind === 'pos' ? marker.quote : '') || '（无说明）';
+
+    const go = document.createElement('span');
+    go.className = 'go';
+    go.textContent = '跳转 ›';
+
+    button.appendChild(badge);
+    button.appendChild(text);
+    button.appendChild(go);
+    button.addEventListener('click', () => jump(marker));
+    els.mkList.appendChild(button);
+  }
+}
+
+async function jump(marker) {
+  try {
+    if (marker.kind === 'time') {
+      const ok = await callPage(pageSeek, [marker.seconds]);
+      if (!ok) {
+        // 页面里找不到 video（比如播放器被卸载了）→ 退化成带 t= 参数重新打开
+        await chrome.tabs.update(state.tabId, { url: marker.url });
+        setStatus(`已跳到 ${formatTime(marker.seconds)}（重新载入）`);
+        return;
+      }
+      setStatus(`已跳到 ${formatTime(marker.seconds)}`, 'success');
+    } else {
+      const ok = await callPage(pageScrollToText, [marker.quote, marker.anchor]);
+      setStatus(ok ? '已定位到标记位置' : '没找到这段内容', ok ? 'success' : 'error');
+    }
+  } catch (error) {
+    setStatus(`跳转失败：${error.message}`, 'error');
+  }
+}
+
+// ── 插入标记 ──
+
+function formatTime(seconds) {
+  const total = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n) => (n < 10 ? `0${n}` : `${n}`);
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+}
+
+function withTimeParam(url, seconds) {
+  const base = url.split('#')[0];
+  return `${base}${base.includes('?') ? '&' : '?'}t=${seconds}`;
+}
+
+function withTextFragment(url, quote, anchorId) {
+  const base = url.split('#')[0];
+  const fragment = `${anchorId ? `#${anchorId}` : ''}:~:text=${encodeURIComponent(quote)}`;
+  return base + fragment;
+}
+
+// 在当前光标处插入一行，并把光标停在这一行末尾——
+// 连续打点时不需要每次重新定位光标。
+function insertLine(text) {
+  const textarea = els.note;
+  const start = textarea.selectionStart;
+  const end = textarea.selectionEnd;
+  const before = textarea.value.slice(0, start);
+  const after = textarea.value.slice(end);
+  const prefix = before.length && !/\n$/.test(before) ? '\n' : '';
+  textarea.value = before + prefix + text + after;
+  const caret = before.length + prefix.length + text.length;
+  textarea.focus();
+  textarea.setSelectionRange(caret, caret);
+  renderMarkers();
+  markDirty();
+}
+
+async function insertTimestamp() {
+  if (!state.page) return;
+  let seconds = 0;
+  try {
+    const video = await callPage(pageVideoState);
+    if (!video) {
+      setStatus('这一页没检测到视频', 'error');
+      return;
+    }
+    // 回退 3 秒：听到重点再点按钮已经有延迟了，跳回去正好落在重点前。
+    seconds = Math.max(0, Math.floor(video.currentTime) - 3);
+  } catch (error) {
+    setStatus(`读取播放进度失败：${error.message}`, 'error');
+    return;
+  }
+  const url = withTimeParam(state.page.url, seconds);
+  insertLine(`- [${formatTime(seconds)}](${url}) `);
+  setStatus(`已插入 ${formatTime(seconds)}，直接接着打字`, 'success');
+}
+
+async function insertPosition() {
+  if (!state.page) return;
+  let selection = null;
+  try {
+    selection = await callPage(pageSelection);
+  } catch (error) {
+    setStatus(`读取选区失败：${error.message}`, 'error');
+    return;
+  }
+  if (!selection || !selection.text) {
+    setStatus('先在页面里选中一段文字', 'error');
+    return;
+  }
+  const url = withTextFragment(state.page.url, selection.text, selection.anchorId);
+  insertLine(`- [位置](${url}) `);
+  setStatus(
+    selection.anchorId ? `已用锚点 #${selection.anchorId} + 文本片段` : '没有可用锚点，已用文本片段',
+    'success',
+  );
+}
+
+// ── 保存笔记 ──
+
+let saveTimer = null;
+
+function markDirty() {
+  if (!state.item) return;
+  state.dirty = true;
+  setSaved('编辑中…', true);
+  writeDraft(state.page.url, els.note.value);
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => saveNote(), AUTOSAVE_MS);
+}
+
+function setSaved(text, pending) {
+  els.saveText.textContent = text || '';
+  els.saveDot.className = pending ? 'dot pending' : 'dot';
+}
+
+async function saveNote() {
+  if (!state.item || !state.page) return;
+  clearTimeout(saveTimer);
+  const body = {
+    url: state.page.url,
+    note: els.note.value,
+    baseUpdatedAt: state.item.updatedAt === undefined ? null : state.item.updatedAt,
+  };
+  try {
+    const response = await bridgeFetch('/note', { method: 'POST', body: JSON.stringify(body) });
+    const data = await response.json();
+    if (data.conflict) {
+      state.conflict = {
+        remoteNotes: data.remoteNotes || '',
+        remoteUpdatedAt: data.remoteUpdatedAt,
+      };
+      els.conflict.hidden = false;
+      setSaved('未保存 · 有冲突', true);
+      return;
+    }
+    if (!data.ok) {
+      throw new Error(data.error || '保存失败');
+    }
+    state.item = {
+      ...state.item,
+      notes: data.notes,
+      updatedAt: data.updatedAt,
+      obsidianPath: data.obsidianPath,
+    };
+    state.dirty = false;
+    hideConflict();
+    clearDraft(state.page.url);
+    renderObsidianButton();
+    state.savedAt = Date.now();
+    setSaved('已保存 · 刚刚');
+  } catch (error) {
+    setSaved('保存失败', true);
+    setStatus(`笔记保存失败：${error.message}`, 'error');
+  }
+}
+
+// 页面即将卸载时把未保存内容推出去。普通 fetch 会被杀掉，
+// keepalive 能让请求活过页面销毁；token 走查询参数，桥本身就支持这种鉴权。
+function flushSave() {
+  if (!state.dirty || !state.item || !state.page || !state.port) return;
+  const body = JSON.stringify({
+    url: state.page.url,
+    note: els.note.value,
+    baseUpdatedAt: state.item.updatedAt === undefined ? null : state.item.updatedAt,
+  });
+  try {
+    fetch(`http://127.0.0.1:${state.port}/note?token=${encodeURIComponent(state.token)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      keepalive: true,
+    });
+  } catch (error) {
+    // 尽力而为：实在发不出去，草稿还在 storage 里兜底
+  }
+}
+
+function hideConflict() {
+  state.conflict = null;
+  els.conflict.hidden = true;
+}
+
+// ── 草稿（最后一道兜底） ──
+
+function draftKey(url) {
+  return `draft:${url}`;
+}
+
+async function readDraft(url) {
+  const stored = await chrome.storage.local.get([draftKey(url)]);
+  return stored[draftKey(url)] || '';
+}
+
+function writeDraft(url, value) {
+  chrome.storage.local.set({ [draftKey(url)]: value });
+}
+
+function clearDraft(url) {
+  chrome.storage.local.remove([draftKey(url)]);
+}
+
+// ── Obsidian ──
+
+async function openInObsidian() {
+  if (!state.page) return;
+  try {
+    const response = await bridgeFetch('/obsidian/open', {
+      method: 'POST',
+      body: JSON.stringify({ url: state.page.url }),
+    });
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || '打开失败');
+    setStatus('已在 Obsidian 中打开', 'success');
+  } catch (error) {
+    setStatus(`打开失败：${error.message}`, 'error');
+  }
+}
+
+// ── 收藏 ──
 
 function onTagInput(event) {
   if (event.key === 'Enter' || event.key === ',') {
@@ -306,7 +807,8 @@ function onTagInput(event) {
 }
 
 async function onSave() {
-  if (!state.page?.url) return;
+  if (!state.page || !state.page.url) return;
+  const wasNew = !state.exists;
   els.save.disabled = true;
   try {
     const response = await bridgeFetch('/capture', {
@@ -314,7 +816,7 @@ async function onSave() {
       body: JSON.stringify({
         url: state.page.url,
         title: els.title.value.trim(),
-        note: els.note.value,
+        // 不带 note：笔记归「笔记」视图管，这里绝不动它
         tags: state.selected,
         description: state.page.description || '',
         ogImage: state.page.ogImage || '',
@@ -324,11 +826,9 @@ async function onSave() {
     if (!data.ok) {
       throw new Error(data.error || '保存失败');
     }
-    state.exists = true;
-    els.save.textContent = '更新';
-    setStatus('已保存', 'success');
-    // 保留几秒让用户确认，然后清空，方便接着收藏下一页。
-    setTimeout(resetForm, 3000);
+    setStatus(wasNew ? '已收藏 · 笔记已开放' : '已更新', 'success');
+    await loadPage();
+    if (wasNew) setView('note');
   } catch (error) {
     setStatus(`保存失败：${error.message}`, 'error');
   } finally {
@@ -336,23 +836,12 @@ async function onSave() {
   }
 }
 
-function resetForm() {
-  els.title.value = state.page?.title || state.page?.url || '';
-  els.note.value = '';
-  state.selected = [];
-  clearStatus();
-  render();
-}
+// ── 小工具 ──
 
 function setStatus(message, kind = '') {
   els.status.textContent = message;
   els.status.className = kind ? `status ${kind}` : 'status';
   els.status.hidden = false;
-}
-
-function clearStatus() {
-  els.status.hidden = true;
-  els.status.textContent = '';
 }
 
 function disableForm(disabled) {

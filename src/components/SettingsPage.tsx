@@ -230,6 +230,9 @@ export function SettingsPage({ onOpenTrash, onObsidianChanged }: SettingsPagePro
           <div>
             <h2>本地数据</h2>
             <p>收藏元数据、标签和导入记录存储在本机 SQLite 数据库中，不包含视频或文件内容。</p>
+            <p className="settings-note">
+              封面在导入后由后台慢慢缓存，不阻塞导入；中途关闭应用也不会丢，下次启动会自动接着缓存。
+            </p>
           </div>
           <button
             className="ghost-button"
@@ -248,6 +251,9 @@ export function SettingsPage({ onOpenTrash, onObsidianChanged }: SettingsPagePro
                     ? `：${result.errors.slice(0, 3).join("; ")}`
                     : "";
                   toast("error", `封面缓存失败 ${result.failed} 张${detail}`);
+                } else if (result.errors?.length) {
+                  // 后台任务正在跑时，Rust 端返回的是一句提示而不是统计数字
+                  toast("info", result.errors[0]);
                 } else {
                   toast("info", "没有需要缓存的封面");
                 }

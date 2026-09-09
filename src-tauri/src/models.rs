@@ -169,6 +169,14 @@ pub struct RecacheResult {
     pub errors: Vec<String>,
 }
 
+/// 封面缓存队列的当前状态：还有多少张没缓存、后台任务是否在跑。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverCacheStatus {
+    pub pending: i64,
+    pub running: bool,
+}
+
 /// 导出文件中单个标签的精简表示（不含库内 id，靠 name+namespace 重新关联）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

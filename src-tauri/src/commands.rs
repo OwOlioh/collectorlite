@@ -1,20 +1,21 @@
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
-use tauri::State;
+use tauri::{Manager, State};
 
 use crate::capture;
+use crate::cover_cache;
 use crate::db;
 use crate::error::AppError;
 use crate::models::{
-    BilibiliProfile, BridgeInfo, CollectionInfo, ImportPreview, ImportRequest, ImportResult,
-    ItemFilters, ItemTagAssignment, PartitionSuggestion, QrSession, QrStatus, RecacheResult, Tag,
-    TagCategory, TagInput, VideoItem,
+    BilibiliProfile, BridgeInfo, CollectionInfo, CoverCacheStatus, ImportPreview, ImportRequest,
+    ImportResult, ItemFilters, ItemTagAssignment, PartitionSuggestion, QrSession, QrStatus,
+    RecacheResult, Tag, TagCategory, TagInput, VideoItem,
 };
+use crate::obsidian;
 use crate::source::browser::BrowserBookmarkClient;
 use crate::source::SourceAdapter;
 use crate::state::AppState;
-use crate::obsidian;
 
 /// 封面下载并发度：导入时仍把远程封面存到本地 `covers/`（保留离线查看能力），
 /// 但把原来逐条串行改为有界并发，缩短满收藏夹的导入等待时间。
@@ -149,30 +150,6 @@ async fn cache_csdn_covers(
         cached.push(next);
     }
     cached
-}
-
-/// 文件导入后补封面缓存：复刻实时 B站收藏夹导入的 `cache_item_covers` 行为。
-/// 仅对 bilibili / csdn 这类「远程封面为 http（或需带 Referer）」的来源下载到本地，
-/// 其余来源（知乎 / GitHub / 浏览器）封面为 https 远程链接，无需本地缓存。
-async fn cache_imported_covers(state: &AppState, items: &mut [crate::models::ExternalItem]) {
-    for item in items.iter_mut() {
-        let url = match item.cover_url.as_deref().filter(|value| !value.is_empty()) {
-            Some(value) => value,
-            None => continue,
-        };
-        let download = match item.source.as_str() {
-            "bilibili" => state.bili.download_cover(url).await,
-            "csdn" => state.csdn.download_cover(url).await,
-            _ => continue,
-        };
-        if let Ok((bytes, extension)) = download {
-            if let Ok(path) =
-                save_cover_file(state, &item.source, &item.external_id, &bytes, &extension)
-            {
-                item.cover_local_path = Some(path);
-            }
-        }
-    }
 }
 
 async fn resolve_collection(
@@ -692,33 +669,11 @@ pub async fn update_item_notes(
     item_id: i64,
     notes: String,
 ) -> Result<VideoItem, String> {
-    // 1) 先写库，批注本身必须成功保存（健壮性底线）
-    let mut item = db::update_item_notes(&state.pool, item_id, &notes)
+    // 「写库 → 同步 Obsidian → 回写 obsidian_path」集中在 notes::save_notes，
+    // 与浏览器扩展侧边栏的 /note 端点共用同一份实现，避免两处漂移。
+    crate::notes::save_notes(&state, item_id, &notes)
         .await
-        .map_err(|error| error.to_string())?;
-
-    // 2) 满足「开关开启 + 仓库已配置 + 有批注内容」才触发单向同步；任何失败都只告警，不影响批注已保存
-    let settings = obsidian::load_settings(&state.data_dir);
-    let should_sync = settings.enabled
-        && !settings.vault_path.is_empty()
-        && !notes.trim().is_empty();
-    if should_sync {
-        match obsidian::write_or_update_note(&settings, &item) {
-            Ok(Some(rel)) => {
-                if db::set_item_obsidian_path(&state.pool, item_id, &rel).await.is_ok() {
-                    item.obsidian_path = Some(rel);
-                }
-            }
-            Ok(None) => {
-                // 托管标记被用户手动移除：跳过同步，不覆盖用户在 Obsidian 里的内容
-                eprintln!("[obsidian] 跳过同步：托管标记已被移除 (item {item_id})");
-            }
-            Err(e) => {
-                eprintln!("[obsidian] 同步失败（批注已保存）：{e}");
-            }
-        }
-    }
-    Ok(item)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -761,10 +716,7 @@ pub async fn get_item_obsidian_path(
 }
 
 #[tauri::command]
-pub async fn open_note_in_obsidian(
-    state: State<'_, AppState>,
-    item_id: i64,
-) -> Result<(), String> {
+pub async fn open_note_in_obsidian(state: State<'_, AppState>, item_id: i64) -> Result<(), String> {
     let settings = obsidian::load_settings(&state.data_dir);
     if !settings.enabled || settings.vault_path.is_empty() {
         return Err("Obsidian 联动未启用或未配置仓库目录".into());
@@ -848,7 +800,8 @@ pub async fn pick_obsidian_vault(app: tauri::AppHandle) -> Result<Option<String>
 /// 扩展读不到本地文件，用户需要把 token 手动复制一次到扩展选项页。
 #[tauri::command]
 pub fn get_bridge_info(state: State<'_, AppState>) -> Result<BridgeInfo, String> {
-    let token = capture::load_or_create_token(&state.data_dir).map_err(|error| error.to_string())?;
+    let token =
+        capture::load_or_create_token(&state.data_dir).map_err(|error| error.to_string())?;
     let port = state.bridge_port.load(Ordering::Relaxed);
     Ok(BridgeInfo {
         port,
@@ -1552,132 +1505,62 @@ pub async fn pick_backup_folder(app: tauri::AppHandle) -> Result<Option<String>,
 
 #[tauri::command]
 pub async fn import_collection(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     payload: String,
 ) -> Result<ImportResult, String> {
-    let (result, new_items) = db::import_collection(&state.pool, &payload)
+    let (result, _new_items) = db::import_collection(&state.pool, &payload)
         .await
         .map_err(|e| e.to_string())?;
 
-    // 像实时 B站收藏夹导入那样，把新导入项的封面下载到本地缓存，
-    // 保证导入后封面正常显示（尤其 B站 http 封面在 WebView 中无法直接加载）。
-    if !new_items.is_empty() {
-        let mut items = new_items;
-        cache_imported_covers(&state, &mut items).await;
-        for item in &items {
-            if let Some(path) = &item.cover_local_path {
-                let _ = db::set_item_cover_local_path(
-                    &state.pool,
-                    &item.source,
-                    &item.external_id,
-                    path,
-                )
-                .await;
-            }
-        }
-    }
+    // 封面**不在这里等**：数据已经落库，封面交给后台任务慢慢补，
+    // 否则 3000 条要卡在导入中十几分钟。中途关掉应用也安全——
+    // 「cover_url 有值但 cover_local_path 为空」本身就是待办队列，下次启动会接着缓存。
+    cover_cache::spawn_cover_cache(&app);
 
     Ok(result)
 }
 
-/// 维护操作：把已存在但缺本地封面的 B站 / CSDN 项重新下载缓存（复刻实时导入行为）。
+/// 封面缓存队列状态：还有多少张没缓存、后台任务是否在跑。
+/// 前端用它决定要不要提示用户「还有 N 张封面待缓存」。
 #[tauri::command]
-pub async fn recache_covers(state: State<'_, AppState>) -> Result<RecacheResult, String> {
-    let mut items = db::fetch_items_needing_cover_cache(&state.pool)
+pub async fn cover_cache_status(state: State<'_, AppState>) -> Result<CoverCacheStatus, String> {
+    let pending = db::count_pending_cover_cache(&state.pool)
         .await
         .map_err(|e| e.to_string())?;
-    let total = items.len() as i64;
+    Ok(CoverCacheStatus {
+        pending,
+        running: state.cover_cache_busy.load(Ordering::SeqCst),
+    })
+}
 
-    let mut cached: i64 = 0;
-    let mut failed: i64 = 0;
-    let mut errors: Vec<String> = Vec::new();
-
-    for item in items.iter_mut() {
-        let url = match item.cover_url.as_deref().filter(|v| !v.is_empty()) {
-            Some(v) => v,
-            None => {
-                failed += 1;
-                errors.push(format!(
-                    "{}:{} 缺少 cover_url",
-                    item.source, item.external_id
-                ));
-                continue;
-            }
-        };
-
-        let download = match item.source.as_str() {
-            "bilibili" => state.bili.download_cover(url).await,
-            "csdn" => state.csdn.download_cover(url).await,
-            other => {
-                failed += 1;
-                errors.push(format!(
-                    "{}:{} 未知来源 {}",
-                    item.source, item.external_id, other
-                ));
-                continue;
-            }
-        };
-
-        match download {
-            Ok((bytes, extension)) => {
-                match save_cover_file(&state, &item.source, &item.external_id, &bytes, &extension) {
-                    Ok(path) => {
-                        item.cover_local_path = Some(path);
-                    }
-                    Err(e) => {
-                        failed += 1;
-                        errors.push(format!(
-                            "{}:{} 保存封面失败: {}",
-                            item.source, item.external_id, e
-                        ));
-                        continue;
-                    }
-                }
-            }
-            Err(e) => {
-                failed += 1;
-                errors.push(format!(
-                    "{}:{} 下载封面失败: {}",
-                    item.source, item.external_id, e
-                ));
-                continue;
-            }
-        }
-
-        // 写回 cover_local_path
-        match &item.cover_local_path {
-            Some(path) => {
-                if let Err(e) = db::set_item_cover_local_path(
-                    &state.pool,
-                    &item.source,
-                    &item.external_id,
-                    path,
-                )
-                .await
-                {
-                    failed += 1;
-                    errors.push(format!(
-                        "{}:{} 写回 cover_local_path 失败: {}",
-                        item.source, item.external_id, e
-                    ));
-                } else {
-                    cached += 1;
-                }
-            }
-            None => {
-                failed += 1;
-                errors.push(format!(
-                    "{}:{} 下载后无本地路径",
-                    item.source, item.external_id
-                ));
-            }
-        }
+/// 维护操作：手动把缺本地封面的 B站 / CSDN 项重新下载缓存。
+///
+/// 与后台任务共用同一套并发下载逻辑（早期这里是逐条串行，3000 条要十几分钟）。
+/// 后台任务正在跑时不重复启动，直接返回提示。
+#[tauri::command]
+pub async fn recache_covers(app: tauri::AppHandle) -> Result<RecacheResult, String> {
+    if app
+        .state::<AppState>()
+        .cover_cache_busy
+        .load(Ordering::SeqCst)
+    {
+        return Ok(RecacheResult {
+            total: 0,
+            cached: 0,
+            failed: 0,
+            errors: vec!["封面缓存任务正在后台运行中，请稍后再试".to_string()],
+        });
     }
 
+    let progress = cover_cache::run_pass(&app)
+        .await
+        .map_err(|e| e.to_string())?;
+
     Ok(RecacheResult {
-        total,
-        cached,
-        failed,
-        errors,
+        total: progress.total,
+        cached: progress.cached,
+        failed: progress.failed,
+        errors: Vec::new(),
     })
 }

@@ -12,28 +12,73 @@
         <button id="open-options" type="button" class="link">设置</button>
       </header>
 
-      <p id="status" class="status" hidden></p>
-
-      <label class="field">
-        <span class="label">标题</span>
-        <input id="title" type="text" placeholder="页面标题" />
-      </label>
-
-      <div class="field">
-        <span class="label">标签</span>
-        <div id="selected" class="chips"></div>
-        <input id="tag-input" type="text" placeholder="输入后回车新建标签" autocomplete="off" />
-        <div id="pool" class="chips pool"></div>
+      <div class="seg">
+        <button id="tab-collect" type="button" class="on">收藏</button>
+        <button id="tab-note" type="button">笔记</button>
       </div>
 
-      <label class="field">
-        <span class="label">批注</span>
-        <textarea id="note" rows="9" placeholder="为什么要收藏这一页？"></textarea>
-      </label>
+      <p id="status" class="status" hidden></p>
 
-      <button id="save" type="button" class="primary">收藏</button>
+      <!-- ── 收藏视图 ── -->
+      <section id="view-collect" class="view on">
+        <label class="field">
+          <span class="label">标题</span>
+          <input id="title" type="text" placeholder="页面标题" />
+        </label>
 
-      <p id="url" class="url"></p>
+        <div class="field">
+          <span class="label">标签</span>
+          <div id="selected" class="chips"></div>
+          <input id="tag-input" type="text" placeholder="输入后回车新建标签" autocomplete="off" />
+          <div id="pool" class="chips pool"></div>
+        </div>
+
+        <button id="save" type="button" class="primary">收藏</button>
+
+        <p id="url" class="url"></p>
+      </section>
+
+      <!-- ── 笔记视图 ── -->
+      <section id="view-note" class="view">
+        <!-- 未收藏：给原因 + 去处，而不是一个灰掉的按钮 -->
+        <div id="nb-locked" class="empty">
+          <div class="ico">🔒</div>
+          <h2>这一页还没收藏</h2>
+          <p>笔记挂在收藏条目上，<br />先把它收进来才能开始记录。</p>
+          <button id="go-collect" type="button" class="primary">去收藏</button>
+        </div>
+
+        <div id="nb-open" class="nb">
+          <div id="conflict" class="conflict" hidden>
+            <b>笔记已在别处被修改</b>
+            <p>collectorlite 里保存过一次，直接保存会覆盖那份内容。</p>
+            <div class="acts">
+              <button id="cf-overwrite" type="button" class="solid">覆盖保存</button>
+              <button id="cf-reload" type="button">重新加载</button>
+            </div>
+          </div>
+
+          <div class="nb-tools">
+            <button id="mk-time" type="button">+ 时间戳</button>
+            <button id="mk-pos" type="button">+ 位置标记</button>
+          </div>
+
+          <textarea id="note" placeholder="记点什么？"></textarea>
+
+          <div class="mk-head">
+            <span class="label">标记</span>
+            <span id="mk-count" class="label"></span>
+          </div>
+          <div id="mk-list" class="mk-list"></div>
+
+          <button id="open-obsidian" type="button" class="primary">在 Obsidian 中打开</button>
+
+          <div class="savebar">
+            <span id="save-dot" class="dot"></span>
+            <span id="save-text">已保存</span>
+          </div>
+        </div>
+      </section>
     </main>
     <script src="sidepanel.js"></script>
   </body>

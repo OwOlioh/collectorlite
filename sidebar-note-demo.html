@@ -1,0 +1,889 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>侧边栏笔记面板 · 交互 Demo</title>
+<style>
+:root{
+  --surface:#ffffff;
+  --surface-soft:#f8fafc;
+  --border:#d9e0e8;
+  --text:#1e293b;
+  --muted:#64748b;
+  --blue:#2f6fed;
+  --blue-hover:#245fd0;
+  --side-bg:#f4f6fa;
+  --side-muted:#64748b;
+  --side-hover:#e7ecf3;
+  --side-active:#eaf1ff;
+  --amber:#b45309;
+  --amber-bg:#fffbeb;
+  --amber-border:#fcd34d;
+  --green:#15803d;
+}
+*{box-sizing:border-box}
+body{
+  margin:0;
+  background:#eef1f5;
+  color:var(--text);
+  font:14px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+}
+.page{max-width:1440px;margin:0 auto;padding:20px 20px 48px}
+
+/* ── 页头 ── */
+.demo-head h1{margin:0 0 6px;font-size:20px}
+.demo-head p{margin:0 0 14px;color:var(--muted)}
+.demo-toolbar{
+  display:flex;flex-wrap:wrap;align-items:center;gap:8px;
+  padding:10px 12px;margin-bottom:16px;
+  background:var(--surface);border:1px solid var(--border);border-radius:9px;
+}
+.demo-toolbar .label{color:var(--muted);font-weight:600}
+.demo-toolbar button{
+  height:30px;padding:0 12px;border-radius:6px;cursor:pointer;
+  border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;
+}
+.demo-toolbar button:hover{background:var(--side-hover)}
+.demo-toolbar .spacer{flex:1}
+
+/* ── 舞台 ── */
+.stage{display:flex;gap:16px;align-items:flex-start}
+.browser{
+  flex:1 1 auto;min-width:0;
+  background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;
+}
+.browser-chrome{
+  display:flex;align-items:center;gap:10px;height:40px;padding:0 12px;
+  background:var(--surface-soft);border-bottom:1px solid var(--border);
+}
+.dots{display:flex;gap:6px}
+.dots i{width:11px;height:11px;border-radius:50%;background:#d7dde5;display:block}
+.urlbar{
+  flex:1;height:24px;line-height:24px;padding:0 10px;border-radius:12px;
+  background:#fff;border:1px solid var(--border);color:var(--muted);font-size:12px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.browser-body{display:flex;height:680px}
+
+/* ── 侧边栏 ── */
+.sidebar{
+  width:400px;flex:0 0 400px;
+  display:flex;flex-direction:column;overflow:hidden;
+  background:var(--side-bg);border-right:1px solid var(--border);
+}
+.sb-head{
+  display:flex;align-items:center;gap:8px;height:46px;padding:0 14px;flex:0 0 auto;
+  border-bottom:1px solid rgba(15,23,42,.08);
+}
+.sb-logo{width:20px;height:20px;border-radius:5px;background:var(--blue);color:#fff;
+  display:grid;place-items:center;font-size:12px;font-weight:700}
+.sb-title{font-weight:600;font-size:14px}
+.sb-head .link{margin-left:auto;border:0;background:none;color:var(--side-muted);cursor:pointer;font-size:12px}
+.sb-head .link:hover{color:var(--text)}
+
+.seg{display:flex;gap:4px;padding:10px 12px 0;flex:0 0 auto}
+.seg button{
+  flex:1;height:32px;border-radius:7px;cursor:pointer;font-size:13px;font-weight:600;
+  border:1px solid transparent;background:transparent;color:var(--side-muted);
+}
+.seg button:hover{background:var(--side-hover)}
+.seg button.on{background:var(--surface);border-color:var(--border);color:var(--text);
+  box-shadow:0 1px 2px rgba(15,23,42,.06)}
+
+/* 侧边栏主体改为弹性列：输入框撑满剩余高度，而不是写死高度 */
+.sb-body{flex:1 1 auto;min-height:0;padding:14px;overflow:hidden;display:flex;flex-direction:column}
+.view{flex:1 1 auto;min-height:0;display:none;flex-direction:column}
+.view.on{display:flex}
+#view-collect{overflow:auto}
+#view-note{overflow:hidden}
+/* 需要「吃掉」剩余空间的输入区 */
+.field.grow{flex:1 1 auto;min-height:0;display:flex;flex-direction:column}
+.field.grow .label{flex:0 0 auto}
+.field.grow textarea{flex:1 1 auto;min-height:170px}
+
+.field{margin-bottom:12px}
+.field .label{display:block;margin-bottom:5px;font-size:12px;color:var(--side-muted);font-weight:600}
+.field input[type=text],.field textarea{
+  width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:7px;
+  background:var(--surface);color:var(--text);font:inherit;font-size:13px;resize:vertical;
+}
+.field textarea{min-height:150px;line-height:1.7;white-space:pre-wrap;word-break:break-word}
+.field input:focus,.field textarea:focus{outline:2px solid var(--blue);outline-offset:-1px}
+
+.chips{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px}
+.chip{
+  display:inline-flex;align-items:center;gap:4px;
+  padding:3px 9px;border-radius:20px;font-size:12px;cursor:default;
+  background:var(--side-active);color:var(--text);border:1px solid #cfdcf5;
+}
+.chip .x{cursor:pointer;opacity:.55;font-weight:700}
+.chip .x:hover{opacity:1}
+.pool .chip{background:var(--surface);border-color:var(--border);color:var(--side-muted);cursor:pointer}
+.pool .chip:hover{background:var(--side-hover)}
+
+.primary{
+  display:inline-flex;align-items:center;justify-content:center;gap:7px;
+  min-height:38px;width:100%;padding:0 14px;border-radius:7px;cursor:pointer;
+  font-weight:600;font-size:13px;border:1px solid var(--blue);background:var(--blue);color:#fff;
+}
+.primary:hover{background:var(--blue-hover)}
+.primary:active{transform:scale(.99)}
+
+.hint{font-size:12px;color:var(--side-muted);margin-top:6px}
+.divider{height:1px;background:rgba(15,23,42,.08);margin:14px 0}
+
+/* 笔记视图：已收藏 / 未收藏 两个分支 */
+#nb-locked{display:none}
+#nb-locked.on{display:block}
+#nb-open{display:none;flex:1 1 auto;min-height:0;flex-direction:column}
+#nb-open.on{display:flex}
+#nb-open .conflict,
+#nb-open .nb-tools,
+#nb-open .mk-head,
+#nb-open .divider,
+#nb-open .primary,
+#nb-open .savebar{flex:0 0 auto}
+
+/* 空状态 */
+.empty{text-align:center;padding:34px 16px}
+.empty .ico{font-size:30px;margin-bottom:10px;opacity:.5}
+.empty h3{margin:0 0 6px;font-size:14px}
+.empty p{margin:0 0 14px;font-size:12.5px;color:var(--side-muted);line-height:1.7}
+
+/* 笔记工具条 */
+.nb-tools{display:flex;gap:6px;margin-bottom:8px}
+.nb-tools button{
+  height:30px;padding:0 11px;border-radius:6px;cursor:pointer;font-size:12.5px;font-weight:600;
+  border:1px solid var(--border);background:var(--surface);color:var(--text);
+}
+.nb-tools button:hover{background:var(--side-hover)}
+.nb-tools button[disabled]{opacity:.5;cursor:not-allowed}
+.nb-tools .t-only{display:none}
+body.page-video .nb-tools .t-only{display:inline-flex}
+.nb-tools .p-only{display:none}
+body.page-article .nb-tools .p-only{display:inline-flex}
+
+/* 标记列表 */
+.mk-head{display:flex;align-items:center;justify-content:space-between;margin:14px 0 7px}
+.mk-head .t{font-size:12px;color:var(--side-muted);font-weight:600}
+.mk-list{display:flex;flex-direction:column;gap:6px;flex:0 1 auto;overflow:auto;max-height:180px}
+.mk{
+  display:flex;align-items:center;gap:8px;width:100%;text-align:left;
+  padding:7px 10px;border-radius:7px;cursor:pointer;
+  border:1px solid var(--border);background:var(--surface);color:var(--text);font:inherit;font-size:12.5px;
+}
+.mk:hover{background:var(--side-hover);border-color:#c9d4e2}
+.mk .badge{
+  flex:0 0 auto;padding:1px 7px;border-radius:5px;font-size:11px;font-weight:700;
+  background:#e8eefb;color:var(--blue);
+}
+.mk.pos .badge{background:#eaf7ee;color:var(--green)}
+.mk .txt{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--muted)}
+.mk .go{flex:0 0 auto;font-size:11px;color:var(--side-muted)}
+.mk-empty{font-size:12px;color:var(--side-muted);padding:8px 2px}
+
+.savebar{display:flex;align-items:center;gap:8px;margin-top:12px;font-size:12px;color:var(--side-muted)}
+.dot{width:7px;height:7px;border-radius:50%;background:#16a34a;display:inline-block}
+.dot.pending{background:#f59e0b}
+
+/* 冲突条 */
+.conflict{
+  display:none;margin-bottom:10px;padding:10px 12px;border-radius:7px;font-size:12.5px;line-height:1.6;
+  background:var(--amber-bg);border:1px solid var(--amber-border);color:var(--amber);
+}
+.conflict.on{display:block}
+.conflict .acts{display:flex;gap:6px;margin-top:8px}
+.conflict .acts button{
+  height:28px;padding:0 11px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;
+  border:1px solid var(--amber-border);background:#fff;color:var(--amber);
+}
+.conflict .acts button.solid{background:var(--amber);color:#fff;border-color:var(--amber)}
+
+/* ── 右侧模拟网页 ── */
+.content{flex:1 1 auto;min-width:0;overflow:auto;background:#fff}
+.fake-tabs{display:flex;gap:2px;padding:8px 12px 0;border-bottom:1px solid var(--border);position:sticky;top:0;background:#fff;z-index:2}
+.fake-tabs button{
+  height:32px;padding:0 14px;border:1px solid transparent;border-bottom:0;cursor:pointer;
+  background:transparent;color:var(--muted);font-size:13px;border-radius:7px 7px 0 0;
+}
+.fake-tabs button.on{border-color:var(--border);background:var(--surface-soft);color:var(--text);font-weight:600}
+.pane{display:none;padding:16px 20px 60px}
+.pane.on{display:block}
+
+/* 假视频 */
+.player{background:#0f172a;border-radius:10px;padding:16px;color:#e2e8f0}
+.player .screen{
+  height:230px;border-radius:7px;display:grid;place-items:center;
+  background:linear-gradient(135deg,#1e293b,#334155);font-size:13px;color:#94a3b8;
+}
+.ptime{font-variant-numeric:tabular-nums;font-size:15px;font-weight:700;margin-top:12px}
+.bar{height:6px;border-radius:3px;background:#334155;margin:8px 0 12px;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--blue);width:0}
+.pbtns{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.pbtns button{
+  height:30px;padding:0 12px;border-radius:6px;cursor:pointer;font-size:12.5px;
+  border:1px solid #475569;background:#1e293b;color:#e2e8f0;
+}
+.pbtns button:hover{background:#334155}
+.pbtns .note{font-size:12px;color:#94a3b8;margin-left:auto}
+
+/* 假文章 */
+.article h2{font-size:18px;margin:0 0 4px}
+.article .meta{font-size:12px;color:var(--muted);margin-bottom:16px}
+.article h3{font-size:15px;margin:22px 0 8px;padding-top:6px}
+.article p{margin:0 0 12px;line-height:1.9;color:#334155}
+.article p.flash,.article h3.flash{animation:flash 1.6s ease-out}
+@keyframes flash{
+  0%,60%{background:#fde68a;box-shadow:0 0 0 4px #fde68a}
+  100%{background:transparent;box-shadow:0 0 0 4px transparent}
+}
+.seltip{
+  margin-top:18px;padding:10px 12px;border-radius:7px;font-size:12.5px;
+  background:var(--surface-soft);border:1px dashed var(--border);color:var(--muted);
+}
+
+/* ── 右栏说明 ── */
+.aside{width:330px;flex:0 0 330px;display:flex;flex-direction:column;gap:14px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px}
+.card h2{margin:0 0 10px;font-size:13.5px}
+.card h2 .n{
+  display:inline-grid;place-items:center;width:18px;height:18px;border-radius:5px;
+  background:var(--side-active);color:var(--blue);font-size:11px;margin-right:6px;font-weight:700;
+}
+.card ol{margin:0;padding-left:18px;font-size:12.5px;line-height:1.85;color:#334155}
+.card ol li{margin-bottom:7px}
+.card ol li b{color:var(--text)}
+.ob-preview{
+  background:var(--surface-soft);border:1px solid var(--border);border-radius:7px;
+  padding:10px 12px;font-size:13px;line-height:1.9;min-height:40px;
+}
+.ob-preview .ob-li{margin-bottom:3px}
+.ob-preview .md-link{color:var(--blue);text-decoration:none;border-bottom:1px solid #c7d7fb}
+.ob-preview .ob-empty{color:var(--muted);font-size:12px}
+pre.raw{
+  margin:0;padding:10px 12px;border-radius:7px;background:var(--surface-soft);
+  border:1px solid var(--border);font-size:11.5px;line-height:1.7;color:#334155;
+  white-space:pre-wrap;word-break:break-all;max-height:220px;overflow:auto;
+}
+.card .foot{font-size:11.5px;color:var(--muted);margin-top:8px;line-height:1.7}
+
+/* toast */
+#toast{
+  position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(12px);
+  background:#1e293b;color:#fff;padding:9px 16px;border-radius:8px;font-size:13px;
+  opacity:0;pointer-events:none;transition:opacity .18s,transform .18s;z-index:99;max-width:70vw;
+}
+#toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+</style>
+</head>
+<body class="page-video">
+<div class="page">
+
+  <header class="demo-head">
+    <h1>侧边栏笔记面板 · 交互 Demo</h1>
+    <p>左侧 400px 是 Edge 侧边栏原型，右侧是模拟网页。<b>标记是可以点的，会真的跳转</b>——视频跳秒、文章滚过去高亮。</p>
+    <div class="demo-toolbar">
+      <span class="label">模拟：</span>
+      <button id="btn-collected">已收藏 ⇄ 未收藏</button>
+      <button id="btn-conflict">app 里改了笔记（触发冲突）</button>
+      <button id="btn-reset">重置</button>
+      <span class="spacer"></span>
+      <span class="label">当前页：</span>
+      <button id="btn-page">视频 ⇄ 文章</button>
+    </div>
+  </header>
+
+  <div class="stage">
+
+    <!-- 浏览器框 -->
+    <div class="browser">
+      <div class="browser-chrome">
+        <div class="dots"><i></i><i></i><i></i></div>
+        <div class="urlbar" id="urlbar"></div>
+      </div>
+      <div class="browser-body">
+
+        <!-- 侧边栏 -->
+        <aside class="sidebar">
+          <div class="sb-head">
+            <span class="sb-logo">C</span>
+            <span class="sb-title">collectorlite</span>
+            <button class="link">设置</button>
+          </div>
+
+          <div class="seg">
+            <button id="tab-collect" class="on">收藏</button>
+            <button id="tab-note">笔记</button>
+          </div>
+
+          <div class="sb-body">
+
+            <!-- 收藏视图 -->
+            <section id="view-collect" class="view on">
+              <div class="field">
+                <span class="label">标题</span>
+                <input type="text" id="f-title" />
+              </div>
+              <div class="field">
+                <span class="label">标签</span>
+                <div class="chips" id="f-tags"></div>
+                <div class="chips pool" id="f-pool"></div>
+              </div>
+              <div class="field grow">
+                <span class="label">批注</span>
+                <textarea id="f-note"></textarea>
+              </div>
+              <button class="primary" id="btn-collect">更新</button>
+              <div class="hint" id="collect-hint"></div>
+            </section>
+
+            <!-- 笔记视图 -->
+            <section id="view-note" class="view">
+
+              <!-- 未收藏 -->
+              <div id="nb-locked" class="empty">
+                <div class="ico">🔒</div>
+                <h3>这一页还没收藏</h3>
+                <p>笔记是挂在收藏条目上的，先把它收进来<br/>才能开始记录。</p>
+                <button class="primary" id="btn-gocollect">去收藏</button>
+              </div>
+
+              <!-- 已收藏 -->
+              <div id="nb-open">
+                <div class="conflict" id="conflict">
+                  <b>笔记已在别处被修改</b><br/>
+                  collectorlite 里保存过一次（模拟）。直接保存会覆盖那份内容。
+                  <div class="acts">
+                    <button class="solid" id="cf-overwrite">覆盖保存</button>
+                    <button id="cf-reload">重新加载</button>
+                  </div>
+                </div>
+
+                <div class="nb-tools">
+                  <button class="t-only" id="btn-ts">+ 时间戳</button>
+                  <button class="p-only" id="btn-pos">+ 位置标记</button>
+                </div>
+                <div class="field grow">
+                  <textarea id="n-text" placeholder="记点什么？"></textarea>
+                </div>
+
+                <div class="mk-head">
+                  <span class="t">标记</span>
+                  <span class="t" id="mk-count"></span>
+                </div>
+                <div class="mk-list" id="mk-list"></div>
+
+                <div class="divider"></div>
+                <button class="primary" id="btn-obsidian">在 Obsidian 中打开</button>
+                <div class="savebar">
+                  <span class="dot" id="save-dot"></span>
+                  <span id="save-text">已保存</span>
+                </div>
+              </div>
+
+            </section>
+          </div>
+        </aside>
+
+        <!-- 模拟网页 -->
+        <div class="content" id="content">
+          <div class="fake-tabs">
+            <button id="ptab-video" class="on">B站视频页</button>
+            <button id="ptab-article">知乎文章页</button>
+          </div>
+
+          <!-- 视频 -->
+          <div class="pane on" id="pane-video">
+            <div class="player">
+              <div class="screen">（假播放器）</div>
+              <div class="ptime"><span id="v-cur">00:00</span> / <span id="v-dur">10:00</span></div>
+              <div class="bar"><i id="v-bar"></i></div>
+              <div class="pbtns">
+                <button id="v-play">▶ 播放</button>
+                <button id="v-back">« 10s</button>
+                <button id="v-fwd">10s »</button>
+                <span class="note">切到「+ 时间戳」前，先让播放进度停在你想标记的地方</span>
+              </div>
+            </div>
+            <div class="seltip">
+              这一页有 <code>&lt;video&gt;</code> → 侧边栏只出现「+ 时间戳」。没有正文可选，所以「+ 位置标记」不出现。
+            </div>
+          </div>
+
+          <!-- 文章 -->
+          <div class="pane" id="pane-article">
+            <div class="article">
+              <h2>逆向 B 站 WBI 签名：从抓包到复现</h2>
+              <div class="meta">知乎 · 3.2 万赞</div>
+
+              <p>WBI 签名是 B 站在 2023 年推出来的一套接口鉴权方案，核心目的是把请求参数做一次混淆，让直接构造 URL 爬接口的成本变高。</p>
+
+              <h3 id="mix-key">一、混合密钥表是怎么来的</h3>
+              <p>先请求 nav 接口，返回体里有 <code>img_url</code> 和 <code>sub_url</code> 两个字段。把这两个 URL 的最后一段文件名去掉扩展名，就得到了 img_key 和 sub_key。</p>
+              <p>然后把两个 key 拼起来，按一张固定的 64 位映射表重排，取前 32 位作为新的密钥。这张映射表是写死在客户端里的，全站通用。</p>
+
+              <h3>二、签名参数的生成</h3>
+              <p>拿到混合密钥之后，把所有请求参数按 key 字典序排序、拼成 query string，追加上当前时间戳 wts，最后对整串做一次 MD5。</p>
+              <p id="pitfall">这里有个坑：参数值里如果有中文或者特殊字符，必须先做一次 URL 编码再参与拼接，否则算出来的签名在服务端校验一定失败。很多人卡在这一步，以为是自己密钥算错了。</p>
+
+              <h3>三、为什么它拦不住人</h3>
+              <p>因为映射表是公开的、算法是纯客户端的，只要能跑 JS 就能复现。它提高的是批量爬取的工程成本，不是安全边界。</p>
+
+              <div class="seltip">
+                用鼠标<b>选中上面任意一段文字</b>，再点侧边栏的「+ 位置标记」。<br/>
+                第二段标题带 <code>id="mix-key"</code>、第三个坑那段带 <code>id="pitfall"</code> —— 选中它们里面的文字，生成的链接会优先用锚点 <code>#id:~:text=…</code>，比纯文本片段稳。
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- 右栏 -->
+    <aside class="aside">
+      <div class="card">
+        <h2>现在可以试的路径</h2>
+        <ol>
+          <li>点顶栏 <b>已收藏 ⇄ 未收藏</b>，切到「笔记」页看锁住的样子 —— 注意给的是原因 + 「去收藏」按钮，不是一个灰掉的按钮。</li>
+          <li>在视频页让进度停在某个位置，点 <b>+ 时间戳</b>：插入的是 <code>max(0, 当前进度-3)</code>，光标停在这一行末尾，可以接着打字、连续打点。</li>
+          <li>点笔记里的<b>时间戳标记</b> → 假播放器原地跳秒，<b>不重载页面</b>。</li>
+          <li>切到文章页，<b>选中一段文字</b> → 点 <b>+ 位置标记</b> → 再点标记，文章会滚过去并高亮闪一下。</li>
+          <li>点 <b>app 里改了笔记</b> 再编辑笔记 → 演示乐观锁冲突提示。</li>
+          <li>看下面「在 Obsidian 里的样子」：阅读视图只显示链接文字，长 URL 藏在悬停里。</li>
+        </ol>
+      </div>
+
+      <div class="card">
+        <h2><span class="n">1</span>在 Obsidian 里的样子</h2>
+        <div class="ob-preview" id="ob-preview"></div>
+        <div class="foot">鼠标悬停在任意一个 <span style="color:var(--blue)">蓝色链接</span> 上，能看到它真正的 URL。</div>
+      </div>
+
+      <div class="card">
+        <h2><span class="n">2</span>写进 items.notes 的原文</h2>
+        <pre class="raw" id="raw"></pre>
+        <div class="foot">
+          视频页 URL 已带 <code>?spm_id_from=</code>，所以时间戳用 <code>&amp;t=</code> 而不是 <code>?t=</code>。
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>这个 Demo 没做的</h2>
+        <div class="foot">
+          不连数据库、不接本地桥、不读写 vault；标签池是写死的；自动保存只是计时模拟。真实实现见 <code>DEVELOPMENT.md</code> 第八节。
+        </div>
+      </div>
+    </aside>
+
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+(function(){
+  'use strict';
+
+  var VIDEO_URL = 'https://www.bilibili.com/video/BV1xx411c7mD?spm_id_from=333.999';
+  var ARTICLE_URL = 'https://zhuanlan.zhihu.com/p/123456789';
+  var DURATION = 600;
+
+  var DEFAULT_NOTES =
+    '- [00:42](' + VIDEO_URL + '&t=42) WBI 的两个参数 img_key / sub_key 在哪\n' +
+    '- [01:15](' + VIDEO_URL + '&t=75) 混合密钥表的 64 位重排\n';
+
+  var state = {
+    view:'collect',
+    page:'video',
+    collected:true,
+    title:'【硬核】B 站 WBI 签名算法逆向（2026 新版）',
+    tags:['前端','逆向','B站'],
+    pool:['前端','逆向','B站','抓包','待读'],
+    notes:DEFAULT_NOTES,
+    videoTime:48,
+    playing:false,
+    conflictArmed:false,
+    savedAt:Date.now(),
+    dirty:false
+  };
+
+  var $ = function(id){ return document.getElementById(id); };
+  var toastTimer = null;
+  function toast(msg){
+    var t = $('toast');
+    t.textContent = msg;
+    t.classList.add('on');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function(){ t.classList.remove('on'); }, 2600);
+  }
+
+  // ── 时间格式 ──
+  function fmt(sec){
+    sec = Math.max(0, Math.floor(sec));
+    var h = Math.floor(sec/3600), m = Math.floor(sec%3600/60), s = sec%60;
+    var pad = function(n){ return n<10 ? '0'+n : ''+n; };
+    return h>0 ? (h+':'+pad(m)+':'+pad(s)) : (pad(m)+':'+pad(s));
+  }
+
+  // ── 分段切换 ──
+  function setView(v){
+    state.view = v;
+    $('tab-collect').classList.toggle('on', v==='collect');
+    $('tab-note').classList.toggle('on', v==='note');
+    $('view-collect').classList.toggle('on', v==='collect');
+    $('view-note').classList.toggle('on', v==='note');
+    if(v==='collect'){ $('f-title').focus(); }
+  }
+
+  function setPage(p){
+    state.page = p;
+    document.body.className = 'page-' + p;
+    $('ptab-video').classList.toggle('on', p==='video');
+    $('ptab-article').classList.toggle('on', p==='article');
+    $('pane-video').classList.toggle('on', p==='video');
+    $('pane-article').classList.toggle('on', p==='article');
+    $('urlbar').textContent = (p==='video' ? VIDEO_URL : ARTICLE_URL);
+  }
+
+  // ── 渲染 ──
+  function renderAll(){
+    // 收藏视图
+    $('f-title').value = state.title;
+    $('f-note').value = state.notes;
+    var tagBox = $('f-tags'); tagBox.innerHTML = '';
+    state.tags.forEach(function(name){
+      tagBox.appendChild(chip(name, true));
+    });
+    var poolBox = $('f-pool'); poolBox.innerHTML = '';
+    state.pool.filter(function(n){ return state.tags.indexOf(n)<0; }).forEach(function(name){
+      poolBox.appendChild(chip(name, false));
+    });
+    $('btn-collect').textContent = state.collected ? '更新' : '收藏';
+    $('collect-hint').textContent = state.collected
+      ? '已收藏过，保存只改标题 / 标签 / 批注，不会重置封面。'
+      : '收藏之后，「笔记」页才会开放。';
+
+    // 笔记视图开合
+    $('nb-locked').classList.toggle('on', !state.collected);
+    $('nb-open').classList.toggle('on', state.collected);
+    if(state.collected && $('n-text').value !== state.notes){
+      $('n-text').value = state.notes;
+    }
+
+    renderMarkers();
+    renderPreview();
+  }
+
+  function chip(name, selected){
+    var el = document.createElement('span');
+    el.className = 'chip';
+    el.textContent = name;
+    if(selected){
+      var x = document.createElement('span');
+      x.className = 'x'; x.textContent = '×';
+      x.addEventListener('click', function(){
+        state.tags = state.tags.filter(function(n){ return n!==name; });
+        renderAll();
+      });
+      el.appendChild(x);
+    }else{
+      el.addEventListener('click', function(){
+        if(state.tags.indexOf(name)<0) state.tags.push(name);
+        renderAll();
+      });
+    }
+    return el;
+  }
+
+  // ── 标记解析 ──
+  var MARKER_RE = /^[ \t]*[-*][ \t]*\[([^\]]+)\]\(([^)\s]+)\)[ \t]*(.*)$/;
+
+  function parseMarkers(){
+    var out = [];
+    state.notes.split('\n').forEach(function(line, i){
+      var m = line.match(MARKER_RE);
+      if(!m) return;
+      var label = m[1], url = m[2], desc = m[3] || '';
+      var kind = null;
+      if(/[:~]text=/.test(url)) kind = 'pos';
+      else if(/[?&]t=/.test(url)) kind = 'time';
+      if(!kind) return;
+      out.push({ line:i, label:label, url:url, desc:desc, kind:kind,
+        seconds: kind==='time' ? (parseInt((url.match(/[?&]t=(\d+)/)||[0,0])[1],10)||0) : 0,
+        anchor: kind==='pos' ? ((url.split('#')[1]||'').split(':~:')[0] || null) : null,
+        quote: kind==='pos' ? decodeURIComponent((url.split('text=')[1]||'').split('&')[0]) : ''
+      });
+    });
+    return out;
+  }
+
+  function renderMarkers(){
+    var list = parseMarkers();
+    var box = $('mk-list'); box.innerHTML = '';
+    $('mk-count').textContent = list.length ? list.length + ' 条' : '';
+    if(!list.length){
+      var e = document.createElement('div');
+      e.className = 'mk-empty';
+      e.textContent = '还没有标记。点上面的「+ 时间戳」或「+ 位置标记」试试。';
+      box.appendChild(e);
+      return;
+    }
+    list.forEach(function(m){
+      var b = document.createElement('button');
+      b.className = 'mk' + (m.kind==='pos' ? ' pos' : '');
+      var badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.textContent = m.kind==='time' ? fmt(m.seconds) : '位置';
+      var txt = document.createElement('span');
+      txt.className = 'txt';
+      txt.textContent = m.desc || (m.kind==='pos' ? m.quote : '') || '（无说明）';
+      var go = document.createElement('span');
+      go.className = 'go'; go.textContent = '跳转 ›';
+      b.appendChild(badge); b.appendChild(txt); b.appendChild(go);
+      b.addEventListener('click', function(){ jump(m); });
+      box.appendChild(b);
+    });
+  }
+
+  // ── 跳转 ──
+  function jump(m){
+    if(m.kind==='time'){
+      if(state.page!=='video') setPage('video');
+      seek(m.seconds);
+      toast('已跳到 ' + fmt(m.seconds) + ' · 原地 seek，页面不重载');
+    }else{
+      if(state.page!=='article') setPage('article');
+      setTimeout(function(){ scrollToQuote(m); }, 30);
+    }
+  }
+
+  function scrollToQuote(m){
+    var el = null;
+    if(m.anchor) el = document.getElementById(m.anchor);
+    if(!el && m.quote){
+      var ps = document.querySelectorAll('#pane-article p, #pane-article h3');
+      for(var i=0;i<ps.length;i++){
+        if(ps[i].textContent.indexOf(m.quote.slice(0,12))>=0){ el = ps[i]; break; }
+      }
+    }
+    if(!el){ toast('没找到这段内容（模拟页面里可能已被改掉）'); return; }
+    el.scrollIntoView({ block:'center', behavior:'smooth' });
+    el.classList.remove('flash');
+    void el.offsetWidth;
+    el.classList.add('flash');
+    setTimeout(function(){ el.classList.remove('flash'); }, 1700);
+    toast(m.anchor ? '命中锚点 #' + m.anchor + '，再按文本精修' : '按文本片段定位并高亮');
+  }
+
+  // ── 插入 ──
+  function insertLine(text){
+    var ta = $('n-text');
+    var start = ta.selectionStart, end = ta.selectionEnd;
+    var before = ta.value.slice(0,start), after = ta.value.slice(end);
+    var prefix = (before.length && !/\n$/.test(before)) ? '\n' : '';
+    var next = before + prefix + text + after;
+    ta.value = next;
+    state.notes = next;
+    var caret = before.length + prefix.length + text.length;
+    ta.focus();
+    ta.setSelectionRange(caret, caret);
+    renderMarkers(); renderPreview();
+    markDirty();
+  }
+
+  function insertTimestamp(){
+    var t = Math.max(0, Math.floor(state.videoTime) - 3);
+    var url = VIDEO_URL + (VIDEO_URL.indexOf('?')>=0 ? '&' : '?') + 't=' + t;
+    insertLine('- [' + fmt(t) + '](' + url + ') ');
+    toast('插入 ' + fmt(t) + '（回退 3 秒补偿点击延迟）· 光标已停在行尾，可直接打字');
+  }
+
+  function insertPosition(){
+    var sel = window.getSelection();
+    var text = (sel && sel.toString() || '').trim();
+    if(!text){ toast('先在右侧文章里用鼠标选中一段文字'); return; }
+    var quote = text.slice(0,60);
+    var node = sel.anchorNode;
+    if(node && node.nodeType === 3) node = node.parentElement;
+    var host = node && node.closest ? node.closest('#pane-article') : null;
+    if(!host){ toast('请在右侧文章正文中选择文字'); return; }
+    var anchorEl = node.closest('[id]');
+    var anchorId = (anchorEl && anchorEl.id && anchorEl.id !== 'pane-article') ? anchorEl.id : null;
+    var frag = (anchorId ? '#' + anchorId : '') + ':~:text=' + encodeURIComponent(quote);
+    insertLine('- [位置](' + ARTICLE_URL + frag + ') ');
+    toast(anchorId
+      ? '用了锚点 #' + anchorId + ' + 文本片段（不受 force-load-at-top 影响）'
+      : '没有可用锚点，退化为纯文本片段');
+  }
+
+  // ── 保存 / 冲突 ──
+  var saveTimer = null;
+  function markDirty(){
+    state.dirty = true;
+    $('save-dot').className = 'dot pending';
+    $('save-text').textContent = '编辑中…';
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(trySave, 1200);
+  }
+
+  function trySave(){
+    if(state.conflictArmed){
+      $('conflict').classList.add('on');
+      $('save-dot').className = 'dot pending';
+      $('save-text').textContent = '未保存 · 有冲突';
+      return;
+    }
+    doSave();
+  }
+
+  function doSave(){
+    state.notes = $('n-text').value;
+    state.savedAt = Date.now();
+    state.dirty = false;
+    state.conflictArmed = false;
+    $('conflict').classList.remove('on');
+    $('save-dot').className = 'dot';
+    $('save-text').textContent = '已保存 · 刚刚';
+    renderMarkers(); renderPreview();
+    tickSaved();
+  }
+
+  function tickSaved(){
+    var s = Math.floor((Date.now() - state.savedAt)/1000);
+    if(state.dirty) return;
+    $('save-text').textContent = s < 5 ? '已保存 · 刚刚' : ('已保存 · ' + s + ' 秒前');
+  }
+  setInterval(tickSaved, 1000);
+
+  // ── 右侧预览 ──
+  function esc(s){
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function renderPreview(){
+    var md = $('n-text').value || state.notes;
+    $('raw').textContent = md || '（空）';
+    if(!md.trim()){
+      $('ob-preview').innerHTML = '<span class="ob-empty">（笔记为空）</span>';
+      return;
+    }
+    $('ob-preview').innerHTML = md.split('\n').map(function(line){
+      if(!line.trim()) return '';
+      var m = line.match(/^[ \t]*[-*][ \t]*(.*)$/);
+      var body = m ? m[1] : line;
+      body = body.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, function(_, t, u){
+        return '<a class="md-link" href="javascript:void(0)" title="' + esc(u) + '">' + esc(t) + '</a>';
+      });
+      return '<div class="ob-li">' + (m ? '• ' : '') + body + '</div>';
+    }).join('');
+  }
+
+  // ── 假播放器 ──
+  function seek(t){
+    state.videoTime = Math.min(DURATION, Math.max(0, t));
+    paintVideo();
+  }
+  function paintVideo(){
+    $('v-cur').textContent = fmt(state.videoTime);
+    $('v-bar').style.width = (state.videoTime / DURATION * 100) + '%';
+  }
+  setInterval(function(){
+    if(!state.playing) return;
+    seek(state.videoTime + 0.25);
+    if(state.videoTime >= DURATION){ state.playing = false; $('v-play').textContent = '▶ 播放'; }
+  }, 250);
+
+  // ── 事件 ──
+  $('tab-collect').addEventListener('click', function(){ setView('collect'); });
+  $('tab-note').addEventListener('click', function(){ setView('note'); });
+  $('ptab-video').addEventListener('click', function(){ setPage('video'); });
+  $('ptab-article').addEventListener('click', function(){ setPage('article'); });
+
+  $('btn-gocollect').addEventListener('click', function(){
+    setView('collect');
+    $('f-title').focus();
+    $('f-title').select();
+    toast('切到收藏页 · 标题已选中，直接改就行');
+  });
+
+  $('btn-collect').addEventListener('click', function(){
+    state.collected = true;
+    state.title = $('f-title').value || state.title;
+    state.notes = $('f-note').value;
+    renderAll();
+    toast(state.collected ? '已收藏 · 笔记功能已开放' : '已收藏');
+    setView('note');
+  });
+
+  $('btn-ts').addEventListener('click', insertTimestamp);
+  $('btn-pos').addEventListener('click', insertPosition);
+
+  $('n-text').addEventListener('input', function(){
+    state.notes = this.value;
+    renderMarkers(); renderPreview();
+    markDirty();
+  });
+
+  $('btn-obsidian').addEventListener('click', function(){
+    toast('真实实现走本地桥 → Rust 端 ShellExecuteW 唤起 obsidian://（浏览器会拦外部协议，不能直跳）');
+  });
+
+  $('cf-overwrite').addEventListener('click', function(){
+    doSave();
+    toast('已覆盖保存');
+  });
+  $('cf-reload').addEventListener('click', function(){
+    state.notes = state.notes + '- [02:30](' + VIDEO_URL + '&t=150) （这一条是 app 里加的）\n';
+    state.conflictArmed = false;
+    renderAll();
+    doSave();
+    toast('已重新加载为 app 里的最新版本');
+  });
+
+  $('v-play').addEventListener('click', function(){
+    state.playing = !state.playing;
+    this.textContent = state.playing ? '⏸ 暂停' : '▶ 播放';
+  });
+  $('v-back').addEventListener('click', function(){ seek(state.videoTime - 10); });
+  $('v-fwd').addEventListener('click', function(){ seek(state.videoTime + 10); });
+
+  $('btn-collected').addEventListener('click', function(){
+    state.collected = !state.collected;
+    renderAll();
+    toast(state.collected ? '已收藏 → 笔记开放' : '未收藏 → 笔记页显示「去收藏」引导');
+  });
+
+  $('btn-conflict').addEventListener('click', function(){
+    state.conflictArmed = true;
+    toast('已模拟「app 里保存过一次」· 现在编辑笔记就会触发冲突提示');
+    setView('note');
+  });
+
+  $('btn-page').addEventListener('click', function(){
+    setPage(state.page === 'video' ? 'article' : 'video');
+  });
+
+  $('btn-reset').addEventListener('click', function(){
+    state.collected = true;
+    state.notes = DEFAULT_NOTES;
+    state.tags = ['前端','逆向','B站'];
+    state.videoTime = 48;
+    state.playing = false;
+    state.conflictArmed = false;
+    $('v-play').textContent = '▶ 播放';
+    setPage('video'); setView('collect');
+    renderAll(); doSave();
+    toast('已重置');
+  });
+
+  // ── 启动 ──
+  setPage('video');
+  setView('collect');
+  renderAll();
+  paintVideo();
+})();
+</script>
+</body>
+</html>

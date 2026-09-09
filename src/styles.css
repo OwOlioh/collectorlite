@@ -2599,6 +2599,11 @@ textarea {
   line-height: 1.5;
 }
 
+/* 卡片内的补充说明：比正文更弱一档，靠透明度区分，不引入新颜色 */
+.settings-note {
+  opacity: 0.8;
+}
+
 .privacy-note {
   margin-top: 18px;
   padding: 18px;

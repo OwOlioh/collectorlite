@@ -17,6 +17,7 @@ use tiny_http::{Header, Method, Request, Response, Server};
 use crate::db;
 use crate::error::AppError;
 use crate::models::{ExternalItem, Tag, TagInput};
+use crate::obsidian;
 use crate::source::browser::BrowserBookmarkClient;
 use crate::source::SourceAdapter;
 use crate::state::AppState;
@@ -41,8 +42,10 @@ struct CaptureRequest {
     url: String,
     #[serde(default)]
     title: String,
+    /// 侧边栏「收藏」视图不再提交批注（批注归入「笔记」视图，走 `POST /note`）。
+    /// `None` = 不要动库里的 notes；`Some("")` = 明确清空。
     #[serde(default)]
-    note: String,
+    note: Option<String>,
     #[serde(default)]
     tags: Vec<String>,
     #[serde(default)]
@@ -88,9 +91,61 @@ struct ItemLookupResponse {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SavedItemSummary {
+    /// 侧边栏保存笔记时按 id 定位，避免再走一次 URL 解析。
+    id: i64,
+    source: String,
     title: String,
     notes: String,
     tags: Vec<String>,
+    /// 已同步到 vault 的相对路径；未同步为 null（侧边栏据此决定「在 Obsidian 中打开」是否可点）。
+    obsidian_path: Option<String>,
+    /// 乐观锁基准，保存时原样回传。
+    updated_at: Option<i64>,
+}
+
+/// `POST /note` —— 侧边栏保存笔记。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NoteRequest {
+    url: String,
+    #[serde(default)]
+    note: String,
+    /// 读取笔记时拿到的 `updated_at`；服务端不一致则判定冲突，返回 409。
+    base_updated_at: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NoteResponse {
+    ok: bool,
+    item_id: i64,
+    notes: String,
+    updated_at: Option<i64>,
+    obsidian_path: Option<String>,
+}
+
+/// 409 冲突响应：带上服务端当前内容，让侧边栏能展示「哪边更新」。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConflictResponse {
+    ok: bool,
+    error: String,
+    conflict: bool,
+    remote_notes: String,
+    remote_updated_at: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct OkResponse {
+    ok: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ObsidianStatusResponse {
+    ok: bool,
+    enabled: bool,
+    vault_path: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -217,6 +272,9 @@ fn handle(
         (Method::Get, "/tags") => handle_tags(pool),
         (Method::Get, "/item") => handle_lookup(pool, request.url()),
         (Method::Post, "/capture") => handle_capture(request, pool, app),
+        (Method::Post, "/note") => handle_note(request, pool, app),
+        (Method::Get, "/obsidian/status") => handle_obsidian_status(app),
+        (Method::Post, "/obsidian/open") => handle_obsidian_open(request, pool, app),
         _ => json(404, &ErrorResponse::new("未知接口")),
     }
 }
@@ -265,9 +323,8 @@ fn handle_lookup(pool: &SqlitePool, url: &str) -> Response<Cursor<Vec<u8>>> {
     let Some(target) = query_param(url, "url") else {
         return json(400, &ErrorResponse::new("缺少 url 参数"));
     };
-    let external_id = external_id_for_url(&target);
-    let found =
-        tauri::async_runtime::block_on(db::find_item_by_source_id(pool, "browser", &external_id));
+    // 走统一的定位逻辑：原始 URL → 归一化 → 去参数 → bk_ 哈希，覆盖所有来源。
+    let found = tauri::async_runtime::block_on(lookup_item(pool, &target));
     match found {
         Ok(Some(item)) => {
             let tags = tauri::async_runtime::block_on(db::item_tag_names(pool, item.id))
@@ -278,9 +335,13 @@ fn handle_lookup(pool: &SqlitePool, url: &str) -> Response<Cursor<Vec<u8>>> {
                     ok: true,
                     exists: true,
                     item: Some(SavedItemSummary {
+                        id: item.id,
+                        source: item.source,
                         title: item.title,
                         notes: item.notes,
                         tags,
+                        obsidian_path: item.obsidian_path,
+                        updated_at: item.updated_at,
                     }),
                 },
             )
@@ -343,7 +404,13 @@ fn handle_capture(
     // 任意一步失败都安全回退到下面的通用浏览器存档，不会丢数据。
     if let Some(routed) = route_capture(app, &url, &title, &payload.og_image) {
         if !routed.is_empty() {
-            return handle_routed_capture(pool, app, &routed, &tag_specs, &payload.note);
+            return handle_routed_capture(
+                pool,
+                app,
+                &routed,
+                &tag_specs,
+                payload.note.as_deref().unwrap_or(""),
+            );
         }
     }
 
@@ -361,8 +428,12 @@ fn handle_capture(
         Ok(Some(item)) => {
             // 已存在：只改标题 / 备注 / 标签，不走 upsert_item，
             // 否则会清空 cover_local_path 与 extra_json（书签导入写进去的 folder_tags 会丢）。
-            tauri::async_runtime::block_on(async {
-                db::update_captured_item(pool, item.id, &title, &payload.note).await?;
+                // 已存在：只改标题 / 标签，笔记交给「笔记」视图的 /note。
+                // note 为 None 时原样保留库里已有内容 —— 否则从收藏视图保存一次，
+                // 就把用户在笔记视图里写的东西清空了。
+                let notes = payload.note.clone().unwrap_or_else(|| item.notes.clone());
+                tauri::async_runtime::block_on(async {
+                    db::update_captured_item(pool, item.id, &title, &notes).await?;
                 db::replace_item_tags(pool, item.id, &tag_specs).await?;
                 // 已存在但还没有本地图标时，补一次 favicon 落盘（不覆盖已有封面）。
                 if let Some(ref u) = cover_url {
@@ -394,7 +465,10 @@ fn handle_capture(
             };
             let (item_id, _) = db::upsert_item(pool, &item).await?;
             db::replace_item_tags(pool, item_id, &tag_specs).await?;
-            db::update_item_notes(pool, item_id, &payload.note).await?;
+            let notes = payload.note.clone().unwrap_or_default();
+            if !notes.is_empty() {
+                db::update_item_notes(pool, item_id, &notes).await?;
+            }
             // 把 favicon 下载到本地 covers/，WebView 才能显示。
             if let Some(ref u) = cover_url {
                 let _ = localize_cover(&*app.state::<AppState>(), pool, "browser", &external_id, u).await;
@@ -509,6 +583,119 @@ fn handle_routed_capture(
             tags: tag_specs.iter().map(|spec| spec.name.clone()).collect(),
         },
     )
+}
+
+// ── URL 归一化与条目定位 ──
+
+/// 需要剥掉的「纯展示 / 定位」参数。
+///
+/// 这些参数会让同一个页面产生无数个 URL：加了时间戳标记后地址变成 `...&t=42`，
+/// 从搜索点进来带 `spm_id_from`，分享链带 `share_source`……都会让按 URL 找收藏失败。
+///
+/// ⚠️ **绝不剥 `p`**：B站 `?p=2` 是同一合集里的不同一集，剥了会把两集认成同一条。
+const TRACKING_PARAMS: &[&str] = &[
+    "spm_id_from",
+    "from_spm_id",
+    "vd_source",
+    "share_source",
+    "share_medium",
+    "share_plat",
+    "share_session_id",
+    "share_tag",
+    "unique_k",
+    "timestamp",
+    "t",
+    "seid",
+    "refer_from",
+    "bbid",
+    "ts",
+    "buvid",
+    "up_id",
+];
+
+fn is_tracking_param(key: &str) -> bool {
+    TRACKING_PARAMS.contains(&key)
+}
+
+/// 剥掉追踪 / 定位参数与 fragment，得到「这一页的身份」。
+/// 解析失败（非 URL）时原样返回，交给调用方继续用原始串兜底。
+pub fn normalize_url(raw: &str) -> String {
+    let Ok(parsed) = url::Url::parse(raw) else {
+        return raw.to_string();
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return raw.to_string();
+    }
+    let kept: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter(|(key, _)| !is_tracking_param(&key.to_ascii_lowercase()))
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+
+    let mut cleaned = parsed.clone();
+    cleaned.set_fragment(None);
+    if kept.is_empty() {
+        cleaned.set_query(None);
+    } else {
+        cleaned.query_pairs_mut().clear();
+        for (key, value) in kept {
+            cleaned.query_pairs_mut().append_pair(&key, &value);
+        }
+    }
+    cleaned.to_string()
+}
+
+/// 只留 scheme + host + path，连 `p` 一起剥掉，作为匹配的最后一级兜底。
+pub fn base_url(raw: &str) -> String {
+    let Ok(parsed) = url::Url::parse(raw) else {
+        return raw.to_string();
+    };
+    let mut cleaned = parsed.clone();
+    cleaned.set_query(None);
+    cleaned.set_fragment(None);
+    cleaned.to_string()
+}
+
+/// 按地址栏 URL 定位收藏条目，优先级从高到低：
+///
+/// 1. `source_url` 精确等于原始 URL
+/// 2. `source_url` 等于归一化后的 URL（剥掉追踪参数）
+/// 3. `source_url` 等于去参数后的 URL
+/// 4. `browser/bk_<sha256(原始 URL)>`（扩展快速入库写的键）
+/// 5. `browser/bk_<sha256(归一化 URL)>`
+///
+/// 前三级能覆盖**所有来源**（B站 / 知乎 / CSDN / GitHub 入库时都会写 `source_url`），
+/// 后两级是给扩展自己的快速入库兜底的。
+async fn lookup_item(
+    pool: &SqlitePool,
+    raw_url: &str,
+) -> Result<Option<db::CapturedItem>, AppError> {
+    let normalized = normalize_url(raw_url);
+    let base = base_url(raw_url);
+    let mut candidates: Vec<String> = Vec::with_capacity(3);
+    for candidate in [raw_url.to_string(), normalized.clone(), base] {
+        if !candidate.is_empty() && !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    if let Some(item) = db::find_item_by_source_urls(pool, &candidates).await? {
+        return Ok(Some(item));
+    }
+    let mut ids: Vec<String> = Vec::with_capacity(2);
+    for id in [
+        external_id_for_url(raw_url),
+        external_id_for_url(&normalized),
+    ] {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    for id in ids {
+        if let Some(item) = db::find_item_by_source_id(pool, "browser", &id).await? {
+            return Ok(Some(item));
+        }
+    }
+    Ok(None)
 }
 
 /// 尝试把链接路由到对应站的适配器，拿到丰富元数据。返回 `None` 表示「无法识别或失败」，
@@ -685,6 +872,140 @@ async fn download_cover_generic(url: &str) -> Option<(Vec<u8>, String)> {
     Some((bytes.to_vec(), extension))
 }
 
+/// `POST /note` —— 侧边栏笔记面板保存笔记。
+///
+/// 带乐观锁：客户端把读取时拿到的 `updated_at` 放在 `baseUpdatedAt` 里，
+/// 服务端不一致就返回 409 + 当前内容，避免 app 内与侧边栏互相覆盖
+/// （两个界面都能改同一条 notes，日常真的会同时开着）。
+fn handle_note(
+    request: &mut Request,
+    pool: &SqlitePool,
+    app: &AppHandle,
+) -> Response<Cursor<Vec<u8>>> {
+    let body = match read_body(request) {
+        Ok(body) => body,
+        Err(error) => return json(400, &ErrorResponse::new(&error)),
+    };
+    let payload: NoteRequest = match serde_json::from_str(&body) {
+        Ok(payload) => payload,
+        Err(error) => return json(400, &ErrorResponse::new(&format!("请求体解析失败：{error}"))),
+    };
+    let url = payload.url.trim().to_string();
+    if url.is_empty() {
+        return json(400, &ErrorResponse::new("url 不能为空"));
+    }
+
+    let found = match tauri::async_runtime::block_on(lookup_item(pool, &url)) {
+        Ok(Some(item)) => item,
+        Ok(None) => {
+            return json(404, &ErrorResponse::new("这一页还没收藏，先在「收藏」里收进来"))
+        }
+        Err(error) => return json(500, &ErrorResponse::new(&error.to_string())),
+    };
+
+    // 乐观锁：baseUpdatedAt 与库里当前值不一致 → 判定冲突，不写入。
+    if let Some(base) = payload.base_updated_at {
+        let current =
+            tauri::async_runtime::block_on(db::get_item_updated_at(pool, found.id)).ok().flatten();
+        if current != Some(base) {
+            let remote = tauri::async_runtime::block_on(db::find_item_by_source_id(
+                pool,
+                &found.source,
+                &found.external_id,
+            ))
+            .ok()
+            .flatten();
+            return json(
+                409,
+                &ConflictResponse {
+                    ok: false,
+                    error: "笔记已在别处被修改，未覆盖".into(),
+                    conflict: true,
+                    remote_notes: remote.as_ref().map(|r| r.notes.clone()).unwrap_or_default(),
+                    remote_updated_at: current,
+                },
+            );
+        }
+    }
+
+    let state = &*app.state::<AppState>();
+    match tauri::async_runtime::block_on(crate::notes::save_notes(
+        state,
+        found.id,
+        &payload.note,
+    )) {
+        Ok(item) => {
+            let updated_at =
+                tauri::async_runtime::block_on(db::get_item_updated_at(pool, found.id))
+                    .ok()
+                    .flatten();
+            json(
+                200,
+                &NoteResponse {
+                    ok: true,
+                    item_id: item.id,
+                    notes: item.notes,
+                    updated_at,
+                    obsidian_path: item.obsidian_path,
+                },
+            )
+        }
+        Err(error) => json(500, &ErrorResponse::new(&error.to_string())),
+    }
+}
+
+/// `GET /obsidian/status` —— 侧边栏据此决定是否显示「同步到 Obsidian」相关 UI。
+fn handle_obsidian_status(app: &AppHandle) -> Response<Cursor<Vec<u8>>> {
+    let state = &*app.state::<AppState>();
+    let settings = obsidian::load_settings(&state.data_dir);
+    json(
+        200,
+        &ObsidianStatusResponse {
+            ok: true,
+            enabled: settings.enabled,
+            vault_path: settings.vault_path,
+        },
+    )
+}
+
+/// `POST /obsidian/open` —— 在 Obsidian 里打开当前页对应的笔记。
+///
+/// 走 Rust 端 `ShellExecuteW` 而不是让扩展直接跳 `obsidian://`：
+/// 浏览器会拦截外部协议导航。
+fn handle_obsidian_open(
+    request: &mut Request,
+    pool: &SqlitePool,
+    app: &AppHandle,
+) -> Response<Cursor<Vec<u8>>> {
+    let body = match read_body(request) {
+        Ok(body) => body,
+        Err(error) => return json(400, &ErrorResponse::new(&error)),
+    };
+    let payload: NoteRequest = match serde_json::from_str(&body) {
+        Ok(payload) => payload,
+        Err(error) => return json(400, &ErrorResponse::new(&format!("请求体解析失败：{error}"))),
+    };
+    let found = match tauri::async_runtime::block_on(lookup_item(pool, payload.url.trim())) {
+        Ok(Some(item)) => item,
+        Ok(None) => return json(404, &ErrorResponse::new("这一页还没收藏")),
+        Err(error) => return json(500, &ErrorResponse::new(&error.to_string())),
+    };
+
+    let state = &*app.state::<AppState>();
+    let settings = obsidian::load_settings(&state.data_dir);
+    if !settings.enabled {
+        return json(400, &ErrorResponse::new("Obsidian 联动未开启"));
+    }
+    let item = match tauri::async_runtime::block_on(db::get_item(pool, found.id)) {
+        Ok(item) => item,
+        Err(error) => return json(500, &ErrorResponse::new(&error.to_string())),
+    };
+    match obsidian::open_in_obsidian(&settings, &item) {
+        Ok(()) => json(200, &OkResponse { ok: true }),
+        Err(error) => json(500, &ErrorResponse::new(&error.to_string())),
+    }
+}
+
 /// 从 bilibili 链接里抽 BV 号（BV 后接字母数字）。抽不到返回 `None`。
 fn capture_bvid(url: &str) -> Option<String> {
     let bytes = url.as_bytes();
@@ -824,6 +1145,36 @@ impl ErrorResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_url_strips_tracking_but_keeps_part() {
+        // 加了时间戳标记后地址会变，归一化后必须还能对上原来那条收藏。
+        assert_eq!(
+            normalize_url("https://www.bilibili.com/video/BV1xx411c7mD?spm_id_from=333.999&t=42"),
+            "https://www.bilibili.com/video/BV1xx411c7mD"
+        );
+        // ⚠️ p 是「第几集」，绝不能剥
+        assert_eq!(
+            normalize_url("https://www.bilibili.com/video/BV1xx411c7mD?p=2&spm_id_from=333"),
+            "https://www.bilibili.com/video/BV1xx411c7mD?p=2"
+        );
+        assert_eq!(
+            normalize_url("https://zhuanlan.zhihu.com/p/123?share_source=weibo#:~:text=abc"),
+            "https://zhuanlan.zhihu.com/p/123"
+        );
+        // 非 http(s) / 非法 URL 原样返回，交给调用方兜底
+        assert_eq!(normalize_url("chrome://extensions"), "chrome://extensions");
+        assert_eq!(normalize_url("not a url"), "not a url");
+    }
+
+    #[test]
+    fn base_url_drops_every_query() {
+        assert_eq!(
+            base_url("https://www.bilibili.com/video/BV1xx411c7mD?p=2&t=42"),
+            "https://www.bilibili.com/video/BV1xx411c7mD"
+        );
+        assert_eq!(base_url("bad input"), "bad input");
+    }
 
     #[test]
     fn external_id_is_stable_and_short() {

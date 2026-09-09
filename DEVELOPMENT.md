@@ -356,6 +356,73 @@ git checkout -- src-tauri/migrations/
   其中 5 个迁移自愈测试覆盖了：LF↔CRLF 双向漂移能自愈、真篡改**不得**自愈、全新库（无表）不报错、checksum 已一致时不产生写入。
 - 排查脚本思路：Python 对每个 `.sql` 算 sha384，与 DB 记录对比，并额外算"转 LF 后"的值，用于区分**行尾差异**与**真篡改**。
 
+### 3.15 批量写必须收进一个事务（3000 条实测：48 s → 0.6 s）
+
+文件导入（JSON）曾经慢到不可用。实测基线（debug 构建，3000 条、每条 2 个标签、payload 约 2 MB）：
+
+| 阶段（各 3000 次） | 耗时 | 单条 |
+|---|---|---|
+| 裸 INSERT（自动提交） | 6.8 s | **2.3 ms** |
+| 事务内 INSERT | 0.06 s | **0.02 ms** |
+| FTS 写入（事务内） | 0.11 s | — |
+| 存在性 SELECT | 0.17 s | 0.06 ms |
+
+**根因**：自动提交模式下每条**写**语句都要一次 WAL fsync（sqlx 默认 `synchronous=FULL`），约 2.3 ms/条；放进事务后降到 0.02 ms/条，**差 100 倍**。只读语句不受影响（不写 WAL 就不需要 fsync，0.06 ms/条）。
+
+优化后：`import_collection` 3000 条 **48,627 ms → 594 ms**（约 80×），重复导入 205 ms → 63 ms。
+
+**所有批量写的硬规矩**（导入、批量改标签、批量回写封面路径、任何 N 条循环）：
+
+1. **收进一个事务**。单条语句失败**不会**中断事务，仍可按 `failed` 计并继续——所以不必为了容错放弃事务。
+2. **查表结果内存缓存**。3000 条收藏通常只对应几十个不同标签 / 分类，别每条都查一次库。
+3. **别把刚写入的行再读回来**。FTS 直接用已知字段写 `update_fts_row`，不要用 `rebuild_item_fts`（后者每条多两次 SELECT）。
+4. **网络 I/O 要有界并发**。封面下载串行时 3000 条要按「单张耗时 × 3000」线性累加（十几分钟），并发 8 后约 2 分钟。
+
+**⚠️ 跨连接陷阱**：若先用连接池的 A 连接写入、再 `pool.begin()`（可能拿到 B 连接）走「先读后写」，SQLite 直接返回 `database is locked (code 5)`，且 busy handler **不会**重试。同一批操作的所有语句必须在**同一事务 / 同一条连接**上——包括 `create_import_run` 这种看起来无关的记录。
+
+**⚠️ sqlx 泛型执行器与 `Send` 冲突**：把 helper 改成 `E: Executor` 或 `A: Acquire` 泛型后，`#[tauri::command]` 会报 `implementation of Send is not general enough`。正确做法是**用具体类型**：实现放 `async fn xxx_conn(conn: &mut SqliteConnection, ...)`，`pub async fn xxx(pool, ...)` 里 `pool.acquire()` 包一层。
+
+**回归测试**（改导入逻辑后必须跑）：
+
+```bash
+cargo test --lib import_collection          # 语义：标签/分类/FTS/批注/星标/幂等/回收站恢复
+cargo test --lib bench_import_collection_3000 -- --ignored --nocapture   # 性能基线（3000 条）
+```
+
+### 3.16 加列后必须全局搜 SELECT（第三次踩）
+
+`category_from_row` 与 `ItemRow` 一样是**运行时按列名**解码。迁移 0010 给 `tag_categories` 加 `group_id` 时漏改了 `get_tag_category_by_normalized` 的 SELECT，导致**同名分类已存在**这条路径直接 panic `ColumnNotFound("group_id")` —— 也就是 **JSON 导入只要标签带 `category` 字段就会在第 2 条崩溃**。
+
+现用 `CATEGORY_ROW_COLUMNS` 常量统一（`list_tag_categories` + `get_tag_category_by_normalized` 共用），与 `ITEM_ROW_COLUMNS` 同一约定。回归测试 `tag_category_queries_return_every_column`。
+
+**给 row 结构体加列时：全局搜索该表的所有 SELECT，不要只改你手上那一处。**
+
+---
+
+### 3.17 封面缓存走后台队列，导入不等封面
+
+**核心思路：数据库本身就是任务队列。** 一条收藏只要 `cover_url` 有值而 `cover_local_path` 为空，就代表"待缓存"（判定条件集中在 `db::PENDING_COVER_WHERE`，计数与取任务共用，改一处即可）。
+
+由此免费得到三个能力：
+
+1. **导入不再等封面**：`import_collection` 只做数据库写入，落库后立刻返回结果，再 `cover_cache::spawn_cover_cache()` 把封面丢到后台。原先 3000 条要卡在"导入中"十几分钟。
+2. **天然断点续传**：中途关掉应用不丢任务，下次启动（`lib.rs` setup 里同样 `spawn_cover_cache`）扫到同样的行接着缓存。
+3. **失败自动重试**：下载失败的行留在队列里，下次启动再试一次。
+
+**中途关掉会发生什么**（回答"会不会损坏数据"）：
+
+- 已落库的数据：安全，与封面无关。
+- 已下载但没来得及回写路径的：文件留在 `covers/`，下次重新下载并**覆盖同名文件**（文件名由 `source + external_id` 决定），不堆积垃圾。
+- 没下载到的：留在队列，下次继续。
+
+**实现位置** `src-tauri/src/cover_cache.rs`：
+
+- `run_pass()`：一轮扫描 → 有界并发下载（8）→ 每 32 张批量回写 + 广播进度事件 `cover-cache://progress`（`running: false` 表示本轮结束）。
+- `spawn_cover_cache()`：`AppState.cover_cache_busy` 作互斥；任务运行期间又来新任务时只置 `cover_cache_rerun`，让当前任务结束后补一轮，避免两个任务重复下载同一批封面。
+- 手动入口 `recache_covers` 复用 `run_pass`（早期是逐条串行，3000 条十几分钟），后台忙时直接返回提示。
+
+**前端** `CoverCacheListener.tsx`：启动时查 `cover_cache_status` 提示"还有 N 张未缓存，正在后台继续"；一轮结束后提示结果并触发收藏库静默刷新（本地封面要重拉列表才显示）。导入页在导入完成后单独提示"封面正在后台缓存，期间界面可能出现卡顿"——**开始提示由导入页负责、结束提示由监听器负责**，避免同一个进度被提示两遍。
+
 ---
 
 ## 四、新增来源检查清单
@@ -642,3 +709,239 @@ favorited_at: 2026-09-03
   - 前端 `obsidianEnabled` 只挂载时加载一次 → 设置页开启后导出入口不出现；改为依赖 `refreshToken` + `onObsidianChanged` 回调刷新。
   - 批注弹窗「在 Obsidian 中打开」按 item 快照判灰 → 弹窗打开时用 `get_item_obsidian_path` 查库确认，导出成功后再点亮。
 - P2（批注编辑器支持 Markdown 渲染）留作后续，非主流程阻塞项。
+
+---
+
+## 八、浏览器侧边栏「笔记面板」（方案待评审，**尚未实施**）
+
+> 状态：仅完成可行性评估与方案设计，代码未动。按 3.13，实施后不得自动 commit。
+>
+> 说明：`ROADMAP.md` 自述为 human-only 的畅想区，不代表开发计划，故方案记在本文件。
+
+### 8.1 需求
+
+在浏览器侧边栏里，针对**当前正在浏览的页面**：
+
+1. 显示该页面对应的那条收藏的 **Obsidian 笔记**，可直接编辑保存；
+2. 支持往笔记里插入**位置标记**（页面文本位置）或**视频时间戳**（当前播放进度）；
+3. 点击标记 → **当前标签页原地跳转**到对应位置（视频跳秒、网页滚到那段）。
+
+### 8.2 现状基础（已具备，可直接复用）
+
+| 已有能力 | 位置 |
+|---|---|
+| MV3 侧边栏扩展骨架（`sidePanel` + `sw.js` + 选项页） | `extension/manifest.json`、`sw.js` |
+| 本地桥：token 鉴权 + Host 回环校验 + CORS 预检 + 端口 17820–17829 探测 | `src-tauri/src/capture.rs` |
+| 读当前页（og:title / og:image / 选区），注入脚本取元数据 | `extension/sidepanel.js::readCurrentTab` |
+| 按 URL 查条目并返回 `title` / `notes` / `tags` | `capture.rs::handle_lookup` → `/item` |
+| 笔记写库 + 自动单向同步 vault + 回写 `obsidian_path` | `commands.rs::update_item_notes` |
+| Rust 端唤起 `obsidian://`（`ShellExecuteW`） | `obsidian.rs::open_uri_system` |
+
+也就是说：**笔记的读写链路已经打通了 80%**，缺的只是「把笔记面板搬进侧边栏」和「标记」这两块。
+
+### 8.3 设计决策（建议，待拍板）
+
+| 项 | 建议 | 理由 |
+|---|---|---|
+| **D1 扩展形态** | **扩展现有插件**（侧边栏内加「收藏 / 笔记」分段视图），**不新建第二个插件** | 同一份 token、同一套端口探测、同一个侧边栏入口；新建意味着用户再配一次 token、再占一个端口区间、工具栏多一个图标。MV3 一个扩展只有一个 `side_panel.default_path`，但单个 HTML 内做视图切换完全够用 |
+| **D2 笔记真源** | **数据库 `items.notes`**，vault md 仍是下游副本 | 扩展读不到本地文件系统（既有结论）。桥虽能用 `std::fs` 读 vault，但直接编辑 md 会碰用户在 Obsidian 的自由区，违背 7.3 分区托管底线。经 DB 走既有 `update_item_notes` 同步，与已定稿的 L1+L2 单向导出零冲突 |
+| **D3 标记存储** | **P0 用纯 Markdown 内联链接，不建表、不加迁移** | 见 8.4 |
+| **D4 跳转方式** | **当前标签页内原地执行，绝不重载** | 重载会丢失视频播放进度与 SPA 状态。见 8.5 |
+| **D5 URL 归一化** | 新增 `normalize_url()`，**先只用于查询，不改写入**，且保留旧键二次查找 | 见 8.6（最大隐性风险） |
+| **D6 打开 Obsidian** | 走**新增桥端点**，不在侧边栏里直接跳 `obsidian://` | Chrome/Edge 会拦截外部协议导航 |
+| **D7 安全面** | 新增端点沿用既有三件套（`authorized` / `is_localhost_request` / `add_cors_headers`） | 不引入新的信任假设 |
+
+### 8.4 标记怎么存（三选一）
+
+| 方案 | 做法 | 优点 | 缺点 |
+|---|---|---|---|
+| **A. 内联 Markdown 链接**（推荐 P0） | `- [00:42](https://www.bilibili.com/video/BVxxx?t=42) 这段讲了 WBI 签名`<br>`- [位置](https://xxx/article#:~:text=关键句) 重点` | **零 schema 变更**；Obsidian 里天然可见、天然可点；随 `notes` 自动进 FTS、自动进 JSON 导出/导入（7.11 的 `notes` 链路已通）；不触碰分区托管 | 删除/排序是文本操作；附加结构（选择器、滚动比例）无处安放 |
+| B. 新表 `item_markers` + 迁移 0011 | 结构化存 `type / value / quote / selector / ratio` | 可排序、可单删、可计数 | 要迁移；要补 `export_items` 的 SELECT 与 `import_collection` 的 INSERT（7.11 教训）；**vault 里看不见**；app 内要新 UI |
+| C. A + HTML 注释载荷 | `- [00:42](url?t=42) 说明 <!--{"type":"time","v":42,"sel":"..."}-->` | A 的结构化增强版；HTML 注释在 Obsidian 阅读视图不显示（7.3 已验证） | 文本里藏 JSON，略 hack |
+
+**建议 A 起步**：一条时间戳就是一行 Markdown 链接，同时满足「点击可跳转」与「同步到 Obsidian 后照样可点」，这是最小可用闭环。日后若确实需要标记列表 / 单条删除 / 跳转降级，再上 C，**始终不必建表**。
+
+### 8.5 ⚠️ 两个已核实的技术前提（决定实现方式）
+
+**（1）Scroll-to-Text-Fragment 能用作持久化格式，但不能用来做原地跳转。**
+
+已核实：`#:~:text=` 在 Chrome 80+ / Edge 83+ / Firefox 131+ / Safari 16.1+ 均支持，且浏览器**只在用户发起的顶层导航时触发**——脚本改 `location.hash`、同文档片段变化、iframe 内一律不触发；站点还可通过 `Document-Policy: force-load-at-top` 主动 opt-out。
+
+结论分工：
+
+- **持久化格式**用 STTF：在 Obsidian 里点、分享给别人、新标签页打开，全部自动定位 + 高亮。
+- **当前页原地跳转**必须由 content script 自己做：按引文找文本 → `scrollIntoView` → 临时高亮闪烁。这条路径不受 opt-out 影响。
+
+**（2）视频时间戳用 `?t=` 是各站通行的。**
+
+已核实 B站支持 `?t=200`（纯秒）与 `?t=0h1m59s`；YouTube 用 `&t=`。所以时间戳标记**照抄页面 URL + `?t=<秒>`** 即可，链接本身自解释。
+
+但原地跳转**不要导航**：content script 设 `video.currentTime = 42` 即可，找不到 `<video>` 才回退 `chrome.tabs.update({url: ...?t=42})`。
+
+### 8.6 ⚠️ 最大隐性风险：URL 归一化会改变 external_id
+
+现有 lookup 是 `bk_<sha256(location.href) 前16位>`，而 `location.href` 带着一堆参数：
+
+- 加了时间戳后 URL 变成 `...?t=42` → 再查一次会算成**另一个 external_id** → 笔记「凭空消失」。
+- 但 B站 `?p=2` 是**不同的一集**，绝不能剥。
+- 另：`route_capture` 入库的 B站条目实际是 `bilibili/BVxxx`、知乎是 `zhihu/<id>`，**根本不在 `browser/bk_` 命名空间下**，现有 `handle_lookup` 查不到它们。
+
+对策：
+
+1. 新增 `normalize_url()`：剥 `spm_id_from` / `from_spm_id` / `vd_source` / `share_source` / `unique_k` / `t` / `timestamp` 等纯展示与定位参数，**保留 `p`**。
+2. lookup 顺序：归一化后先按域名解析（`capture_bvid` / 知乎 / CSDN / GitHub 复用 `route_capture` 的判断）→ 再回退 `browser/bk_<归一化>` → 再回退 `browser/bk_<原始>`（兼容历史数据）。
+3. **写入口径暂不动**，只加查询侧的双查。否则历史 `external_id` 全变，等于一次静默数据迁移——这是 3.9「新增来源不需要迁移」的一个隐性反例，必须谨慎。
+
+### 8.7 实施清单
+
+**后端 `src-tauri/src/capture.rs`**
+
+| 端点 | 方法 | 说明 |
+|---|---|---|
+| `/item` | GET | 扩展返回：补 `id` / `source` / `obsidianPath`；lookup 改为 8.6 的多源顺序 |
+| `/note` | POST | `{url, note, baseUpdatedAt}` → 定位 item → **乐观锁比对**（8.11.2）→ 写 `notes` → 触发 Obsidian 同步 → 返回新 notes、`obsidianPath`、`updatedAt` |
+| `/obsidian/status` | GET | `{enabled, vaultPath}`，侧边栏据此决定是否显示同步相关 UI |
+| `/obsidian/open` | POST | `{url}` → 走 `obsidian::open_uri_system` |
+
+**后端 重构（必须做，防漂移）**
+
+把 `commands.rs::update_item_notes` 里「写库 → 同步 → 回写 `obsidian_path`」抽成 `notes::save_notes(&state, item_id, &notes) -> Result<VideoItem>`，Tauri 命令与桥**共用同一份**。否则同一逻辑两处实现，必漏（3.16 同类风险）。
+
+**扩展 `extension/`**
+
+- `sidepanel.html`：顶部分段控件「收藏 / 笔记」。
+- 笔记视图：编辑态 + 保存、「+ 时间戳」「+ 位置标记」按钮、标记列表（从 Markdown 解析渲染成 chip，点击即跳转）、「在 Obsidian 中打开」。
+- 抽出 `page.js` 承载注入逻辑：`getVideoState()` / `getSelectionLocator()` / `seekVideo(t)` / `scrollToText(quote)`。
+- 未收藏页面：显示「这条还没收藏」+ 一键切到收藏视图（P0 不自动建条目）。
+
+**app 前端**：几乎零改动——`notes` 里的链接在 `VideoNoteEditorModal` 预览态已被 `LinkifiedText` 转链。
+
+**迁移**：**0 个**（走 D3 方案 A 的话）。
+
+### 8.8 风险清单
+
+| 风险 | 影响 | 对策 |
+|---|---|---|
+| STTF 不被脚本触发 | 原地跳转失效 | content script 自行定位（8.5）；STTF 仅作持久化格式 |
+| 站点 `force-load-at-top` | STTF 被 opt-out | 脚本路径不受影响 |
+| 选区跨块级元素 | STTF 生成失败 | 只取首段、截断 ≤60 字，失败时提示选短一点 |
+| 虚拟列表 / 动态页（知乎 feed） | 文本已不在 DOM | 降级：先滚到 `scrollRatio` 附近再找；仍失败给提示 |
+| B站播放器多 `<video>` / 在 iframe | 取错元素 | 取面积最大且 `duration` 有限的那个；直播 `duration=Infinity` 时禁用时间戳按钮 |
+| 归一化改变 external_id | 历史收藏失联 | 新旧双查 + 写入口径不动（8.6） |
+| 侧边栏重开即重载 | 编辑中内容丢失 | 草稿存 `chrome.storage.local`（按 URL 键），5 s 防抖自动保存 + `pagehide` 时用 `keepalive` 强制保存（8.11.4） |
+| app 版本落后于扩展 | 新端点 404 | 桥返回 `ok:false,error`，侧边栏提示「请升级 collectorlite」 |
+| 侧边栏与 app 同时编辑同一条笔记 | 后保存覆盖先保存，丢内容 | 乐观锁（8.11.2），`409` 时提示「覆盖 / 重新加载」 |
+| 拼 `t=` 用了 `?` 而 URL 已有 query | 链接失效 | 有 query 用 `&t=`（8.11.9） |
+
+### 8.9 工作量与分阶段
+
+- 桥 + 抽 `notes::save_notes`：约 150~200 行 Rust
+- 扩展笔记视图 + 注入脚本：约 350~450 行 JS/HTML
+- app 前端：约 0
+- 迁移：0
+
+| 阶段 | 内容 | 预估 |
+|---|---|---|
+| **P0** | URL 归一化 + 多源 lookup + `/note` 读写 + 侧边栏笔记视图（纯文本，无标记） | 约 1 天 |
+| **P1** | 时间戳 / 位置标记的插入与原地跳转 | 约 1 天 |
+| **P2（可选）** | 标记结构化（HTML 注释载荷）、未收藏页直接建条目、vault 全文只读预览 | 按需 |
+
+### 8.10 已拍板（2026-09-09）
+
+| # | 决定 | 结论 |
+|---|---|---|
+| 1 | 插件形态 | **合并进现有插件**，侧边栏内加「收藏 / 笔记」**切换按钮**（分段控件） |
+| 2 | 时间戳是否进 vault | **进**。确认走 D3 方案 A（Markdown 内联链接），不建表 |
+| 3 | 未收藏页面能否写笔记 | **不能**。P0 必须先收藏，笔记功能才开放 |
+| 4 | 位置标记的降级信息（选择器 / 滚动比例 / HTML 注释载荷） | **P2 再说**，P0 只存引文 |
+
+### 8.11 补充设计要点（评审后追加）
+
+#### 8.11.1 两个视图共享一次拉取的数据，不是两个独立页面
+
+笔记是**依附于当前页面那条 item** 的，不是独立功能。因此 `/item` 一次性返回 `id / source / title / tags / notes / obsidianPath`，两个视图共用同一份 `state.item`；切换视图**不发新请求、不重置状态**。切换按钮只做 CSS 显隐。
+
+#### 8.11.2 ⚠️ 笔记冲突：必须加轻量乐观锁
+
+app 内 `VideoNoteEditorModal` 和侧边栏**都能改同一条 `notes`**，两个都开着时，后保存的直接覆盖先保存的——这在日常使用中真会发生（开着 app 看收藏库、又在浏览器里记笔记）。
+
+做法（不需要新字段）：`POST /note` 带 `baseUpdatedAt`（读取时拿到的 `items.updated_at`），桥端比对不一致则返回 `409 conflict`，侧边栏提示「笔记已在别处被修改」并提供「覆盖 / 重新加载」。成本极低，P0 就做。
+
+#### 8.11.3 时间戳的两个体验细节（决定"用不用得起来"）
+
+- **回退 3 秒**：插入时用 `max(0, currentTime - 3)`。人听到重点再点按钮已有延迟，跳回去正好落在重点前。这是播客/视频笔记工具的通行做法。
+- **连续打点**：插入后焦点必须回到 `textarea`，且光标停在这一行末尾、不跳到文末。看视频做笔记是连续动作，5 次打点不该重新定位 5 次光标。
+- 格式：秒取整（不要小数）；超过 1 小时才带 `H:`（`1:02:33`），否则 `00:42`。
+
+#### 8.11.4 自动保存：侧边栏随时会被关掉
+
+侧边栏不是常驻页面——切站点、关面板都会卸载它，编辑中的内容会丢。
+
+- 5 秒防抖自动保存 + `pagehide` / `visibilitychange` 时强制保存一次。
+- ⚠️ MV3 侧边栏卸载时普通 `fetch` 会被杀掉。用 `fetch(..., { keepalive: true })`（可带自定义头）；不支持时回退 `navigator.sendBeacon`——**桥支持 `?token=` 查询参数**（`capture.rs::authorized`），所以 sendBeacon 也走得通。
+- 草稿同时写 `chrome.storage.local`（按 URL 键），作为最后一道兜底。
+
+#### 8.11.5 位置标记：优先 anchor，STTF 兜底
+
+比 8.5 更稳的优先级：
+
+1. 选区最近的带 `id` 的祖先 → `#anchor`
+2. 最近的上级 `h1~h6`（若站点给它生成了 id）
+3. 都没有 → STTF 引文 `#:~:text=`
+
+**可以两个都用**：`#anchor:~:text=引文` 是合法的（fragment directive 允许跟在普通 fragment 后），浏览器先按 anchor 定位再按文本精修。anchor 不受 `force-load-at-top` opt-out 影响，比纯 STTF 稳得多。
+
+#### 8.11.6 标记单独渲染成列表，别混在正文里点
+
+方案 A 下标记是正文的一部分，但**在编辑态里点链接会打断输入**。建议：编辑框下方单独一个「标记」小节，用正则解析 notes 里的 `- [...](...?t=...)` 与 `- [...](...#:~:text=...)` 行，渲染成 chip，点击即跳转。编辑区保持纯文本，互不打扰。
+
+#### 8.11.7 「未收藏」与「已收藏但无笔记」要分别对待
+
+- **未收藏**：显示原因说明 + 「去收藏」按钮（切到收藏视图并聚焦标题框）。**不要做成灰色 disabled 按钮**——用户看不出为什么不能点。
+- **已收藏但无笔记**：空编辑框 + 引导文案（如「记点什么？点『+ 时间戳』可以插入当前播放位置」），不要留一片空白。
+
+#### 8.11.8 职责边界：笔记视图只管 `notes`
+
+改标题、改标签回收藏视图。不要让侧边栏变成第二个 app。
+
+#### 8.11.9 ⚠️ 拼 `t=` 时注意 `?` 还是 `&`
+
+`source_url` 常常已经带参数（B站 `?spm_id_from=...`），追加时必须用 `&t=`；没有 query 时才用 `?t=`。拼错会让整个 URL 失效。
+
+#### 8.11.10 app 侧几乎免费获得「跳回视频时间点」
+
+`notes` 在 `VideoNoteEditorModal` 预览态已有 `LinkifiedText` 转链，所以时间戳链接在 app 内点一下就会走 `open_url` 打开带 `?t=` 的链接。**不需要额外开发**。
+
+#### 8.11.11 侧边栏宽度与长 URL
+
+Edge 侧边栏默认约 400px（可拖宽）。完整时间戳 URL 在编辑框里很长，这是方案 A 的固有代价。对策仅 `textarea { white-space: pre-wrap; word-break: break-all }`，不做折叠（P0 不引入复杂度）。
+
+#### 8.11.12 传输安全
+
+笔记内容经回环 HTTP 明文传输。同机其他进程理论上可嗅探，但需要本机权限，风险可接受。token 仍是唯一防线，不额外上 TLS（自签证书在扩展里反而更麻烦）。
+
+### 8.12 P0 实施记录（2026-09-09，代码已完成，未提交）
+
+| 文件 | 改动 |
+|---|---|
+| `src-tauri/src/notes.rs` | **新建**。`save_notes(state, item_id, notes)` = 写库 → 按需同步 vault → 回写 `obsidian_path`。Tauri 命令与桥共用，杜绝两处漂移 |
+| `src-tauri/src/commands.rs` | `update_item_notes` 改为转发 `notes::save_notes` |
+| `src-tauri/src/db.rs` | `CapturedItem` 扩 `source`/`external_id`/`source_url`/`updated_at`/`obsidian_path`；新增 `find_item_by_source_urls`（候选集 + 优先级排序）、`get_item_updated_at` |
+| `src-tauri/src/capture.rs` | `normalize_url` / `base_url` / `lookup_item`；`/item` 响���补 `id`/`source`/`obsidianPath`/`updatedAt`；新增 `/note`（乐观锁）、`/obsidian/status`、`/obsidian/open` |
+| `extension/sidepanel.{html,js,css}` | 收藏 / 笔记分段切换；笔记视图（未收藏引导、自动保存、冲突提示、标记列表与跳转）；注入脚本 `pageVideoState` / `pageSeek` / `pageSelection` / `pageScrollToText` |
+
+#### 实施中的两个判断（与原始方案有出入，记在这里）
+
+1. **收藏视图的「批注」被移除了**。它和笔记视图编辑的是同一个 `items.notes`，两个编辑器必然互相覆盖。现在收藏视图只管标题 + 标签，笔记独归笔记视图。
+   配套改了 `/capture`：`note` 变成 `Option<String>`，`None` 表示**不要动库里的 notes**——否则从收藏视图点一次「更新」，就把笔记视图里写的内容清空了。
+2. **`lookup_item` 的优先级**实现为：`source_url` 三形态（原始 → 归一化 → 去参数）→ `browser/bk_` 两级。前三级按 `source_url` 匹配，天然覆盖 B站 / 知乎 / CSDN / GitHub 全部来源，不必再写逐平台的解析。
+
+#### 校验
+
+- `cargo test --lib`：73 passed（新增 `normalize_url_strips_tracking_but_keeps_part`、`base_url_drops_every_query`）
+- `node --check`：`sidepanel.js` / `sw.js` / `options.js` 均通过；26 个 `getElementById` 引用的 id 与 HTML 全部对上（无漏接线）
+- ⚠️ **不要对 `capture.rs` 跑 `cargo fmt`**：该文件在 HEAD 上就有 13 处不合 rustfmt（从未格式化过），跑一次会制造大量无关改动。新代码已自查无超 100 列行
+
+#### 尚未做（P1）
+
+时间戳 / 位置标记的**插入**目前前端逻辑已具备（`pageVideoState` / `pageSelection` 已注入），但侧边栏按钮的显示条件依赖 `state.page.hasVideo`，需在真机（B站 / 知乎）上验证注入时机；`pageScrollToText` 在虚拟列表页（知乎 feed）可能定位失败，需补降级。

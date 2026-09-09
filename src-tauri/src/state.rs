@@ -1,7 +1,7 @@
 use keyring::Entry;
 use sqlx::SqlitePool;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicU16;
+use std::sync::atomic::{AtomicBool, AtomicU16};
 use std::sync::Mutex;
 use tauri::Manager;
 
@@ -34,6 +34,10 @@ pub struct AppState {
     pub import_cache: Mutex<Option<PreviewCache>>,
     /// 浏览器扩展本地桥实际占用的端口（0 = 未启动）。由 `capture::serve` 在绑定成功后写入。
     pub bridge_port: AtomicU16,
+    /// 后台封面缓存任务是否正在跑（防止重复启动）。
+    pub cover_cache_busy: AtomicBool,
+    /// 任务运行期间又有新封面入队时置位，让当前任务结束后再补一轮。
+    pub cover_cache_rerun: AtomicBool,
 }
 
 impl AppState {
@@ -74,6 +78,8 @@ impl AppState {
             data_dir,
             import_cache: Mutex::new(None),
             bridge_port: AtomicU16::new(0),
+            cover_cache_busy: AtomicBool::new(false),
+            cover_cache_rerun: AtomicBool::new(false),
         })
     }
 

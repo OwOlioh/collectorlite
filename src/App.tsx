@@ -7,6 +7,7 @@ import { SettingsPage } from "./components/SettingsPage";
 import { TrashPage } from "./components/TrashPage";
 import { Sidebar } from "./components/Sidebar";
 import { CaptureBridgeListener } from "./components/CaptureBridgeListener";
+import { CoverCacheListener } from "./components/CoverCacheListener";
 import { ToastProvider } from "./components/Toast";
 import { AutoBackupRunner } from "./components/AutoBackupRunner";
 import { applyTheme, getStoredTheme, watchSystemTheme } from "./lib/theme";
@@ -59,6 +60,7 @@ export default function App() {
     <ToastProvider>
       <AutoBackupRunner />
       <CaptureBridgeListener onCaptured={handleCaptured} />
+      <CoverCacheListener onCoversCached={handleCaptured} />
       <div className="app-shell">
         <Sidebar active={active} trashCount={trashCount} onChange={setActive} />
         <main className="main-panel">

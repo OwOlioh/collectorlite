@@ -4,6 +4,7 @@ import type {
   BridgeInfo,
   BrowserImportRequest,
   CollectionInfo,
+  CoverCacheStatus,
   ImportPreview,
   ImportRequest,
   ImportResult,
@@ -122,6 +123,8 @@ export const api = {
   pickBackupFolder: () => call<string | null>("pick_backup_folder"),
   // 维护：重新缓存封面
   recacheCovers: () => call<RecacheResult>("recache_covers", {}),
+  // 封面缓存队列状态（还有多少张没缓存 / 后台是否在跑）
+  coverCacheStatus: () => call<CoverCacheStatus>("cover_cache_status", {}),
   // Zhihu
   zhihuSetCookie: (cookie: string) =>
     call<null>("zhihu_set_cookie", { cookie }),
@@ -764,6 +767,8 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
         failed: 0,
         errors: []
       } as T;
+    case "cover_cache_status":
+      return { pending: 0, running: false } as T;
     case "save_export_file":
       // 浏览器 mock 环境没有系统对话框，退化为触发下载并返回一个示意路径
       return "已保存（示例路径）" as T;
