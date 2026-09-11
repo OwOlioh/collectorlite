@@ -1,0 +1,47 @@
+{
+  "formatVersion": 1,
+  "exportedAt": 1757570000,
+  "app": "collectorlite",
+  "items": [
+    {
+      "source": "netease",
+      "externalId": "2709782550",
+      "sourceUrl": "https://music.163.com/#/song?id=2709782550",
+      "title": "下等马",
+      "description": "洛天依Official / ChiliChill乐团 · 专辑《闪耀》",
+      "coverUrl": null,
+      "authorName": "洛天依Official/ChiliChill乐团",
+      "authorId": "906118",
+      "partitionName": null,
+      "publishedAt": null,
+      "duration": 187,
+      "favoriteTime": 1757570000,
+      "notes": "",
+      "obsidianPath": null,
+      "starred": false,
+      "starredAt": null,
+      "extra": {},
+      "tags": []
+    },
+    {
+      "source": "netease",
+      "externalId": "447926067",
+      "sourceUrl": "https://music.163.com/#/song?id=447926067",
+      "title": "鼓楼",
+      "description": "赵雷 · 专辑《无法长大》",
+      "coverUrl": null,
+      "authorName": "赵雷",
+      "authorId": "6731",
+      "partitionName": null,
+      "publishedAt": null,
+      "duration": 281,
+      "favoriteTime": 1757570001,
+      "notes": "",
+      "obsidianPath": null,
+      "starred": false,
+      "starredAt": null,
+      "extra": {},
+      "tags": []
+    }
+  ]
+}
