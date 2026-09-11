@@ -162,9 +162,43 @@ export interface ItemFilters {
 
 export type AppView = "library" | "import" | "trash" | "settings";
 
+/** 收藏的打开方式：唤起桌面客户端，或打开网页版。 */
+export type OpenTarget = "client" | "browser";
+
+/** 各来源的打开方式偏好。没列出的来源走默认（客户端优先）。 */
+export interface OpenPrefs {
+  targets: Record<string, OpenTarget>;
+}
+
 /** 浏览器扩展「快速入库」用的本地桥状态。port 为 0 表示桥未启动。 */
 export interface BridgeInfo {
   port: number;
   running: boolean;
   token: string;
+}
+
+/**
+ * 网易云增量同步配置。字段名与后端 `SyncSettings` 的 camelCase 保持一致。
+ * `waterMarks` = 歌单 id → 上次同步到的加入时间（秒），前端只读、不要手改。
+ */
+export interface NeteaseSyncSettings {
+  enabled: boolean;
+  /** 同步间隔（分钟），后端有 5 分钟下限（网易云风控） */
+  intervalMinutes: number;
+  /** 取消收藏的歌是否自动移入回收站 */
+  autoRemoveUnfavorited: boolean;
+  /** 参与自动同步的歌单 id，导入过的歌单会自动登记 */
+  playlistIds: string[];
+  waterMarks: Record<string, number>;
+  lastSyncAt: number | null;
+}
+
+/** 网易云增量同步结果。skippedReason 非空 = 这一轮根本没跑。 */
+export interface NeteaseSyncReport {
+  added: number;
+  removed: number;
+  playlists: number;
+  syncedAt: number | null;
+  skippedReason: string | null;
+  errors: string[];
 }

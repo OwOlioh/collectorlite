@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 import {
   Archive,
+  AppWindow,
   Check,
   Copy,
   Database,
   FileText,
   FolderPlus,
   LogOut,
+  Music,
   Puzzle,
   RefreshCw,
   ShieldCheck,
@@ -15,7 +17,14 @@ import {
 } from "lucide-react";
 import { api } from "../lib/api";
 import { useToast } from "./Toast";
-import type { BilibiliProfile, BridgeInfo, ObsidianSettings } from "../types";
+import type {
+  BilibiliProfile,
+  BridgeInfo,
+  NeteaseSyncReport,
+  NeteaseSyncSettings,
+  ObsidianSettings,
+  OpenTarget
+} from "../types";
 import { applyTheme, getStoredTheme, storeTheme, type ThemeMode } from "../lib/theme";
 import { getRetentionDays, setRetentionDays, RETENTION_OPTIONS } from "../lib/retention";
 import {
@@ -30,10 +39,35 @@ interface SettingsPageProps {
   onOpenTrash?: () => void;
   /** Obsidian 设置保存后回调，供 App 递增版本号、通知收藏库刷新导出按钮显隐。 */
   onObsidianChanged?: () => void;
+  /** 手动同步改动了库内容时回调，同样是让收藏库重新拉列表。 */
+  onNeteaseSynced?: () => void;
+  /** 打开方式偏好（客户端 / 浏览器）改动后回调，让收藏库重读。 */
+  onOpenPrefsChanged?: () => void;
 }
 
-export function SettingsPage({ onOpenTrash, onObsidianChanged }: SettingsPageProps) {
+/** 同步间隔候选（分钟）。后端有 5 分钟下限，低于它会被夹回去。 */
+const SYNC_INTERVAL_OPTIONS = [5, 15, 30, 60];
+
+const formatSyncTime = (seconds: number | null) => {
+  if (!seconds) return "尚未同步过";
+  const date = new Date(seconds * 1000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(
+    date.getHours()
+  )}:${pad(date.getMinutes())}`;
+};
+
+export function SettingsPage({
+  onOpenTrash,
+  onObsidianChanged,
+  onNeteaseSynced,
+  onOpenPrefsChanged
+}: SettingsPageProps) {
   const [profile, setProfile] = useState<BilibiliProfile | null>(null);
+  const [neteaseProfile, setNeteaseProfile] = useState<BilibiliProfile | null>(null);
+  const [sync, setSync] = useState<NeteaseSyncSettings | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [openTargets, setOpenTargets] = useState<Record<string, OpenTarget>>({});
   const [theme, setTheme] = useState<ThemeMode>(getStoredTheme());
   const [retention, setRetention] = useState<number>(getRetentionDays());
   const [recaching, setRecaching] = useState(false);
@@ -51,6 +85,25 @@ export function SettingsPage({ onOpenTrash, onObsidianChanged }: SettingsPagePro
 
   useEffect(() => {
     void api.getProfile().then(setProfile);
+  }, []);
+
+  useEffect(() => {
+    void api
+      .neteaseProfile()
+      .then(setNeteaseProfile)
+      .catch(() => setNeteaseProfile(null));
+    void api
+      .getNeteaseSyncSettings()
+      .then(setSync)
+      .catch(() => setSync(null));
+  }, []);
+
+  // 打开方式偏好。读失败的兜底是 client-first（后端默认值），卡片因此不会变成打不开。
+  useEffect(() => {
+    void api
+      .getOpenPrefs()
+      .then((p) => setOpenTargets(p.targets ?? {}))
+      .catch(() => setOpenTargets({}));
   }, []);
 
   useEffect(() => {
@@ -82,6 +135,62 @@ export function SettingsPage({ onOpenTrash, onObsidianChanged }: SettingsPagePro
       toast("success", "已重新生成令牌，记得同步到扩展选项页");
     } catch (e) {
       toast("error", `重新生成失败: ${String(e)}`);
+    }
+  };
+
+  const saveSync = async (patch: Partial<NeteaseSyncSettings>) => {
+    if (!sync) return;
+    const next = { ...sync, ...patch };
+    setSync(next);
+    try {
+      // 后端会把低于下限的间隔夹回去，用返回值刷新展示
+      setSync(await api.saveNeteaseSyncSettings(next));
+    } catch (e) {
+      toast("error", `保存同步设置失败: ${String(e)}`);
+    }
+  };
+
+  const reportSync = (report: NeteaseSyncReport) => {
+    if (report.skippedReason) {
+      toast("info", report.skippedReason);
+      return;
+    }
+    if (report.added > 0 || report.removed > 0) {
+      const removedHint =
+        report.removed > 0 ? `，${report.removed} 首取消收藏已移入回收站` : "";
+      toast("success", `同步完成：新增 ${report.added} 首${removedHint}`);
+      onNeteaseSynced?.();
+    } else {
+      toast("info", `同步完成：${report.playlists} 个歌单都没有变化`);
+    }
+    if (report.errors.length > 0) {
+      toast("error", report.errors.slice(0, 3).join("; "));
+    }
+  };
+
+  const syncNow = async () => {
+    setSyncing(true);
+    try {
+      reportSync(await api.syncNetease(true));
+      // 同步会更新水位和上次同步时间，重新拉一次展示最新值
+      setSync(await api.getNeteaseSyncSettings());
+    } catch (e) {
+      toast("error", `同步失败: ${String(e)}`);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const changeOpenTarget = async (source: string, target: OpenTarget) => {
+    // 先乐观更新，点了立刻有反馈；失败了再回滚并说明。
+    const previous = openTargets;
+    setOpenTargets({ ...previous, [source]: target });
+    try {
+      setOpenTargets((await api.setOpenTarget(source, target)).targets ?? {});
+      onOpenPrefsChanged?.();
+    } catch (error) {
+      setOpenTargets(previous);
+      toast("error", `保存打开方式失败：${String(error)}`);
     }
   };
 
@@ -223,6 +332,88 @@ export function SettingsPage({ onOpenTrash, onObsidianChanged }: SettingsPagePro
               退出登录
             </button>
           )}
+        </div>
+
+        <div className="settings-card is-wide">
+          <div className="settings-icon"><AppWindow size={20} /></div>
+          <div style={{ minWidth: 0 }}>
+            <h2>打开方式</h2>
+            <p>点卡片封面或标题时，是唤起桌面客户端还是打开网页版。</p>
+            <div className="theme-options">
+              {(["client", "browser"] as OpenTarget[]).map((target) => (
+                <button
+                  key={target}
+                  type="button"
+                  className={`theme-opt ${
+                    (openTargets.netease ?? "client") === target ? "is-active" : ""
+                  }`}
+                  onClick={() => void changeOpenTarget("netease", target)}
+                >
+                  {target === "client" ? "客户端优先" : "浏览器"}
+                </button>
+              ))}
+            </div>
+            <p className="muted">
+              适用于网易云音乐。选了浏览器之后，卡片 hover 菜单里会换成「客户端」按钮，两边都不会丢入口。
+            </p>
+          </div>
+        </div>
+
+        <div className="settings-card is-wide">
+          <div className="settings-icon"><Music size={20} /></div>
+          <div style={{ minWidth: 0 }}>
+            <h2>网易云音乐同步</h2>
+            <p>
+              {neteaseProfile?.isLogin
+                ? `已登录：${neteaseProfile.name ?? "网易云用户"}。导入过的歌单会自动登记，之后按下面的频率增量同步新收藏的歌。`
+                : "尚未登录。到「导入」页粘贴 Cookie 登录并导入一次歌单，之后就能开启同步。"}
+            </p>
+            {neteaseProfile?.isLogin && sync && (
+              <>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, margin: "8px 0 12px" }}>
+                  <input
+                    type="checkbox"
+                    checked={sync.enabled}
+                    onChange={(e) => void saveSync({ enabled: e.target.checked })}
+                  />
+                  <span>启用自动同步</span>
+                </label>
+                <div className="theme-options">
+                  {SYNC_INTERVAL_OPTIONS.map((minutes) => (
+                    <button
+                      key={minutes}
+                      type="button"
+                      className={`theme-opt ${sync.intervalMinutes === minutes ? "is-active" : ""}`}
+                      onClick={() => void saveSync({ intervalMinutes: minutes })}
+                    >
+                      {minutes} 分钟
+                    </button>
+                  ))}
+                </div>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, margin: "12px 0 8px" }}>
+                  <input
+                    type="checkbox"
+                    checked={sync.autoRemoveUnfavorited}
+                    onChange={(e) => void saveSync({ autoRemoveUnfavorited: e.target.checked })}
+                  />
+                  <span>在网易云取消收藏后，自动移入回收站（保留期内可恢复）</span>
+                </label>
+                <p className="muted">
+                  已登记 {sync.playlistIds.length} 个歌单 · 上次同步：
+                  {formatSyncTime(sync.lastSyncAt)}
+                </p>
+              </>
+            )}
+          </div>
+          <button
+            className="ghost-button"
+            type="button"
+            disabled={syncing || !neteaseProfile?.isLogin}
+            onClick={() => void syncNow()}
+          >
+            <RefreshCw size={16} className={syncing ? "spin" : ""} />
+            {syncing ? "同步中..." : "立即同步"}
+          </button>
         </div>
 
         <div className="settings-card">

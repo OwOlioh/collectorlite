@@ -177,6 +177,27 @@ pub struct CoverCacheStatus {
     pub running: bool,
 }
 
+/// 网易云增量同步结果。
+///
+/// `skippedReason` 为 `Some` 表示这一轮**根本没跑**（未登录 / 已关闭 / 太频繁 /
+/// 还没登记过歌单），前端据此决定要不要提示用户；`None` 表示确实跑了，
+/// `added` / `removed` 才是有效数字。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NeteaseSyncReport {
+    /// 本次新入库的曲目数（已存在的算 skipped，不重复计数）
+    pub added: i64,
+    /// 因用户取消收藏而移入回收站的曲目数
+    pub removed: i64,
+    /// 本轮参与同步的歌单数
+    pub playlists: i64,
+    pub synced_at: Option<i64>,
+    #[serde(default)]
+    pub skipped_reason: Option<String>,
+    #[serde(default)]
+    pub errors: Vec<String>,
+}
+
 /// 导出文件中单个标签的精简表示（不含库内 id，靠 name+namespace 重新关联）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

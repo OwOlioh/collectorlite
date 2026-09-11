@@ -41,6 +41,8 @@ Multi-platform local desktop app for collecting favorites (Bilibili, browser boo
 | `src/components/Sidebar.tsx` | Navigation sidebar |
 | `src/components/TrashPage.tsx` | 回收站页面：列出已删除项，支持单条/批量恢复与永久删除/清空，显示保留期倒计时 |
 | `src/components/CoverCacheListener.tsx` | 后台封面缓存的进度提示（启动续传提示 + 完成提示 + 触发列表刷新） |
+| `src/components/NeteaseSyncListener.tsx` | 网易云后台同步结果提示：**只在有变化时** toast + 刷列表，否则每 15 分钟弹一次会烦死人 |
+| `src/components/import/NeteaseForm.tsx` | 网易云导入卡片（Cookie 登录 + 「我的歌单」「歌单链接」双入口） |
 | `src/lib/api.ts` | Tauri invoke wrapper with mock fallback |
 | `src/lib/format.ts` | Shared `formatDuration` / `formatDate` helpers |
 | `src/lib/theme.ts` | Theme persistence (localStorage + system preference) and `applyTheme` |
@@ -62,6 +64,10 @@ Multi-platform local desktop app for collecting favorites (Bilibili, browser boo
 | `src-tauri/src/source/zhihu.rs` | Zhihu client: cookie login, collections API |
 | `src-tauri/src/source/csdn.rs` | CSDN client: username → collections, article covers via `og:image` |
 | `src-tauri/src/source/github.rs` | GitHub client: Stars import, uses `native-tls` (system proxy) |
+| `src-tauri/src/source/netease.rs` | 网易云：P0 `orpheus://` 深链（base64 JSON + `cmd:"play"`，**唯一实测可用的格式**）；P2 weapi 歌单导入 + 增量同步（水位 `plan_incremental` / 取消收藏 `pick_unfavorited` / `SyncSettings` 持久化） |
+| `src-tauri/src/weapi.rs` | 网易云 weapi 加密（AES-128-CBC 两层 + RSA 无填充），单测与 Python 探针逐字节一致 |
+| `src-tauri/src/uri.rs` | 自定义协议（`obsidian://` / `orpheus://`）打开的唯一入口，Windows 走 ShellExecute 系列 API；**不要各写一份**。⚠️ 唤起前**必须查注册表**确认协议已注册 —— ShellExecute 的返回码实测不可信（不存在的协议也返回 42），靠它判 fallback 会让兜底永不触发。完整实测数据见 `DEVELOPMENT.md` 9.13.6 |
+| `src-tauri/src/open_prefs.rs` | 打开方式偏好（客户端 / 浏览器），按 source 存入 `open_prefs.json`，默认客户端优先 |
 | `src-tauri/src/state.rs` | App state, cookie/token persistence (file + keyring) |
 | `src-tauri/src/cover_cache.rs` | 后台封面缓存队列：并发下载 + 批量回写 + 进度广播，导入与启动都会拉起 |
 | `src-tauri/src/wbi.rs` | Bilibili WBI signing |
@@ -96,6 +102,8 @@ Multi-platform local desktop app for collecting favorites (Bilibili, browser boo
 - Website favicon service for browser bookmarks (`favicon.im`)
 - **Trash / 回收站**: 单条 / 批量 / 按标签删除均为软删除，先进入回收站，保留期内可恢复；超期在应用启动时自动清除；永久删除才真正删库并清理封面文件
 - **封面后台缓存（断点续传）**: 导入只写数据库、不等封面，封面交给后台队列并发下载；"cover_url 有值但 cover_local_path 为空"即待办，中途关掉应用不丢任务，下次启动自动接着缓存
+- **网易云深链打开（P0）**: `netease` 来源卡片点封面 / 标题唤起桌面客户端并播放（`orpheus://` + base64 JSON，必须带 `cmd:"play"`，这是唯一实测可用的格式）；客户端未安装 / 协议未注册时自动回退浏览器并 toast 说明，hover 菜单保留网页版出口。**打开方式可在设置页切换（客户端优先 / 浏览器），判定在 Rust 侧兜底**，hover 菜单始终提供另一个方向的出口。方案与实测结论见 `DEVELOPMENT.md` 第九章
+- **网易云歌单导入 + 增量同步（P2）**: 手动粘贴 cookie（扫码被 8821 风控拦）→ 导入歌单 → 该歌单自动登记进同步范围；启动延迟 20 s 跑一轮、之后按配置间隔（默认 15 分钟，下限 5）后台轮询，设置页可改可关可「立即同步」。水位取 `trackIds[].at`，取消收藏的歌软删除进回收站（默认开）。⚠️ 清理有三道安全阀（导入时立水位 / 任一歌单拉失败就跳过清理 / 按所有同步歌单的并集判定），改这块前先看 `DEVELOPMENT.md` 9.13.2
 
 ## Frontend Features (added later)
 

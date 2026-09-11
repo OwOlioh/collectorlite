@@ -1,7 +1,15 @@
-import { FileText, Globe, Pencil, Star, Trash2 } from "lucide-react";
+import {
+  AppWindow,
+  ExternalLink,
+  FileText,
+  Globe,
+  Pencil,
+  Star,
+  Trash2
+} from "lucide-react";
 import { resolveCoverUrl } from "../lib/api";
 import { authorProfileUrl, formatDate, formatDuration } from "../lib/format";
-import type { VideoItem } from "../types";
+import type { OpenTarget, VideoItem } from "../types";
 import { TagBadge } from "./TagBadge";
 import { CoverImage } from "./CoverImage";
 
@@ -14,6 +22,10 @@ interface VideoCardProps {
   onEditNote: (item: VideoItem) => void;
   onDelete: (item: VideoItem) => void;
   onToggleStar?: (item: VideoItem) => void;
+  /** 在原生客户端打开（目前仅网易云有此能力），无客户端时由调用方回退浏览器 */
+  onOpenInClient?: (item: VideoItem) => void;
+  /** 该来源的打开方式偏好；不给 = 客户端优先 */
+  openTarget?: OpenTarget;
 }
 
 export function VideoCard({
@@ -24,9 +36,24 @@ export function VideoCard({
   onEditTags,
   onEditNote,
   onDelete,
-  onToggleStar
+  onToggleStar,
+  onOpenInClient,
+  openTarget
 }: VideoCardProps) {
   const isBrowser = item.source === "browser";
+  const isNetease = item.source === "netease";
+  // 只配了浏览器偏好时，才是"浏览器优先"。没配 / 配了 client / 压根没开过设置页
+  // 都按「客户端优先」处理 —— 这是 2026-09-11 拍板的默认（DEVELOPMENT.md 9.11-1），
+  // 也让老数据自然落到最想要的分支上。
+  const supportsClient = isNetease && !!onOpenInClient;
+  const clientFirst = supportsClient && openTarget !== "browser";
+  const openPrimary = () => {
+    if (clientFirst) {
+      onOpenInClient?.(item);
+      return;
+    }
+    onOpen(item.sourceUrl);
+  };
   const cover = resolveCoverUrl(item.coverUrl, item.coverLocalPath);
   const authorUrl = authorProfileUrl(item.source, item.authorId);
   const starred = item.starred === true;
@@ -46,8 +73,8 @@ export function VideoCard({
       <button
         className="video-cover-button"
         type="button"
-        onClick={() => onOpen(item.sourceUrl)}
-        title="在浏览器打开"
+        onClick={openPrimary}
+        title={clientFirst ? "在网易云客户端打开并播放" : "在浏览器打开"}
       >
         {isBrowser ? (
           item.coverUrl ? (
@@ -93,7 +120,7 @@ export function VideoCard({
         <button
           type="button"
           className="video-title"
-          onClick={() => onOpen(item.sourceUrl)}
+          onClick={openPrimary}
         >
           {item.title}
         </button>
@@ -136,6 +163,31 @@ export function VideoCard({
           >
             <FileText size={14} />
           </button>
+          {isNetease &&
+            (clientFirst ? (
+              // 默认走客户端时，这里是"反悔去网页版"的出口
+              <button
+                className="icon-button card-browser-button"
+                type="button"
+                onClick={() => onOpen(item.sourceUrl)}
+                title="在浏览器打开网页版"
+              >
+                <ExternalLink size={14} />
+              </button>
+            ) : (
+              // 偏好改成浏览器之后，这里反过来提供"去客户端"的出口，
+              // 否则用户改了设置就等于永久失去客户端入口。
+              onOpenInClient && (
+                <button
+                  className="icon-button card-browser-button"
+                  type="button"
+                  onClick={() => onOpenInClient(item)}
+                  title="在网易云客户端打开并播放"
+                >
+                  <AppWindow size={14} />
+                </button>
+              )
+            ))}
           <button
             className="icon-button danger card-delete-button"
             type="button"

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Code2, FolderDown, Github, Globe, LoaderCircle, LogIn, Upload } from "lucide-react";
+import { Code2, FolderDown, Github, Globe, LoaderCircle, LogIn, Music, Upload } from "lucide-react";
 import { api } from "../lib/api";
 import type {
   BilibiliProfile, BrowserImportRequest, CollectionInfo, ImportPreview,
@@ -7,6 +7,7 @@ import type {
 } from "../types";
 import { BilibiliForm } from "./import/BilibiliForm";
 import { ZhihuForm } from "./import/ZhihuForm";
+import { NeteaseForm } from "./import/NeteaseForm";
 import { CsdnForm } from "./import/CsdnForm";
 import { GithubForm } from "./import/GithubForm";
 import { BrowserForm } from "./import/BrowserForm";
@@ -14,7 +15,7 @@ import { TagEditor } from "./import/TagEditor";
 import { ResultCard } from "./import/ResultCard";
 import { useToast } from "./Toast";
 
-type ImportMode = "login" | "browser" | "zhihu" | "csdn" | "github" | "file";
+type ImportMode = "login" | "browser" | "zhihu" | "netease" | "csdn" | "github" | "file";
 type ImportStep = "source" | "tags" | "done";
 // 预览时固化的导入方式（登录/用户名收藏夹 vs 公开链接），执行时只认这个选择，
 // 避免两种方式都填了的情况下被「解析了链接就永远走链接」这种推导互相串味。
@@ -54,6 +55,7 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
   const [biliImportInput, setBiliImportInput] = useState<ImportChoice | null>(null);
   const [zhihuImportInput, setZhihuImportInput] = useState<ImportChoice | null>(null);
   const [csdnImportInput, setCsdnImportInput] = useState<ImportChoice | null>(null);
+  const [neteaseImportInput, setNeteaseImportInput] = useState<ImportChoice | null>(null);
 
   // 知乎
   const [zhihuProfile, setZhihuProfile] = useState<BilibiliProfile | null>(null);
@@ -61,6 +63,13 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
   const [zhihuSelectedCollectionId, setZhihuSelectedCollectionId] = useState("");
   const [zhihuPublicUrl, setZhihuPublicUrl] = useState("");
   const [zhihuParsedCollection, setZhihuParsedCollection] = useState<CollectionInfo | null>(null);
+
+  // 网易云（登录走手动 cookie：扫码会被 8821 风控拦）
+  const [neteaseProfile, setNeteaseProfile] = useState<BilibiliProfile | null>(null);
+  const [neteaseCollections, setNeteaseCollections] = useState<CollectionInfo[]>([]);
+  const [neteaseSelectedCollectionId, setNeteaseSelectedCollectionId] = useState("");
+  const [neteasePublicUrl, setNeteasePublicUrl] = useState("");
+  const [neteaseParsedCollection, setNeteaseParsedCollection] = useState<CollectionInfo | null>(null);
 
   // CSDN
   const [csdnUsername, setCsdnUsername] = useState("");
@@ -158,6 +167,32 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
 
   useEffect(() => { void refreshZhihuProfile(); }, [refreshZhihuProfile]);
 
+  // ── 网易云 ──
+  const refreshNeteaseProfile = useCallback(async () => {
+    try {
+      const next = await api.neteaseProfile();
+      setNeteaseProfile(next);
+      if (next.isLogin) setNeteaseCollections(await api.listNeteaseCollections());
+    } catch (err) { const msg = String(err); setError(msg); toast("error", msg); }
+  }, []);
+
+  const loadNeteaseCollections = async () => {
+    setBusy(true); setError("");
+    try { setNeteaseCollections(await api.listNeteaseCollections()); }
+    catch (err) { setError(String(err)); }
+    finally { setBusy(false); }
+  };
+
+  const parseNetease = async () => {
+    if (!neteasePublicUrl.trim()) { setError("请先粘贴网易云歌单链接。"); return; }
+    setBusy(true); setError("");
+    try { setNeteaseParsedCollection(await api.parseNeteaseCollectionUrl(neteasePublicUrl.trim())); }
+    catch (err) { setError(String(err)); }
+    finally { setBusy(false); }
+  };
+
+  useEffect(() => { void refreshNeteaseProfile(); }, [refreshNeteaseProfile]);
+
   // ── CSDN ──
   const loadCsdnCollections = async () => {
     setBusy(true); setError(""); setCsdnSelectedCollectionId("");
@@ -244,13 +279,15 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
       return parsedCollection || collections.find((c) => c.id === selectedCollectionId) || null;
     if (mode === "zhihu")
       return zhihuParsedCollection || zhihuCollections.find((c) => c.id === zhihuSelectedCollectionId) || null;
+    if (mode === "netease")
+      return neteaseParsedCollection || neteaseCollections.find((c) => c.id === neteaseSelectedCollectionId) || null;
     if (mode === "csdn")
       return csdnParsedCollection || csdnCollections.find((c) => c.id === csdnSelectedCollectionId) || null;
     if (mode === "github") return githubCollections[0] || null;
     if (mode === "browser" && browserItems.length > 0)
       return { source: "browser", id: "browser-bookmarks", title: browserFileName || "浏览器书签", owner: undefined, count: browserItems.length, url: undefined } as CollectionInfo;
     return null;
-  }, [mode, parsedCollection, zhihuParsedCollection, csdnParsedCollection, collections, zhihuCollections, csdnCollections, githubCollections, selectedCollectionId, zhihuSelectedCollectionId, csdnSelectedCollectionId, browserItems, browserFileName]);
+  }, [mode, parsedCollection, zhihuParsedCollection, neteaseParsedCollection, csdnParsedCollection, collections, zhihuCollections, neteaseCollections, csdnCollections, githubCollections, selectedCollectionId, zhihuSelectedCollectionId, neteaseSelectedCollectionId, csdnSelectedCollectionId, browserItems, browserFileName]);
 
   // 底部统一「预览并配置标签」按钮仅用于单入口来源（GitHub / 浏览器）；
   // 双入口来源（B站/知乎/CSDN）各自在表单内有两个独立按钮，不在此处显示。
@@ -353,6 +390,40 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
     finally { setBusy(false); }
   };
 
+  // ── 网易云：我的歌单预览（独立按钮，固化选择）──
+  const startNeteaseFavoritesPreview = async () => {
+    if (!neteaseProfile?.isLogin) { setError("请先粘贴网易云 cookie 登录。"); return; }
+    if (!neteaseSelectedCollectionId) { setError("请先在上方选择一个歌单。"); return; }
+    setBusy(true); setError("");
+    try {
+      const next = await api.previewNeteaseImport({
+        kind: "favorites", mediaId: neteaseSelectedCollectionId, url: undefined,
+        tagSpecs: [], itemTagAssignments: [],
+      });
+      setNeteaseImportInput({ kind: "favorites", mediaId: neteaseSelectedCollectionId, url: undefined });
+      setPreview(next);
+      setStep("tags");
+    } catch (err) { const msg = String(err); setError(msg); toast("error", msg); }
+    finally { setBusy(false); }
+  };
+
+  // ── 网易云：歌单链接预览（独立按钮，固化选择）──
+  const startNeteasePublicPreview = async () => {
+    if (!neteaseParsedCollection) { setError("请先解析网易云歌单链接。"); return; }
+    if (!neteasePublicUrl.trim()) { setError("请先粘贴网易云歌单链接。"); return; }
+    setBusy(true); setError("");
+    try {
+      const next = await api.previewNeteaseImport({
+        kind: "public_url", mediaId: undefined, url: neteasePublicUrl.trim(),
+        tagSpecs: [], itemTagAssignments: [],
+      });
+      setNeteaseImportInput({ kind: "public_url", mediaId: undefined, url: neteasePublicUrl.trim() });
+      setPreview(next);
+      setStep("tags");
+    } catch (err) { const msg = String(err); setError(msg); toast("error", msg); }
+    finally { setBusy(false); }
+  };
+
   // ── CSDN：用户名收藏夹预览（独立按钮，固化选择）──
   const startCsdnFavoritesPreview = async () => {
     if (!csdnUsername.trim()) { setError("请先输入 CSDN 用户名。"); return; }
@@ -413,6 +484,7 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
   // ── 执行 ──
   const buildImportInput = (assignments: ItemTagAssignment[]) => {
     const isZhihu = mode === "zhihu";
+    const isNetease = mode === "netease";
     const isCsdn = mode === "csdn";
     const isGithub = mode === "github";
     const isBili = mode === "login";
@@ -442,6 +514,18 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
       return { apiCall: () => api.executeZhihuImport(input) };
     }
 
+    // 网易云：优先用预览时确定的导入方式（我的歌单 / 歌单链接）
+    if (isNetease && neteaseImportInput) {
+      const input: ImportRequest = {
+        kind: neteaseImportInput.kind,
+        mediaId: neteaseImportInput.mediaId,
+        url: neteaseImportInput.url,
+        tagSpecs: [],
+        itemTagAssignments: assignments,
+      };
+      return { apiCall: () => api.executeNeteaseImport(input) };
+    }
+
     // CSDN：优先用预览时确定的导入方式（用户名收藏夹 / 公开链接）
     if (isCsdn && csdnImportInput) {
       const input: ImportRequest = {
@@ -456,12 +540,13 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
 
     // 其余来源（及兜底）沿用原推导逻辑
     const input = {
-      kind: (isBili || isZhihu || isCsdn) && currentCollection?.id && !parsedCollection && !zhihuParsedCollection && !csdnParsedCollection ? ("favorites" as const) : ("public_url" as const),
-      mediaId: (isBili || isZhihu || isCsdn) && currentCollection?.id && !parsedCollection && !zhihuParsedCollection && !csdnParsedCollection ? currentCollection.id : undefined,
-      url: isBili ? (publicUrl.trim() || undefined) : isZhihu ? (zhihuPublicUrl.trim() || undefined) : isCsdn ? (csdnPublicUrl.trim() || csdnUsername.trim() || undefined) : isGithub ? (githubUsername.trim() || undefined) : undefined,
+      kind: (isBili || isZhihu || isNetease || isCsdn) && currentCollection?.id && !parsedCollection && !zhihuParsedCollection && !neteaseParsedCollection && !csdnParsedCollection ? ("favorites" as const) : ("public_url" as const),
+      mediaId: (isBili || isZhihu || isNetease || isCsdn) && currentCollection?.id && !parsedCollection && !zhihuParsedCollection && !neteaseParsedCollection && !csdnParsedCollection ? currentCollection.id : undefined,
+      url: isBili ? (publicUrl.trim() || undefined) : isZhihu ? (zhihuPublicUrl.trim() || undefined) : isNetease ? (neteasePublicUrl.trim() || undefined) : isCsdn ? (csdnPublicUrl.trim() || csdnUsername.trim() || undefined) : isGithub ? (githubUsername.trim() || undefined) : undefined,
       tagSpecs: [], itemTagAssignments: assignments
     };
     if (isZhihu) return { apiCall: () => api.executeZhihuImport(input) };
+    if (isNetease) return { apiCall: () => api.executeNeteaseImport(input) };
     if (isCsdn) return { apiCall: () => api.executeCsdnImport(input) };
     if (isGithub) return { apiCall: () => api.executeGithubImport(input) };
     return { apiCall: () => api.executeImport(input) };
@@ -553,6 +638,8 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
               active={mode === "browser"} onClick={() => setMode("browser")} />
             <SourceCard icon={<LogIn size={20} />} title="知乎收藏" desc="登录知乎读取收藏夹，或粘贴链接导入。"
               active={mode === "zhihu"} onClick={() => setMode("zhihu")} />
+            <SourceCard icon={<Music size={20} />} title="网易云音乐" desc="粘贴 cookie 读取我的歌单，或粘贴歌单链接导入。"
+              active={mode === "netease"} onClick={() => setMode("netease")} />
             <SourceCard icon={<Code2 size={20} />} title="CSDN 收藏" desc="输入用户名读取收藏夹，或粘贴链接导入。"
               active={mode === "csdn"} onClick={() => setMode("csdn")} />
             <SourceCard icon={<Github size={20} />} title="GitHub Stars" desc="输入 GitHub 用户名即可导入 Star 仓库列表。"
@@ -581,6 +668,15 @@ export function ImportPage({ tagPool, onTagsChanged }: ImportPageProps) {
                 setParsedCollection={setZhihuParsedCollection} loadCollections={loadZhihuCollections}
                 parseUrl={parseZhihu}
                 onPreviewFavorites={startZhihuFavoritesPreview} onPreviewPublic={startZhihuPublicPreview} />
+            ) : mode === "netease" ? (
+              <NeteaseForm busy={busy} setError={setError} setLoginBusy={setLoginBusy}
+                profile={neteaseProfile} setProfile={setNeteaseProfile} collections={neteaseCollections}
+                setCollections={setNeteaseCollections} selectedCollectionId={neteaseSelectedCollectionId}
+                setSelectedCollectionId={setNeteaseSelectedCollectionId} publicUrl={neteasePublicUrl}
+                setPublicUrl={setNeteasePublicUrl} parsedCollection={neteaseParsedCollection}
+                setParsedCollection={setNeteaseParsedCollection} loadCollections={loadNeteaseCollections}
+                parseUrl={parseNetease}
+                onPreviewFavorites={startNeteaseFavoritesPreview} onPreviewPublic={startNeteasePublicPreview} />
             ) : mode === "csdn" ? (
               <CsdnForm busy={busy} username={csdnUsername} setUsername={setCsdnUsername}
                 collections={csdnCollections} selectedCollectionId={csdnSelectedCollectionId}

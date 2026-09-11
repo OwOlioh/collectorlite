@@ -11,6 +11,7 @@ use crate::models::ExternalItem;
 use crate::source::bilibili::BilibiliClient;
 use crate::source::csdn::CsdnClient;
 use crate::source::github::GithubClient;
+use crate::source::netease::NeteaseClient;
 use crate::source::zhihu::ZhihuClient;
 
 /// 预览阶段算好的 enriched items 缓存，供执行阶段复用，避免重复 fetch + enrich。
@@ -23,6 +24,7 @@ pub struct PreviewCache {
 const KEYRING_SERVICE: &str = "bili-collector";
 const KEYRING_USER: &str = "bilibili-cookie";
 const KEYRING_ZHIHU_USER: &str = "zhihu-cookie";
+const KEYRING_NETEASE_USER: &str = "netease-cookie";
 
 pub struct AppState {
     pub pool: SqlitePool,
@@ -30,6 +32,7 @@ pub struct AppState {
     pub csdn: CsdnClient,
     pub github: GithubClient,
     pub zhihu: ZhihuClient,
+    pub netease: NeteaseClient,
     pub data_dir: PathBuf,
     pub import_cache: Mutex<Option<PreviewCache>>,
     /// 浏览器扩展本地桥实际占用的端口（0 = 未启动）。由 `capture::serve` 在绑定成功后写入。
@@ -52,8 +55,10 @@ impl AppState {
         let csdn = CsdnClient::new()?;
         let github = GithubClient::new()?;
         let zhihu = ZhihuClient::new()?;
+        let netease = NeteaseClient::new()?;
         let cookie_file = data_dir.join("bilibili_cookie.txt");
         let zhihu_cookie_file = data_dir.join("zhihu_cookie.txt");
+        let netease_cookie_file = data_dir.join("netease_cookie.txt");
         let persisted = load_cookie_file(&cookie_file)
             .ok()
             .flatten()
@@ -69,12 +74,25 @@ impl AppState {
         if let Some(cookie) = zhihu_persisted {
             zhihu.set_cookie(Some(cookie));
         }
+        // ⚠️ 网易云 cookie（MUSIC_U）等同密码：只记录"有没有"，绝不打印内容
+        let netease_persisted = load_cookie_file(&netease_cookie_file)
+            .ok()
+            .flatten()
+            .or_else(|| load_netease_cookie().ok().flatten());
+        eprintln!(
+            "[state] netease cookie loaded: {}",
+            netease_persisted.is_some()
+        );
+        if let Some(cookie) = netease_persisted {
+            netease.set_cookie(Some(cookie));
+        }
         Ok(Self {
             pool,
             bili,
             csdn,
             github,
             zhihu,
+            netease,
             data_dir,
             import_cache: Mutex::new(None),
             bridge_port: AtomicU16::new(0),
@@ -94,6 +112,14 @@ impl AppState {
         let file = self.data_dir.join("zhihu_cookie.txt");
         save_cookie_file(&file, cookie.as_deref())?;
         let _ = save_zhihu_cookie(cookie.as_deref());
+        Ok(())
+    }
+
+    /// 网易云凭证（含 `MUSIC_U`，等同密码）：文件 + keyring 双写，与知乎同款策略。
+    pub fn save_netease_cookie(&self, cookie: Option<String>) -> Result<(), AppError> {
+        let file = self.data_dir.join("netease_cookie.txt");
+        save_cookie_file(&file, cookie.as_deref())?;
+        let _ = save_netease_cookie(cookie.as_deref());
         Ok(())
     }
 }
@@ -168,6 +194,30 @@ pub fn save_zhihu_cookie(cookie: Option<&str>) -> Result<(), AppError> {
 
 pub fn load_zhihu_cookie() -> Result<Option<String>, AppError> {
     let entry = Entry::new(KEYRING_SERVICE, KEYRING_ZHIHU_USER)
+        .map_err(|error| AppError::Credential(error.to_string()))?;
+    match entry.get_password() {
+        Ok(value) => Ok(Some(value)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(AppError::Credential(error.to_string())),
+    }
+}
+
+pub fn save_netease_cookie(cookie: Option<&str>) -> Result<(), AppError> {
+    let entry = Entry::new(KEYRING_SERVICE, KEYRING_NETEASE_USER)
+        .map_err(|error| AppError::Credential(error.to_string()))?;
+    match cookie {
+        Some(value) => entry
+            .set_password(value)
+            .map_err(|error| AppError::Credential(error.to_string())),
+        None => {
+            let _ = entry.delete_credential();
+            Ok(())
+        }
+    }
+}
+
+pub fn load_netease_cookie() -> Result<Option<String>, AppError> {
+    let entry = Entry::new(KEYRING_SERVICE, KEYRING_NETEASE_USER)
         .map_err(|error| AppError::Credential(error.to_string()))?;
     match entry.get_password() {
         Ok(value) => Ok(Some(value)),

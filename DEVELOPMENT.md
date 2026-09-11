@@ -952,3 +952,473 @@ Edge 侧边栏默认约 400px（可拖宽）。完整时间戳 URL 在编辑框�
 #### 尚未做（P1）
 
 时间戳 / 位置标记的**插入**目前前端逻辑已具备（`pageVideoState` / `pageSelection` 已注入），但侧边栏按钮的显示条件依赖 `state.page.hasVideo`，需在真机（B站 / 知乎）上验证注入时机；`pageScrollToText` 在虚拟列表页（知乎 feed）可能定位失败，需补降级。
+
+---
+
+## 九、网易云音乐（方案**已拍板**，P0 / P2 待实施；P1 暂缓）
+
+> 状态：**技术可行性已于 2026-09-11 全部实机验证完毕**，代码未动。按 3.13，实施后不得自动 commit。
+> 验证脚本全部在 `tools/netease_probe/`（独立 Python，不进 app 构建）。
+> 本章所有结论**均为实测数据，不是推测**——这也是本章唯一值钱的地方。
+
+### 9.1 需求与目标
+
+用户主要用**桌面端**而非网页端，因此这个源和既有的 B站 / 知乎 / CSDN 有本质差别：**「打开」要进客户端，不是浏览器**。三条主线：
+
+| 代号 | 需求 | 用户原话 |
+|---|---|---|
+| **P0** | 收藏条目直接在网易云**客户端**内打开 | 「能不能把这个源专门做成在软件里打开」 |
+| **P1** | 听歌时顺手**批注 / 收藏**（浮窗速记） | 「能不能像浏览器侧边栏一样对歌曲进行收藏」 |
+| **P2** | **歌单导入** + 新收藏**自动入库** | 「我新收藏的内容能不能自动入库」 |
+
+三者的依赖顺序在 9.10 讨论，结论与直觉相反：**P2 才是地基**。
+
+### 9.2 ⚠️ 已核实的技术前提（2026-09-11 实测）
+
+#### 9.2.1 weapi 加密：可用，且**匿名**可用
+
+算法公开、我们从零实现，一次通过：
+
+```
+text      = JSON(payload)
+params1   = AES-128-CBC(text,    key="0CoJUm6Qyw8W8jud",     iv="0102030405060708") -> base64
+params    = AES-128-CBC(params1, key=<16 位随机字母数字>,      iv="0102030405060708") -> base64
+encSecKey = RSA_no_padding(reverse(随机 key), e=0x10001, n=<固定模数>) -> hex
+POST body = params=<urlencode> & encSecKey=<hex>
+```
+
+- 模数是固定常量（`00e0b509f6259df8…`），随机 key 每次请求现生成。
+- **RSA 是无填充的 textbook RSA**，`rsa` crate 不暴露裸模幂，推荐用 `num-bigint` 手写 `modpow`（十几行）。
+- 🔑 **判别技巧**：只要返回**结构化 JSON**（而不是乱码 / 502），就说明服务器解密成功了。被拒一定是业务规则（权限、风控），**不要回头怀疑加密写错**——第一版就在这个判断上绕了弯路。
+
+实测**匿名**（无任何 cookie）可达：`/weapi/song/detail`、`/weapi/search/get`、`/weapi/song/enhance/player/url`。
+⚠️ `/weapi/cloudsearch/get/web` 匿名返回 `code=50000005`，**别用**。
+
+#### 9.2.2 登录态下的端点与**三个必踩的坑**
+
+用真实 `MUSIC_U` 实测（uid=3418238560，43 个歌单，主歌单 2934 首）：
+
+| 用途 | 端点 | 结论 |
+|---|---|---|
+| 校验登录态 + 取 uid | `POST /weapi/w/nuser/account/get` | ✅ 200 |
+| 歌单列表 | `POST /weapi/user/playlist` {uid,limit,offset} | ✅ 43 个，含「我喜欢的音乐」（`specialType=5`） |
+| 歌单曲目 id | `POST /weapi/v6/playlist/detail` {id,n,offset,total} | ✅ **一次返回全部** 2934 条，1.7 s |
+| 曲目详情 | `POST /weapi/song/detail` {ids:"[...]"} | ✅ 但见坑 3 |
+
+🔴 **坑 1：`uid` 不能留空。** `/weapi/user/playlist` 传 `uid=""` 直接 `400 请求参数错误`。**必须先调 account/get 拿 uid**。
+
+🔴 **坑 2：曲目要两步拿。** `v6/playlist/detail` 的 `songs` 字段是**空的**，只有 `playlist.trackIds[]`；社区流传的 `/weapi/playlist/track/all` 实测 **404 不存在**。必须拿 ids 再打 `song/detail`。
+
+🔴 **坑 3：`song/detail` 超过 201 个 id 会被静默截断。** 实测 250 个 id 只回 201 首，**不报错、不提示**。
+=> **分块大小固定 200**。2934 首 = 15 次请求。这个坑不提前测出来，导入会**静默丢数据**。
+
+#### 9.2.3 🔑 增量同步的白送能力：`at` 字段
+
+```
+trackIds[i] = { id, v, t, at, uid, alg, rcmdReason, ... }
+                          ^^
+              at = 加入歌单时间（毫秒），整表严格倒序（新→旧）
+              2934 条实测逆序违例 0 次；最新 2026-09-09 19:38，最旧 2020-08-29 19:56
+```
+
+这意味着「准实时自动同步」几乎是零成本——详见 9.7。
+
+#### 9.2.4 深链：只有 base64 一种格式可用
+
+客户端注册协议 `orpheus://`，注册表：
+
+```
+HKEY_CLASSES_ROOT\orpheus\shell\open\command
+  = "C:\Program Files\Netease\CloudMusic\cloudmusic.exe"--webcmd="%1"
+```
+
+| 格式 | 实测 | 依据 |
+|---|---|---|
+| `orpheus://<base64({"type":"song","id":"..","cmd":"play"})>` | ✅ **唯一被证明可用** | 窗口标题变成目标曲目，确实开始播放 |
+| `orpheus://song/{id}` | ⚠️ 未证实 | 标题不变；可能是"跳了没播"，程序侧观测不到 |
+| `orpheus://openurl?url=<encoded>` | ❌ 死的 | 编码 / 不编码各试一次，均无反应 |
+
+> ⚠️ 纠正一个早期误判：我曾推荐「主用 openurl」（理由是不用维护类型映射表），**实测它是死的**。改口：**主用 base64 JSON 且必须带 `cmd=play`**——这也正是网易云网页端官方在用的格式。
+> 附带：注册表里 exe 右引号与 `--webcmd` 之间**没有空格**（`…exe"--webcmd="%1"`），看着像废参数，**实测正常**。但别照这段 command 自己拼命令行，老实走 `ShellExecuteW`。
+
+**两个判定陷阱**：
+
+1. **返回码只能证明"递交"，不能证明"处理了"。** `ShellExecuteW` 返回 42（>32 = 成功）时，openurl 那两次客户端其实毫无反应。=> 实现约定：>32 判为"已递交"，**不能用它向用户宣称打开成功**；≤32 才回退浏览器 + toast，其中 **31 = `SE_ERR_NOASSOC`** 是"没装客户端"，值得单独给文案。
+2. ❌ **不能用 `webbrowser` 打开自定义 scheme**：它在 Windows 只认默认浏览器，会把任何 scheme 丢给浏览器（第七章为 `obsidian://` 踩过同一个坑）。必须走 `ShellExecuteW`。
+
+🔴 **验证方法本身的坑**：测跳转时**目标不能挑当前正在播的那首**——标题不变是"本来就该不变"，会被误读成成功。第一版路径式测试就是这么骗过我的。**另外前台窗口不可靠**（Windows 前台抢占限制），判定一律走"枚举窗口标题"，不要看 `GetForegroundWindow()`。
+
+#### 9.2.5 当前曲目：读窗口标题，SMTC 走不通
+
+- ❌ **SMTC 判负**：网易云正在播放时，`GlobalSystemMediaTransportControlsSessionManager.GetSessions()` 仍是 **0 个会话**。网上证据一致——网易云 PC 端原生不注册 SMTC（QQ 音乐同样不支持；Spotify / Edge / Groove 原生支持）。**不要再围绕 SMTC 设计**。
+- ✅ **替代：读网易云主窗口标题**，格式 `曲名 - 歌手A/歌手B`：
+
+  ```
+  下等马 - 洛天依Official/ChiliChill乐团
+  我的悲伤是水做的 - ChiliChill乐团/洛天依Official
+  ```
+
+  纯 Win32（EnumWindows + GetWindowTextW + QueryFullProcessImageNameW 过滤进程），**无注入、无 ToS 风险、无需新依赖**（`windows-sys` 已在依赖里）。
+  **实时性已验证**：两次读取间隔数十秒，歌自动切了，标题自己跟着变。
+- 相对 SMTC 的**损失**：拿不到播放进度（音乐版时间戳需降级，见 9.8）与封面缩略图（封面走 API `picUrl` + 后台缓存队列，无影响）。
+- ⚠️ 待验证边界：暂停时 / 未播放时标题是什么；曲名自带 " - " 的情况（用 `rsplit(" - ", 1)` + 歌手名过滤兜底）。
+
+#### 9.2.6 两个"看起来有戏、实际不可用"的东西
+
+- **网易云不是 Electron，是 CEF**（进程参数 `--type=renderer`、`Chrome/35 NeteaseMusicDesktop`，主界面 `orpheus://orpheus/pub/app.html`）。别按 Electron 的调试端口思路去设计。
+- **客户端在回环地址开了 `127.0.0.1:20017`**（很可能就是"网页唤起客户端"的通道），但：任何路径都返回裸 404（无 Server 头）；41 条常见路径全 404；**连续请求几十次后完全不响应，间隔 8 秒才恢复**。
+  => 判定为客户端内部基础设施。**依赖它 = 依赖一个连 40 个请求都扛不住的未文档化私有接口**，不建议。
+
+#### 9.2.7 扫码登录被风控拦死（8821）
+
+```
+POST /weapi/login/qrcode/unikey        -> {code:200, unikey}   ✅
+POST /weapi/login/qrcode/client/login  -> 801 等待扫码 / 802 已扫码待确认 / 803 成功
+```
+
+实测**用户扫码成功（802）后返回 `code=8821`**：`请切换其他登录方式或升级新版本再试`，redirectUrl 指向 `qa-yyy.igame.163.com/anquanhu`（风控验证页）。社区（ncmctl、HyPlayer 登录帮助）结论一致：**风控严重，第三方扫码登录普遍不可用**。
+
+**我们自己还加重了它**：初版每个请求都重新抓匿名 cookie（内部会 GET 一次首页），而轮询每 2 秒一次 ⇒ 每 2 秒刷一次首页 + 不停换 `NMTID`。跑了半小时后**连申请 unikey 都被拒**（`code=-462 检测到您的网络环境存在风险`）。
+=> **取凭证改用手动 cookie**（浏览器 Application → Cookies → 复制 `MUSIC_U`），实测可用。扫码流程代码保留但标注"当前不可用"。
+
+🔴 **教训固化**：任何轮询型接口必须①复用会话 cookie ②控制频率 ③遇到 fatal code 立刻停。**不要因为"只是探针脚本"就放开频率**——探针照样能把 IP 打进风控名单。
+
+### 9.3 设计决策（**已拍板，2026-09-11**；仅 `cmd=play` 一项待定）
+
+| 项 | 结论 | 理由 |
+|---|---|---|
+| 登录方式 | ✅ **手动粘贴 cookie 为主**（照知乎的 UX），扫码保留但默认隐藏 | 8821 风控；手动 cookie 实测可用且零依赖 |
+| `source` 值 | ✅ `"netease"` | 与 `bilibili` / `zhihu` / `csdn` / `github` 对齐 |
+| `external_id` | ✅ **歌曲 id**（如 `2113652521`） | 复合键 `(source, external_id)`；**绝不用 URL**（符合 3.1） |
+| 打开方式默认 | ✅ **客户端优先**，失败回退浏览器 | 用户主要用桌面端；设置页给开关 |
+| `cmd=play` | ✅ **带**（2026-09-11 拍板） | 唯一被验证的路径；从收藏库点开歌，播放是预期动作。代价：会打断正在听的歌 |
+| 取消收藏 | ✅ **软删除进回收站**，设置页可关 | 符合 3.12；误取消可恢复 |
+| 同步频率 | ✅ 默认 **15 分钟**，不低于 5 分钟 | 太频繁无意义且易触发风控 |
+| 数据库迁移 | ✅ **0 个新迁移** | 复用现有 `items` 表；同步水位存设置文件，不动表结构（符合 3.14 精神） |
+
+### 9.4 数据契约
+
+`ExternalItem` 字段映射（`song/detail` → 我们的模型）：
+
+| ExternalItem | 来源 | 备注 |
+|---|---|---|
+| `source` | 常量 `"netease"` | |
+| `external_id` | `songs[].id` | 数字，转字符串 |
+| `source_url` | `https://music.163.com/#/song?id={id}` | |
+| `title` | `songs[].name` | |
+| `description` | `songs[].album.name` | 歌曲无简介字段，用专辑名兜底 |
+| `cover_url` | `songs[].album.picUrl` | 走 3.17 后台封面队列 |
+| `author_name` | `songs[].artists[].name` 用 `/` 拼接 | 顺序与客户端一致 |
+| `author_id` | `songs[].artists[0].id` | 供 `authorProfileUrl` 用 |
+| `partition_name` | 歌单名（导入时带入） | 歌曲无分区概念 |
+| `duration` | `songs[].duration / 1000` | 🔴 **接口给毫秒，库里存秒**（`formatDuration` 按秒算） |
+| `favorite_time` | `trackIds[].at / 1000` | 🔴 同样毫秒转秒；这是增量同步的水位 |
+
+`CollectionInfo` 映射：`id`=歌单 id，`title`=歌单名，`owner`=创建者昵称，`count`=`trackCount`，`url`=`https://music.163.com/#/playlist?id={id}`。
+
+前端 `format.ts` 的 `authorProfileUrl` 需补 `netease` 分支：`https://music.163.com/#/artist?id={id}`。
+
+### 9.5 实施清单
+
+**后端**
+
+| 文件 | 改动 |
+|---|---|
+| `src-tauri/src/source/netease.rs` | **新建**。`SourceAdapter` 实现 + 端点封装 |
+| `src-tauri/src/weapi.rs` | **新建（建议）**：weapi 加解密独立成模块，便于用已知向量做单元测试 |
+| `src-tauri/src/uri.rs` | **新建**：把 `obsidian.rs` 的 `open_uri_system` 抽出来公共化，**两处共用，绝不复制第二份** |
+| `src-tauri/src/obsidian.rs` | 改为调用 `uri::open_uri_system` |
+| `src-tauri/src/commands.rs` | 新增：`netease_login_by_cookie` / `list_netease_collections` / `preview_netease_import` / `execute_netease_import` / `open_in_netease` / `sync_netease` |
+| `src-tauri/src/state.rs` | cookie 持久化（**复用知乎那套** file + keyring）；cookie 等同密码，**禁止 println** |
+| `src-tauri/Cargo.toml` | 新增 `aes` + `cbc` + `num-bigint` + `num-traits` + `base64`；`windows-sys` 追加窗口枚举所需 feature（`Win32_System_Threading` 等，以实际编译为准） |
+| `src-tauri/src/db.rs` | **不改**（无新列）。将来若加列，必须遵守 3.16 |
+
+**前端**
+
+| 文件 | 改动 |
+|---|---|
+| `src/components/import/NeteaseForm.tsx` | **新建**。按 3.11，同样给**两个独立按钮**：「我的歌单（需 cookie）」/「歌单链接」 |
+| `src/components/ImportPage.tsx` | 注册新来源卡片 |
+| `src/components/LibraryPage.tsx` | 来源筛选加 `netease`（照 `csdn` 那段的写法） |
+| `src/components/VideoCard.tsx` | `source === "netease"` 时 hover 菜单加「在客户端打开」 |
+| `src/components/SettingsPage.tsx` | 网易云分区：cookie 状态、同步开关与频率、客户端 / 浏览器优先 |
+| `src/lib/api.ts` | 新增 invoke + mock fallback |
+| `src/lib/format.ts` | `authorProfileUrl` 加 `netease` 分支 |
+
+**关键复用**：导入走 `upsert_item` + 白名单约定（3.2），**批量写收进一个事务**（3.15：3000 条 48 s → 0.6 s）。2934 首正落在这个量级——不开事务会跑到 7 秒纯 fsync。
+
+### 9.6 核心流程（歌单导入）
+
+```
+粘贴 cookie
+  → ① /weapi/w/nuser/account/get       拿 uid（同时校验登录态）
+  → ② /weapi/user/playlist             歌单列表 → CollectionInfo[]
+  → ③ /weapi/v6/playlist/detail        拿 trackIds[]（含 at），一次全量
+  → ④ 按水位过滤出新 id（首次导入不过滤）
+  → ⑤ /weapi/song/detail               每批 200 个 id，循环
+  → ⑥ 组装 ExternalItem[] → 预览（TagEditor）
+  → ⑦ 执行：单事务批量 upsert + 打标签（3.15）
+  → ⑧ 返回，后台封面队列接手（3.17，导入不等封面）
+```
+
+### 9.7 增量同步设计（P2 增补）
+
+**水位即 `max(at)`**（秒）。因为整表严格倒序：
+
+```
+每次同步：
+  ③ 拉一次 v6/playlist/detail            （1 次请求，1.7 s）
+  → 从头部扫，遇到 at <= 水位就停，取前面这批 id
+  → ⑤ 只对这些新 id 拉 song/detail        （通常 0~1 次请求）
+  → 事务写入
+```
+
+**成本估算**（以 2934 首的主歌单为例）：
+
+| 场景 | 请求数 |
+|---|---|
+| 首次全量导入 | 1 + 15 = 16 次 |
+| 日常增量（新增 1~2 首） | 1 + 1 = 2 次 |
+| 无新增 | **1 次** |
+
+触发时机（建议都要，不冲突）：**app 启动**拉一次（覆盖"我昨天收藏的"）+ **每 N 分钟**后台增量（默认 15）+ **手动「立即同步」**按钮。
+
+**取消收藏的处置**：全量 id 比对，本地有而远端没有的 → **软删除进回收站**（3.12），设置页可关。
+⚠️ 比对必须限定在"该歌单范围内"，否则会误伤其他来源的数据。
+
+⚠️ **风控约束**：同步失败要退避，**不要重试轰炸**（9.2.7 教训）；频率下限 5 分钟。
+
+### 9.8 浮窗速记（P1，依赖 P2 —— ⏸ **暂缓实施**，2026-09-11 定）
+
+思路：**不注入客户端**（违反 ToS 且客户端一更新就废），改为自绘置顶窄条浮窗 + 全局快捷键。
+
+```
+按快捷键 → 读网易云窗口标题 → 解析「曲名 / 歌手」
+  → 库里已有？ ├ 是 → 直接写批注 / 打标签 / 插时间戳
+              └ 否 → 匿名搜索反查 id（必须带歌手过滤）
+                     ├ 命中 → 建完整条目（真实 id，去重守得住）
+                     └ 未命中 → 引导「分享 → 复制链接」粘贴，或先导入歌单
+```
+
+⚠️ **搜索反查必须带歌手名过滤**：实测搜「晴天 周杰伦」第一条返回的是**翻唱版**（晴天(深情版) — Lucky小爱）。加歌手过滤后 5 组测例 4 组精确命中，剩下 1 组 miss。
+=> **宁可查不到也不要猜**。错配比缺失危险得多。
+
+**时间戳降级**：窗口标题拿不到播放进度（9.2.5），音乐版时间戳不能像视频那样自动插 `[01:23]`。折中：浮窗弹出时记 wall-clock、按曲目时长算相对位置，或让用户手输。**不要假装精确**。
+
+**依赖**：唯一新插件 `tauri-plugin-global-shortcut`。批注保存直接复用第八章抽出的 `notes::save_notes`，Obsidian 链路自动生效。
+
+### 9.9 ⚠️ 必须避开的坑
+
+| 坑 | 后果 | 对策 |
+|---|---|---|
+| `song/detail` 传 >201 个 id | **静默截断成 201，不报错** | 分块固定 200 |
+| `/weapi/user/playlist` 传 `uid=""` | 400 参数错误 | 先调 account/get |
+| 用 `/weapi/playlist/track/all` | 404 不存在 | 用 `v6/playlist/detail` 的 trackIds |
+| 把 `duration` / `at` 当秒 | 时长与排序差 1000 倍 | 毫秒 ÷ 1000 |
+| 用 `webbrowser` 打开 `orpheus://` | 跳到浏览器 | 走 `ShellExecuteW`（`uri::open_uri_system`） |
+| 用 `orpheus://openurl` | 完全无反应 | base64 JSON + `cmd=play` |
+| 拿返回码 42 宣称"打开成功" | 客户端可能悄悄忽略 | >32 只算"已递交" |
+| 轮询不复用 cookie / 频率过高 | **IP 进风控名单**（8821 / -462） | 会话复用 + ≥5 分钟间隔 + fatal 即停 |
+| 用 SMTC 拿当前曲目 | 永远 0 会话 | 读窗口标题 |
+| 依赖 `127.0.0.1:20017` | 请求一密就 Hang，无文档 | 不要用 |
+| `MUSIC_U` 落日志 / 进 git | 凭证泄露 | 只存 keyring + 已 gitignore 的文件，禁止 println |
+| 导入 2934 首不开事务 | 数十秒（同量级实测 48 s） | 单事务（3.15） |
+
+### 9.10 工作量与分阶段
+
+| 阶段 | 内容 | 依赖 | 工作量 | 风险 |
+|---|---|---|---|---|
+| **P0** | 深链在客户端打开 + `uri.rs` 抽取 | +1（`base64`；Windows 侧仍复用 `windows-sys`，未引入 WinRT） | **半天** | 极低 | ✅ **已完成**（2026-09-11） |
+| **P2** | 歌单导入 + 增量同步 | +5 个 crypto 依赖 | 2~3 天 | 低（已实测） | ✅ **已完成**（2026-09-11），见 9.13 |
+| **P1** | 浮窗速记 | +1 插件（global-shortcut） | 2~3 天 | 中（交互打磨） | **暂缓**（用户 2026-09-11 定） |
+
+🔴 **顺序与直觉相反：先 P0 再 P2，P1 最后。**
+理由：**P2 才是地基**——库里有了歌，浮窗只需要"匹配"就够了（9.8 那个"没收藏就建不了条目"的缺口自然消失）；反过来先做 P1，浮窗大半时间匹配不到东西，价值打折。
+P0 独立可交付，先做还能让"浏览器扩展 capture 进来的网易云条目"立刻受益。
+
+**P1 暂缓的含义**：9.8 整节内容**保留但不实施**。等 P0 + P2 上线、库里跑过一段时间数据后再评估——届时「浮窗匹配不到」的缺口已被 P2 填上，做起来反而更顺。
+
+### 9.11 拍板记录（2026-09-11）
+
+| # | 议题 | 结论 |
+|---|---|---|
+| 1 | 打开方式 | ✅ **客户端优先**，失败回退浏览器；设置页给开关 |
+| 2 | `cmd=play` | ✅ **带** —— 接受「点开收藏的歌 = 替换当前播放」 |
+| 3 | 取消收藏 | ✅ **自动软删除进回收站**，默认开 + 设置页可关 |
+| 4 | P1 浮窗 | ✅ **先不做**，P0 + P2 完成后再评估 |
+| 5 | 同步频率 | ✅ **15 分钟** |
+
+### 9.12 P0 落地说明（2026-09-11 已完成）
+
+| 文件 | 内容 |
+|---|---|
+| `src-tauri/src/uri.rs` | **新建**。自定义协议打开的唯一入口（`ShellExecuteW`），`obsidian://` 与 `orpheus://` **共用一份**，不许再复制第二份 |
+| `src-tauri/src/source/netease.rs` | **新建**。`song_play_uri()` 构造 base64 深链；3 个单测钉死 payload（含与 Python 探针一致的已知向量） |
+| `src-tauri/src/obsidian.rs` | 删掉本地 `open_uri_system`，改为 `use crate::uri::open_uri_system` |
+| `src-tauri/src/commands.rs` | `open_in_netease(external_id, fallback_url) -> bool`：客户端不可用时**自动回退浏览器**并返回 `false` |
+| `src/components/VideoCard.tsx` | `source === "netease"` 时点封面 / 标题走**客户端优先**；hover 菜单额外给浏览器按钮作为网页版出口 |
+| `src/components/LibraryPage.tsx` | `openInNeteaseClient`：拿到 `false` 时 toast「未检测到网易云客户端，已在浏览器打开」 |
+| `src/lib/api.ts` / `src/lib/format.ts` | 新增 invoke + mock fallback；`authorProfileUrl` 加 `netease` 分支 |
+| `src-tauri/Cargo.toml` | 新增 `base64 = "0.22"`（P2 的 weapi 同样要用） |
+
+**怎么验证**：库里暂无 netease 数据（要等 P2 导入），先用 `tools/netease_probe/netease_sample_item.json`
+走「导入收藏库」造两条测试条目——导入**不校验来源白名单**（只要求 source / external_id 非空），
+所以能直接造出 netease 卡片。测完删掉即可。
+
+**留到 P2 的**：设置页「客户端 / 浏览器优先」开关（当前恒为客户端优先）、来源筛选里的 `netease` 按钮。
+
+> 实施时同步更新 `AGENTS.md` 的来源清单（本方案 0 迁移，Migrations 章节无需改动）。
+
+### 9.13 P2 落地说明（2026-09-11 已完成，未提交）
+
+#### 9.13.1 代码落点
+
+| 文件 | 内容 |
+|---|---|
+| `src-tauri/src/weapi.rs` | **新建**。weapi 加密（AES-128-CBC 两层 + RSA 无填充），8 个单测与 Python 探针**逐字节一致** |
+| `src-tauri/src/source/netease.rs` | 扩展：`NeteaseClient`（cookie / uid / 昵称）+ 完整 `SourceAdapter` 实现；`fetch_track_ids` / `fetch_songs`（分块 200）；`SyncSettings` 持久化；`plan_incremental` / `pick_unfavorited` 两个纯函数 |
+| `src-tauri/src/state.rs` | `netease` 字段 + `netease_cookie.txt` / keyring 持久化（**只记有无，绝不打印内容**） |
+| `src-tauri/src/commands.rs` | 导入三件套 + `sync_netease` / `get_netease_sync_settings` / `save_netease_sync_settings`；`start_netease_sync_loop()` 后台轮询 |
+| `src-tauri/src/db.rs` | `soft_delete_items_bulk`（**单事务**）、`list_netease_active_items` |
+| `src-tauri/src/models.rs` | `NeteaseSyncReport` |
+| `src/components/import/NeteaseForm.tsx` | **新建**。手动粘贴 cookie（扫码被 8821 拦，见 9.2.7）+ 两个独立按钮（3.11） |
+| `src/components/NeteaseSyncListener.tsx` | **新建**。后台同步**有变化才提示**，避免每 15 分钟弹一次 |
+| `src/components/SettingsPage.tsx` | 网易云同步卡片：启用开关 / 间隔（5·15·30·60 分钟）/ 自动移除开关 / 立即同步 |
+| `src-tauri/Cargo.toml` | 新增 `aes` `cbc` `num-bigint` `num-traits`（+ `base64` 已在 P0 引入） |
+
+#### 9.13.2 增量同步的三道安全阀（都是踩过或推演出来的）
+
+1. **导入时就把水位立起来**。原本设计成「首次同步只立水位、不抓歌」，
+   但那样「导入之后、首次同步之前」新收藏的歌会**永久漏掉**（水位被立到最新，
+   那批歌再也判定不出来了）。改为导入完成时用 `max(favorite_time)` 当水位写入。
+
+2. **只要有任意一个歌单拉取失败，整轮跳过「取消收藏」清理**。
+   清理靠的是各歌单远端 id 的**并集**；少了一个歌单的 id，
+   它在库里的整批曲目都会被误判成「用户全删了」→ 一删一大片。
+   宁可这轮不清理，也不能误删。
+
+3. **并集判定，不是单歌单判定**。同一首歌可以同时属于 A、B 两个歌单，
+   而库里只有一行（`(source, external_id)` 复合键去重）。
+   只在「这首歌从**所有**参与同步的歌单里都消失了」时才删。
+
+4. **歌单返回 0 首 → 判本轮不可信，同样跳过清理**。一个之前有水位（说明同步过）
+   的歌单突然变成 0 首，99% 是接口变了或参数不对，而不是用户真把两千首删空了。
+   据此软删除是灾难性的。宁可漏清一次，用户手动删也不难。
+
+另外：批量软删必须走 `soft_delete_items_bulk`（单事务），
+逐条 `soft_delete_item` 每条一次 WAL fsync（3.15）。
+
+#### 9.13.3 触发时机
+
+| 时机 | 行为 |
+|---|---|
+| app 启动 | 延迟 20 s 跑一轮（让开首屏与封面续传），内部有间隔判断，太近会跳过 |
+| 每 N 分钟 | `start_netease_sync_loop` 常驻后台；间隔每次从配置重读，**改了不用重启** |
+| 手动 | 设置页「立即同步」→ `force = true`，忽略开关与间隔，但仍要求已登录 + 登记过歌单 |
+
+后台同步只在**有变化**时 emit `netease://sync`，前端据此刷列表并 toast；
+「0 新增 0 移除」的轮次完全静默。
+
+#### 9.13.4 测试覆盖：**写完后必须做变异验证**
+
+网云的增量同步分两层支点：
+
+| 层 | 位置 | 覆盖方式 |
+|---|---|---|
+| 判定逻辑（挑新歌 / 挑取消收藏 / 读水位） | `netease.rs` 的纯函数 `plan_incremental` / `pick_unfavorited` / `extra_playlist_id` | 10 个单测，不碰网络不碰库 |
+| 数据路径（入库 → 软删 → 回收站 → 再导入恢复） | `db::tests::netease_sync_soft_delete_and_restore_roundtrip` | 内存库 + 真实 migrations，端到端 |
+
+**这个测试一开始是假阳性，被变异测试洗出来过**，教训值得单列：
+
+> 最初用 `search_items(..., "鼓楼")` 断言「软删后搜不到」，想间接证明 FTS 被清了。
+> 结果把 `soft_delete_items_bulk` 里的 `DELETE FROM items_fts` 注掉，测试**照样绿** ——
+> 因为 `search_items` 的主查询先 `deleted_at IS NULL` 过滤了 items 行，
+> FTS 里有没有残留行它根本不看。正确的做法是**直接查 `items_fts` 表**
+> （辅助函数 `fts_row_exists`），把物理契约钉死。
+>
+> 残留 FTS 行的真实危害不是「能搜到已删的」，而是 **rowid 复用**：
+> SQLite 会把释放出来的 rowid 再分给新插入的条目，于是新条目被旧关键词错误索引。
+
+现在的覆盖已经过了两轮变异验证，两处都如期变红：
+
+| 注入的变异 | 结果 |
+|---|---|
+| 软删时漏删 `items_fts` | ✅ FAILED（断言：软删必须手动删 FTS 行） |
+| 恢复时漏 `rebuild_item_fts_conn` | ✅ FAILED（断言：恢复必须重建 FTS 行） |
+
+**约定**：给这类「绕过应用逻辑的写库」加测试，写完必问一句
+「把关键那行注掉，测试会红吗？」。答不上来说明断言没碰到真契约，等于没写。
+
+#### 9.13.5 打开方式偏好（客户端 / 浏览器）
+
+2026-09-11 追加，补掉「客户端优先」被写死的问题。
+
+- 存储 `open_prefs.json`（`src-tauri/src/open_prefs.rs`），**按 source 存档**：
+  `{ "targets": { "netease": "client" } }`。现在只有 netease 有客户端深链，
+  但 B站 / Spotify 一类迟早会有，到时只需在 `VideoCard` 里多认一个 source，存档层不用改。
+- **默认值 = 客户端优先**（用户 2026-09-11 拍板 9.11-1）。刻意让它落到缺省值上，
+  这样老数据文件里没有这一项也能自然得到最想要的分支。
+- 判定**放在 Rust 侧**（`open_in_netease` 里先读偏好），不在前端 `if`：
+  能触发打开的路径不止一处（卡片、将来的回收站、批量操作），偏好必须由后端兜底，
+  不能指望每个调用点都记得判断。前端那份判断只是为了让 hover 提示和 hover 出口跟着变。
+- **hover 出口永远提供「另一个方向」**：偏好 client 时显示浏览器按钮，偏好 browser 时
+  反过来显示客户端按钮。否则用户一旦改成浏览器，就等于永久失去客户端入口。
+- 5 个单测钉住：文件缺失 / JSON 损坏都回退默认、存盘再读一致、未配置的 source 不多写 key、
+  `"client"` / `"browser"` 字符串能正确反序列化。**已过变异验证**：把 `Default` 改成
+  `Browser`，3 个测试立刻变红。
+
+#### 9.13.6 打开延迟实测（2026-09-11）：~310 ms 是 Windows 的，不是我们的
+
+用户反馈「点开有卡顿感」，实测（`tools/netease_probe/bench_open.py`，客户端已运行）：
+
+| 方式 | 首次 | 后续 |
+|---|---|---|
+| `ShellExecuteW`（原实现） | 310 ms | 9.2 ms |
+| `ShellExecuteExW` + `SEE_MASK_NOASYNC` | **311 ms** | 9.8 ms |
+| `CreateProcess` + `--webcmd=` | 22.7 ms | 3.1 ms |
+
+**换 ShellExecute API 一分没省**。结论：那 ~310 ms 是**进程级**的 Shell 子系统初始化
+（同一进程第二次调用就降到 ~10 ms），与 API 选择无关。
+
+> ⚠️ 过程中的一次自我纠错：探针里 `ShellExecuteExW` 那组测得「首次 11 ms」，一度让人以为
+> 换 API 有奇效。实际是**测试顺序污染** —— 它跑在 ShellExecuteW 之后，已经享用了预热。
+> 另开一个干净进程单独跑，一样是 311 ms。**benchmark 里多个候选共用进程时，第一组必然吃亏
+> 或占便宜，要么每个候选单独起进程，要么把顺序也当作变量。**
+
+**预热也无效**（`bench_warmup.py`）：试着用 `SHGetFileInfoW`(10 ms) / `AssocQueryStringW`(6 ms)
+提前把 Shell 拉起来，之后再唤起仍是 **318.5 ms**。这条路径的基础设施不在那两个 API 的覆盖范围内。
+
+**因此本期实际做的是：**
+
+1. **修一个真 bug，优先级高于性能**（`uri.rs`）—— 见下方专栏。
+2. `spawn_blocking`：把这最多 310 ms 的阻塞调用挪出异步工作线程，
+   避免它排在封面缓存 / 同步这些后台任务前面。
+3. **前端即时反馈**：点击后立刻 toast「正在唤起…」（1.2 s 自动消失）。
+   延迟本身没降，但主观上的「点了没反应」没了 —— 这是唯一真正作用于卡顿感的部分。
+
+已留 `uri::tests::bench_first_open_is_fast`（`#[ignore]`，会真唤起客户端）供日后复核。
+
+##### 专栏：ShellExecute 的返回码不可信，fallback 一直是失效的
+
+给 `ShellExecuteW` 传一个**根本不存在**的协议 `orpheus-nonexistent-scheme-test://abc123`，
+它返回 **42（成功码）**，还阻塞了 499 ms。
+
+后果比慢严重：调用方（`open_in_netease`）是靠这个返回码决定要不要回退浏览器的。
+返回码是噪声 ⇒ **fallback 永远不触发** ⇒ 协议真出问题时，用户点下去既不开客户端也不开浏览器，
+界面毫无反应，连句提示都没有。
+
+改为：**唤起之前先查注册表** `HKEY_CLASSES_ROOT\<scheme>\shell\open\command`。
+Shell 说的不算，注册表说了算。已用单测钉死 + 变异验证通过（把预检改成恒真，2 个测试立刻红）。
+
+#### 9.13.7 尚未做
+
+- **回收站页面没有客户端打开入口**：`TrashPage` 没复用 `VideoCard`，那里的网易云条目
+  只能看不能唤起。改法是给它补一个来源优先的打开入口（到时候直接吃 `open_prefs`，
+  不用重做判定）。
+- **仍未压下去的那 310 ms**：唯一实测有效的换法是 `CreateProcess` 直接按注册表
+  `exe --webcmd="%1"` 拉起进程（首次 22.7 ms）。代价是要自己解析注册表里的命令模板
+  （换 `%1`、处理引号），各家写法不一，且绕过了 Shell 的其它语义。**收益大但兼容性风险也存在，
+  暂不做，等用户决定。**
+- 同步失败退避：目前失败只是记 `errors` 并等下一个周期，没有指数退避。
+  考虑到最小间隔 5 分钟已经很保守，暂不额外加。
+- P1 浮窗（用户 2026-09-11 定：先不做）。

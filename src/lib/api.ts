@@ -9,7 +9,11 @@ import type {
   ImportRequest,
   ImportResult,
   ItemFilters,
+  NeteaseSyncReport,
+  NeteaseSyncSettings,
   ObsidianSettings,
+  OpenPrefs,
+  OpenTarget,
   RecacheResult,
   QrSession,
   QrStatus,
@@ -110,6 +114,16 @@ export const api = {
       itemTagAssignments: request.itemTagAssignments
     }),
   openUrl: (url: string) => call<null>("open_url", { url }),
+  /**
+   * 在网易云**桌面客户端**打开并播放。
+   * 返回 true = 已递交给客户端；false = 客户端不可用，已回退浏览器打开网页版。
+   */
+  openInNetease: (externalId: string, fallbackUrl: string) =>
+    call<boolean>("open_in_netease", { externalId, fallbackUrl }),
+  // 打开方式偏好（客户端优先 / 浏览器）
+  getOpenPrefs: () => call<OpenPrefs>("get_open_prefs", {}),
+  setOpenTarget: (source: string, target: OpenTarget) =>
+    call<OpenPrefs>("set_open_target", { source, target }),
   // 收藏库导出 / 导入
   exportCollection: (itemIds?: number[]) =>
     call<string>("export_collection", { itemIds: itemIds ?? null }),
@@ -125,6 +139,30 @@ export const api = {
   recacheCovers: () => call<RecacheResult>("recache_covers", {}),
   // 封面缓存队列状态（还有多少张没缓存 / 后台是否在跑）
   coverCacheStatus: () => call<CoverCacheStatus>("cover_cache_status", {}),
+  // Netease（网易云）：登录走**手动粘贴 cookie**——扫码会被 8821 风控拦（DEVELOPMENT.md 9.2）
+  neteaseSetCookie: (cookie: string) =>
+    call<null>("netease_set_cookie", { cookie }),
+  neteaseLogout: () => call<null>("netease_logout"),
+  neteaseProfile: () => call<BilibiliProfile>("netease_profile"),
+  listNeteaseCollections: () =>
+    call<CollectionInfo[]>("list_netease_collections"),
+  parseNeteaseCollectionUrl: (url: string) =>
+    call<CollectionInfo>("parse_netease_collection_url", { url }),
+  previewNeteaseImport: (request: ImportRequest) =>
+    call<ImportPreview>("preview_netease_import", { input: request }),
+  executeNeteaseImport: (request: ImportRequest) =>
+    call<ImportResult>("execute_netease_import", { input: request }),
+  // 网易云增量同步（P2）
+  getNeteaseSyncSettings: () =>
+    call<NeteaseSyncSettings>("get_netease_sync_settings"),
+  saveNeteaseSyncSettings: (settings: NeteaseSyncSettings) =>
+    call<NeteaseSyncSettings>("save_netease_sync_settings", { settings }),
+  /**
+   * 立即跑一轮同步。`force = true` 会忽略「已关闭 / 距上次太近」，
+   * 但仍要求已登录且登记过歌单。
+   */
+  syncNetease: (force: boolean) =>
+    call<NeteaseSyncReport>("sync_netease", { force }),
   // Zhihu
   zhihuSetCookie: (cookie: string) =>
     call<null>("zhihu_set_cookie", { cookie }),
@@ -534,6 +572,15 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
     }
     case "open_url":
       return null as T;
+    // 浏览器 mock 环境没有网易云客户端，恒为"已回退浏览器"
+    case "open_in_netease":
+      return false as T;
+    case "get_open_prefs":
+      return { targets: {} } as T;
+    case "set_open_target":
+      return {
+        targets: { [String(args?.source ?? "")]: String(args?.target ?? "client") }
+      } as T;
     case "create_tag_category": {
       const name = String(args?.name ?? "").trim();
       const category: TagCategory = {
@@ -779,6 +826,106 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
     }
     case "pick_backup_folder":
       return "C:/示例备份文件夹" as T;
+    // ── 网易云 mock（浏览器模式开发时能跑通完整导入流程） ──
+    case "netease_set_cookie":
+    case "netease_logout":
+      return null as T;
+    case "netease_profile":
+      return { isLogin: true, name: "示例网易云用户", face: null, mid: null } as T;
+    case "list_netease_collections":
+      return [
+        {
+          source: "netease",
+          id: "5124170445",
+          title: "我喜欢的音乐",
+          owner: "示例网易云用户",
+          count: 2,
+          url: "https://music.163.com/#/playlist?id=5124170445"
+        }
+      ] as T;
+    case "parse_netease_collection_url": {
+      const url = String(args?.url ?? "");
+      return {
+        source: "netease",
+        id: "5124170445",
+        title: "网易云歌单",
+        owner: "示例网易云用户",
+        count: 2,
+        url
+      } as T;
+    }
+    case "preview_netease_import":
+      return {
+        collection: {
+          source: "netease",
+          id: "5124170445",
+          title: "我喜欢的音乐",
+          owner: "示例网易云用户",
+          count: 2,
+          url: undefined
+        },
+        items: [
+          {
+            id: -1,
+            source: "netease",
+            externalId: "2709782550",
+            sourceUrl: "https://music.163.com/#/song?id=2709782550",
+            title: "下等马",
+            description: "闪耀",
+            notes: undefined,
+            coverUrl: undefined,
+            coverLocalPath: undefined,
+            authorName: "洛天依Official/ChiliChill乐团",
+            authorId: "906118",
+            partitionName: undefined,
+            publishedAt: 1751328000,
+            duration: 186,
+            favoriteTime: 1757570000,
+            tags: []
+          },
+          {
+            id: -2,
+            source: "netease",
+            externalId: "447926067",
+            sourceUrl: "https://music.163.com/#/song?id=447926067",
+            title: "鼓楼",
+            description: "无法长大",
+            notes: undefined,
+            coverUrl: undefined,
+            coverLocalPath: undefined,
+            authorName: "赵雷",
+            authorId: "6731",
+            partitionName: undefined,
+            publishedAt: 1477929600,
+            duration: 281,
+            favoriteTime: 1757570001,
+            tags: []
+          }
+        ],
+        partitionSuggestions: []
+      } as T;
+    case "execute_netease_import":
+      return { imported: 2, skipped: 0, failed: 0, errors: [] } as T;
+    case "get_netease_sync_settings":
+      return {
+        enabled: true,
+        intervalMinutes: 15,
+        autoRemoveUnfavorited: true,
+        playlistIds: ["5124170445"],
+        waterMarks: {},
+        lastSyncAt: null
+      } as T;
+    case "save_netease_sync_settings":
+      return args?.settings as T;
+    case "sync_netease":
+      return {
+        added: 0,
+        removed: 0,
+        playlists: 1,
+        syncedAt: Math.floor(Date.now() / 1000),
+        skippedReason: null,
+        errors: []
+      } as T;
     // ── 知乎 mock（浏览器模式开发时能跑通完整导入流程） ──
     case "zhihu_set_cookie":
       return null as T;

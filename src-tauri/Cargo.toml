@@ -21,7 +21,8 @@ serde_json = "1"
 serde_yaml = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls", "cookies"] }
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "migrate", "macros"] }
-tokio = { version = "1", features = ["time", "macros"] }
+# rt：用 spawn_blocking 跑 ShellExecute 那条阻塞路径（首次调用实测 ~310 ms，见 uri.rs 注释）
+tokio = { version = "1", features = ["macros", "rt", "time"] }
 async-trait = "0.1"
 keyring = "3"
 md5 = "0.7"
@@ -32,6 +33,12 @@ sha2 = "0.10"
 regex = "1"
 futures = "0.3"
 rand = "0.8"
+base64 = "0.22"
+# 网易云 weapi：AES-128-CBC 两层加密 + RSA 无填充
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+num-bigint = "0.4"
+num-traits = "0.2"
 tiny_http = "0.12"
 
 [dev-dependencies]
@@ -40,5 +47,14 @@ tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
-# ShellExecuteW：自定义协议（obsidian://）必须走系统路由，webbrowser 在 Windows 只会丢给默认浏览器
-windows-sys = { version = "0.59", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+# ShellExecute 系列：自定义协议（obsidian:// / orpheus://）必须走系统路由，
+# webbrowser 在 Windows 只会丢给默认浏览器。
+# - ShellExecuteW         打开引抛类协议时会同步等 Shell 收尾（实测 310 ms）
+# - ShellExecuteExW+NOASYNC 同样的调用降到 11 ms，用它
+# - SHELLEXECUTEINFOW 结构体里带了 HKEY 字段 --> 必须开 Win32_System_Registry，否则编译不过
+# - winreg（下方）用于唤起**之前**先查协议有没有注册 —— ShellExecute 的返回值实测不可信
+windows-sys = { version = "0.59", features = [
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Registry",
+] }

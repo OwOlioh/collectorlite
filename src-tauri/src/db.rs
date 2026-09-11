@@ -1314,6 +1314,56 @@ pub async fn soft_delete_items_by_tag(pool: &SqlitePool, tag_id: i64) -> Result<
     Ok(count)
 }
 
+/// 批量软删除，**一个事务**完成，返回实际被删的行数。
+///
+/// 别用 `soft_delete_items`：它逐条各开一个事务，每条一次 WAL fsync
+/// （3.15：自动提交 ~2.3 ms/条）。同步一轮可能要删几十上百条，必须收敛进一个事务。
+pub async fn soft_delete_items_bulk(
+    pool: &SqlitePool,
+    item_ids: &[i64],
+) -> Result<usize, AppError> {
+    if item_ids.is_empty() {
+        return Ok(0);
+    }
+    let now = now_seconds();
+    let mut tx = pool.begin().await?;
+    let mut count = 0usize;
+    for item_id in item_ids {
+        let res = sqlx::query("UPDATE items SET deleted_at = ?, updated_at = ? WHERE id = ?")
+            .bind(now)
+            .bind(now)
+            .bind(item_id)
+            .execute(&mut *tx)
+            .await?;
+        if res.rows_affected() > 0 {
+            // items_fts 是 contentless FTS5，**没有触发器**，必须手动删
+            sqlx::query("DELETE FROM items_fts WHERE rowid = ?")
+                .bind(item_id)
+                .execute(&mut *tx)
+                .await?;
+            count += 1;
+        }
+    }
+    tx.commit().await?;
+    Ok(count)
+}
+
+/// 网易云同步用：列出全部未删除的 netease 条目 `(item_id, external_id, extra_json)`。
+///
+/// `extra_json` 里有 `playlistId`，同步靠它判断一首歌归属哪个歌单，
+/// 从而区分「用户取消收藏」和「这首歌本来就不在同步范围内」。
+pub async fn list_netease_active_items(
+    pool: &SqlitePool,
+) -> Result<Vec<(i64, String, String)>, AppError> {
+    let rows = sqlx::query_as::<_, (i64, String, String)>(
+        "SELECT id, external_id, COALESCE(extra_json, '') FROM items
+         WHERE source = 'netease' AND deleted_at IS NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 pub async fn restore_item(pool: &SqlitePool, item_id: i64) -> Result<(), AppError> {
     let mut conn = pool.acquire().await?;
     restore_item_conn(&mut conn, item_id).await
@@ -3641,5 +3691,166 @@ mod tests {
         println!("D 存在性 SELECT      : {d_ms} ms");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── 网易云增量同步的数据路径 ────────────────────────────────────────
+    //
+    // 同步的**判定逻辑**是纯函数、在 netease.rs 里已有单测；这里补的是**数据路径**：
+    // 入库 → 判定取消收藏 → 批量软删 → 回收站 → 重新收藏后恢复。
+    //
+    // 必须钉死的理由：`items_fts` 是 contentless FTS5、**没有触发器**，
+    // 漏删 / 漏建 FTS 时 `cargo check` 照过，运行时才表现为「搜索还能搜到已删的」
+    // 或「恢复后搜不到」—— 正是本项目踩过三次的那类运行时才炸的坑。
+
+    #[allow(unused_imports)]
+    use super::{
+        import_collection, list_netease_active_items, list_trash, search_items,
+        soft_delete_items_bulk, CollectionExport, ExportItem, ItemFilters, SqlitePool,
+        SqlitePoolOptions,
+    };
+
+    fn netease_export(playlist_id: &str) -> String {
+        let items = [("100", "下等马"), ("200", "鼓楼")]
+            .iter()
+            .map(|(external_id, title)| ExportItem {
+                source: "netease".into(),
+                external_id: (*external_id).into(),
+                source_url: format!("https://music.163.com/#/song?id={external_id}"),
+                title: (*title).into(),
+                description: "测试专辑".into(),
+                cover_url: None,
+                author_name: Some("测试歌手".into()),
+                author_id: Some("1".into()),
+                partition_name: None,
+                published_at: Some(1),
+                duration: Some(186),
+                favorite_time: Some(1757570000),
+                notes: String::new(),
+                obsidian_path: None,
+                starred: false,
+                starred_at: None,
+                extra: serde_json::json!({ "kind": "song", "playlistId": playlist_id }),
+                tags: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_string(&CollectionExport {
+            format_version: 1,
+            exported_at: 1,
+            app: "collectorlite".into(),
+            items,
+        })
+        .expect("组装导出数据失败")
+    }
+
+    fn build_filters(query: Option<&str>) -> ItemFilters {
+        ItemFilters {
+            query: query.map(|q| q.to_string()),
+            tag_ids: Vec::new(),
+            tag_mode: "or".into(),
+            strict: false,
+            untagged: false,
+            sort: "favorite_time".into(),
+            sources: Vec::new(),
+            trash: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn netease_sync_soft_delete_and_restore_roundtrip() {
+        use crate::source::netease::{extra_playlist_id, pick_unfavorited};
+
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("内存库连接失败");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("迁移失败");
+
+        // ① 两条 netease 曲目入库
+        let payload = netease_export("A");
+        let (result, _) = import_collection(&pool, &payload).await.expect("导入失败");
+        assert_eq!(result.imported, 2);
+
+        // ② 能列出来，且能读出归属歌单（同步靠它判定要不要删）
+        let rows: Vec<(i64, String, Option<String>)> =
+            list_netease_active_items(&pool)
+                .await
+                .expect("查询失败")
+                .into_iter()
+                .map(|(id, external_id, extra)| {
+                    (id, external_id, extra_playlist_id(&extra))
+                })
+                .collect();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter().all(|(_, _, p)| p.as_deref() == Some("A")),
+            "extra 里应能读出 playlistId"
+        );
+
+        // ③ 云端只剩 100 —— 200 被用户取消收藏
+        let synced: std::collections::HashSet<String> =
+            ["A".to_string()].into_iter().collect();
+        let remote: std::collections::HashSet<String> =
+            ["100".to_string()].into_iter().collect();
+        let doomed = pick_unfavorited(&rows, &synced, &remote);
+        assert_eq!(doomed.len(), 1, "只应挑出被取消收藏的那一条");
+
+        // ④ 批量软删：列表少一条，且 **items_fts 行必须一起清掉**
+        let removed = soft_delete_items_bulk(&pool, &doomed)
+            .await
+            .expect("批量软删失败");
+        assert_eq!(removed, 1);
+        let rows = list_netease_active_items(&pool).await.expect("查询失败");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1, "100");
+        assert_eq!(list_trash(&pool).await.expect("回收站查询失败").len(), 1);
+        // ⚠️ 必须**直接查 items_fts**：contentless FTS5 没有触发器，不手动删就永远留着。
+        // 用 search_items 间接验证是**无效的** —— 它的主查询先按 deleted_at IS NULL 过滤，
+        // 所以 FTS 有没有残留都搜不出来（一开始写成那样，变异测试直接把它洗白了）。
+        // 残留行的真实危害是 rowid 复用：SQLite 会把释放出来的 rowid 再分配给新插入的
+        // 条目，于是新条目被旧关键词错误索引。
+        assert_eq!(
+            fts_row_exists(&pool, doomed[0]).await,
+            false,
+            "软删必须手动删 items_fts 行，否则 rowid 复用时会污染新条目"
+        );
+        // 顺带确认它确实不在正常搜索结果里（行为层面，与上面的物理断言互补）
+        let found = search_items(&pool, &build_filters(Some("鼓楼")))
+            .await
+            .expect("搜索失败");
+        assert!(found.is_empty(), "软删后不应出现在收藏库搜索结果里");
+
+        // ⑤ 进了回收站，还能恢复
+        let trash = list_trash(&pool).await.expect("回收站查询失败");
+        assert_eq!(trash.len(), 1);
+        assert_eq!(trash[0].external_id, "200");
+
+        // ⑥ 用户又重新收藏 → 再导一次应恢复（deleted_at 归 NULL + FTS 重建）
+        let (result, _) = import_collection(&pool, &payload).await.expect("再导入失败");
+        assert_eq!(result.imported, 1, "只应恢复被删的那条，已存在的不重复计");
+        let rows = list_netease_active_items(&pool).await.expect("查询失败");
+        assert_eq!(rows.len(), 2);
+        // FTS 必须**重建**：同样是 contentless FTS5 的手动维护义务
+        assert_eq!(
+            fts_row_exists(&pool, doomed[0]).await,
+            true,
+            "恢复必须重建 items_fts 行，否则新恢复的条目搜不到"
+        );
+        let found = search_items(&pool, &build_filters(Some("鼓楼")))
+            .await
+            .expect("搜索失败");
+        assert_eq!(found.len(), 1, "恢复后应能重新搜到");
+    }
+
+    /// 直接查 `items_fts` 有没有某个 rowid —— 用来验证「contentless FTS5 必须手动维护」。
+    async fn fts_row_exists(pool: &SqlitePool, rowid: i64) -> bool {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items_fts WHERE rowid = ?")
+            .bind(rowid)
+            .fetch_one(pool)
+            .await
+            .expect("查 items_fts 失败");
+        count > 0
     }
 }

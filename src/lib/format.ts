@@ -16,6 +16,7 @@ export function formatDate(timestamp?: number): string {
 /// - zhihu    -> https://www.zhihu.com/people/{id}
 /// - csdn     -> https://blog.csdn.net/{id}
 /// - github   -> https://github.com/{id}
+/// - netease  -> https://music.163.com/#/artist?id={id}
 export function authorProfileUrl(
   source: string | undefined,
   authorId: string | undefined,
@@ -32,6 +33,8 @@ export function authorProfileUrl(
       return `https://blog.csdn.net/${id}`;
     case "github":
       return `https://github.com/${id}`;
+    case "netease":
+      return `https://music.163.com/#/artist?id=${id}`;
     default:
       return null;
   }

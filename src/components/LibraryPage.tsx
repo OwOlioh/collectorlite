@@ -6,13 +6,14 @@ import {
   Globe,
   LayoutGrid,
   List,
+  Music,
   Search,
   Tags,
   Trash2
 } from "lucide-react";
-import { api } from "../lib/api";
+import { api, inTauri } from "../lib/api";
 import { getRetentionDays } from "../lib/retention";
-import type { ItemFilters, ObsidianSettings, Tag, VideoItem } from "../types";
+import type { ItemFilters, ObsidianSettings, OpenTarget, Tag, VideoItem } from "../types";
 import { TagBadge } from "./TagBadge";
 import { TagManagerPanel } from "./TagManagerPanel";
 import { TagPoolInput } from "./TagPoolInput";
@@ -34,6 +35,8 @@ interface LibraryPageProps {
   /** 当前是否显示本视图（App 按 active view 传入）。从其他页切回时自动静默刷新，
    *  让导入/扩展入库的新内容无需手动刷新即可出现。 */
   isActive?: boolean;
+  /** 打开方式偏好变更（设置页改了客户端/浏览器）后由 App 递增，触发重读。 */
+  openPrefsVersion?: number;
 }
 
 const initialFilters: ItemFilters = {
@@ -59,7 +62,8 @@ export function LibraryPage({
   onTagsChanged,
   onTrashChanged,
   refreshToken,
-  isActive = true
+  isActive = true,
+  openPrefsVersion
 }: LibraryPageProps) {
   const [section, setSection] = useState<LibrarySection>("search");
   const [filters, setFilters] = useState<ItemFilters>(initialFilters);
@@ -82,6 +86,16 @@ export function LibraryPage({
       .then((s: ObsidianSettings) => setObsidianEnabled(s.enabled))
       .catch(() => setObsidianEnabled(false));
   }, [refreshToken]);
+
+  // 各来源的「客户端 / 浏览器」打开偏好。读失败就留空 —— 空会落到客户端优先，
+  // 也就是默认值，用户的卡片不会因此变成打不开。
+  const [openTargets, setOpenTargets] = useState<Record<string, OpenTarget>>({});
+  useEffect(() => {
+    void api
+      .getOpenPrefs()
+      .then((p) => setOpenTargets(p.targets ?? {}))
+      .catch(() => setOpenTargets({}));
+  }, [refreshToken, openPrefsVersion]);
 
   const loadItems = useCallback(async () => {
     setLoading(true);
@@ -212,6 +226,39 @@ export function LibraryPage({
       await reloadSilently();
     } catch (error) {
       toast("error", `星标操作失败：${String(error)}`);
+    }
+  };
+
+  // 网易云「客户端优先」：优先唤起桌面客户端并播放；后端在客户端不可用时已自动回退浏览器，
+  // 这里只是把回退如实告诉用户（DEVELOPMENT.md 9.11-1）。
+  const openInNeteaseClient = async (video: VideoItem) => {
+    // 浏览器预览模式（npm run dev 单起前端）下 `open_in_netease` 走的是 mock，
+    // 恒返回 false。若不加区分地提示"未检测到客户端"，会让人误以为深链不可用作罢 ——
+    // 实测 `orpheus://` 协议是好的，只是这条 toast 把人带偏了。
+    if (!inTauri()) {
+      toast("info", "浏览器预览模式无法唤起客户端，请用 cargo run 启动桌面端");
+      window.open(video.sourceUrl, "_blank", "noopener,noreferrer");
+      return;
+    }
+    // 唤起要等 Windows 走一遍 Shell（App 首次调用实测 ~310 ms，之后降到 ~10 ms）。
+    // 这段时间 UI 不该是「点了没反应」的样子 —— 先给一句即时反馈把空窗填掉，
+    // 这是本次优化里唯一真正作用于「卡顿感」的部分：延迟测不出 improvement，
+    // 但主观上的空等没了。
+    // 客户端窗口弹出来之后它自己会在 1.2 s 内消失，不需要也没法手动撤。
+    toast("info", "正在唤起网易云客户端...", { duration: 1200 });
+    try {
+      const usedClient = await api.openInNetease(video.externalId, video.sourceUrl);
+      if (!usedClient) {
+        toast("info", "未检测到网易云客户端，已在浏览器打开");
+      }
+    } catch (error) {
+      const message = String(error);
+      // 命令不存在 = Rust 侧没注册，99% 是改了后端没重编译（本项目经典坑：无 HMR）
+      if (message.includes("command") && message.includes("not found")) {
+        toast("error", "后端未包含该命令，请重新编译 Rust 后再试");
+      } else {
+        toast("error", `打开失败：${message}`);
+      }
     }
   };
 
@@ -395,6 +442,21 @@ export function LibraryPage({
               title="CSDN 收藏"
             >
               <Code2 size={15} />
+            </button>
+            <button
+              type="button"
+              className={filters.sources.includes("netease") ? "is-active" : ""}
+              onClick={() =>
+                setFilters((current) => ({
+                  ...current,
+                  sources: current.sources.includes("netease")
+                    ? current.sources.filter((s) => s !== "netease")
+                    : [...current.sources, "netease"]
+                }))
+              }
+              title="网易云音乐"
+            >
+              <Music size={15} />
             </button>
             <button
               type="button"
@@ -634,6 +696,8 @@ export function LibraryPage({
                       isSelected={selectedIds.includes(item.id)}
                       onToggleSelect={toggleSelected}
                       onOpen={(url) => api.openUrl(url)}
+                      onOpenInClient={openInNeteaseClient}
+                      openTarget={openTargets[item.source]}
                       onEditTags={setEditingVideo}
                       onEditNote={setNoteVideo}
                       onDelete={deleteVideo}

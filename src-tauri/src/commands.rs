@@ -1,19 +1,23 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 
-use tauri::{Manager, State};
+// Emitter：向前端推事件（`netease://sync`）需要它
+use tauri::{Emitter, Manager, State};
 
 use crate::capture;
 use crate::cover_cache;
 use crate::db;
 use crate::error::AppError;
 use crate::models::{
-    BilibiliProfile, BridgeInfo, CollectionInfo, CoverCacheStatus, ImportPreview, ImportRequest,
-    ImportResult, ItemFilters, ItemTagAssignment, PartitionSuggestion, QrSession, QrStatus,
-    RecacheResult, Tag, TagCategory, TagInput, VideoItem,
+    BilibiliProfile, BridgeInfo, CollectionExport, CollectionInfo, CoverCacheStatus, ExportItem,
+    ExportTag, ImportPreview, ImportRequest, ImportResult, ItemFilters, ItemTagAssignment,
+    NeteaseSyncReport, PartitionSuggestion, QrSession, QrStatus, RecacheResult, Tag, TagCategory,
+    TagInput, VideoItem,
 };
 use crate::obsidian;
+use crate::open_prefs::{self, OpenPrefs};
 use crate::source::browser::BrowserBookmarkClient;
+use crate::source::netease;
 use crate::source::SourceAdapter;
 use crate::state::AppState;
 
@@ -681,6 +685,82 @@ pub fn open_url(url: String) -> Result<(), String> {
     webbrowser::open(&url).map_err(|error| error.to_string())
 }
 
+/// 在网易云**桌面客户端**打开并播放该歌曲（P0，见 DEVELOPMENT.md 9.x）。
+///
+/// 返回 `true` = 已递交给客户端；`false` = 客户端不可用（未安装 / 协议未注册 / 打开失败），
+/// 已自动回退到浏览器打开网页版，由前端给一次 toast 说明。
+///
+/// ⚠️ `true` **不等于**客户端真的处理了：`ShellExecuteW` 返回码 >32 只能证明"已递交"。
+/// 实测网易云的 `orpheus://openurl` 同样返回 42 却毫无反应，所以别拿它向用户宣称成功。
+#[tauri::command]
+pub async fn open_in_netease(
+    state: State<'_, AppState>,
+    external_id: String,
+    fallback_url: String,
+) -> Result<bool, String> {
+    // 用户在设置页选了「浏览器」时直接走网页，连深链都不发。
+    // 这一步放在 Rust 侧而不是前端 if：前端那边已经有好几处可能触发打开的路径
+    // （卡片 / 将来的回收站 / 批量操作），偏好必须由后端兜底，不能指望每处都记得判断。
+    // ⚠️ 这里必须 `spawn_blocking`：进程首次走 ShellExecute 实测要 ~310 ms
+    // （见 `uri.rs` 里的 bench 注释，换 API、预热都消不掉）。直接放在 async 命令体内
+    // 会占住 tokio 的工作线程那么久，跟着排队的还有封面缓存、同步这些后台任务。
+    let prefs = open_prefs::load_open_prefs(&state.data_dir);
+    let task = tokio::task::spawn_blocking(move || {
+        if open_prefs::target_for(&prefs, "netease") == open_prefs::OpenTarget::Browser {
+            return OpenOutcome::Browser;
+        }
+        match netease::open_song_in_client(&external_id) {
+            Ok(()) => OpenOutcome::Client,
+            Err(err) => OpenOutcome::Failed(err.to_string()),
+        }
+    });
+
+    let outcome = task.await.map_err(|e| e.to_string())?;
+    match outcome {
+        OpenOutcome::Client => Ok(true),
+        OpenOutcome::Browser => {
+            webbrowser::open(&fallback_url).map_err(|e| e.to_string())?;
+            Ok(false)
+        }
+        OpenOutcome::Failed(err) => {
+            // 协议未注册等情况都属于"客户端不可用"，静默回退即可
+            eprintln!("[netease] 客户端打开失败，回退浏览器：{err}");
+            webbrowser::open(&fallback_url).map_err(|e| e.to_string())?;
+            Ok(false)
+        }
+    }
+}
+
+/// `spawn_blocking` 任务的返回值：`AppError` 不带 Send，隔着线程边界只搬字符串。
+enum OpenOutcome {
+    Client,
+    Browser,
+    Failed(String),
+}
+
+// ── 打开方式偏好（客户端优先 / 浏览器） ──
+
+#[tauri::command]
+pub async fn get_open_prefs(state: State<'_, AppState>) -> Result<OpenPrefs, String> {
+    Ok(open_prefs::load_open_prefs(&state.data_dir))
+}
+
+/// 设置某个来源的打开方式。返回完整偏好，前端直接拿去更新本地状态，
+/// 省掉一次回读，也保证 UI 显示的与刚落盘的一致。
+#[tauri::command]
+pub async fn set_open_target(
+    state: State<'_, AppState>,
+    source: String,
+    target: String,
+) -> Result<OpenPrefs, String> {
+    let target = match target.as_str() {
+        "client" => open_prefs::OpenTarget::Client,
+        "browser" => open_prefs::OpenTarget::Browser,
+        other => return Err(format!("未知的打开方式：{other}")),
+    };
+    open_prefs::set_target(&state.data_dir, &source, target).map_err(|e| e.to_string())
+}
+
 // ── Obsidian 单向联动 ──
 
 #[tauri::command]
@@ -1109,6 +1189,490 @@ async fn resolve_zhihu_collection(
                 .as_deref()
                 .ok_or_else(|| AppError::InvalidInput("请提供收藏夹链接".into()))?;
             state.zhihu.resolve_collection(url).await
+        }
+    }
+}
+
+// ── Netease commands ──
+
+#[tauri::command]
+pub async fn netease_set_cookie(
+    state: State<'_, AppState>,
+    cookie: String,
+) -> Result<(), String> {
+    state.netease.set_cookie(Some(cookie.clone()));
+    state
+        .save_netease_cookie(Some(cookie))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn netease_logout(state: State<'_, AppState>) -> Result<(), String> {
+    state.netease.set_cookie(None);
+    state.save_netease_cookie(None).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn netease_profile(state: State<'_, AppState>) -> Result<BilibiliProfile, String> {
+    if state.netease.cookie_value().is_none() {
+        return Ok(BilibiliProfile {
+            is_login: false,
+            name: None,
+            face: None,
+            mid: None,
+        });
+    }
+    match state.netease.account_info().await {
+        Ok((uid, nickname)) => Ok(BilibiliProfile {
+            is_login: true,
+            name: nickname,
+            face: None,
+            // profile 结构的 mid 是数字，网易云 uid 也是纯数字，解析失败就留空
+            mid: uid.parse::<i64>().ok(),
+        }),
+        // cookie 还在但已失效（过期 / 被风控）：如实报未登录，让前端提示重新粘贴
+        Err(_) => Ok(BilibiliProfile {
+            is_login: false,
+            name: None,
+            face: None,
+            mid: None,
+        }),
+    }
+}
+
+#[tauri::command]
+pub async fn get_netease_sync_settings(
+    state: State<'_, AppState>,
+) -> Result<netease::SyncSettings, String> {
+    Ok(netease::load_sync_settings(&state.data_dir))
+}
+
+#[tauri::command]
+pub async fn save_netease_sync_settings(
+    state: State<'_, AppState>,
+    mut settings: netease::SyncSettings,
+) -> Result<netease::SyncSettings, String> {
+    // 下限保护：网易云对频繁请求敏感（实测风控码 8821 / -462），低于 5 分钟容易中招
+    if settings.interval_minutes < netease::MIN_SYNC_INTERVAL_MINUTES {
+        settings.interval_minutes = netease::MIN_SYNC_INTERVAL_MINUTES;
+    }
+    // 前端可能从 playlistIds 里删掉了某个歌单，顺手清掉它的水位
+    netease::prune_stale_water_marks(&mut settings);
+    netease::save_sync_settings(&state.data_dir, &settings).map_err(|e| e.to_string())?;
+    Ok(settings)
+}
+
+#[tauri::command]
+pub async fn sync_netease(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    force: bool,
+) -> Result<NeteaseSyncReport, String> {
+    // `state` 是 State<'_, AppState>，不是 Copy，直接进 async 会被搬走 —— 先取引用
+    let state: &AppState = &state;
+    sync_netease_inner(&app, state, force)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 本轮压根没跑（未登录 / 已关闭 / 太频繁 / 没登记歌单）时的返回。
+/// 前端靠 `skippedReason` 区分「跑了但没变化」和「根本没跑」。
+fn netease_sync_skipped(reason: &str) -> NeteaseSyncReport {
+    NeteaseSyncReport {
+        added: 0,
+        removed: 0,
+        playlists: 0,
+        synced_at: None,
+        skipped_reason: Some(reason.to_string()),
+        errors: Vec::new(),
+    }
+}
+
+/// 增量同步主流程。`force = true`（用户点「立即同步」）会忽略开关与间隔，
+/// 但**不会**忽略登录态和歌单登记 —— 没登录强行跑只会白挨一次风控。
+async fn sync_netease_inner(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    force: bool,
+) -> Result<NeteaseSyncReport, AppError> {
+    let mut settings = netease::load_sync_settings(&state.data_dir);
+    let now = db::now_seconds();
+
+    if !force {
+        if !settings.enabled {
+            return Ok(netease_sync_skipped("自动同步已关闭"));
+        }
+        if let Some(last) = settings.last_sync_at {
+            let minutes = settings
+                .interval_minutes
+                .max(netease::MIN_SYNC_INTERVAL_MINUTES) as i64
+                * 60;
+            if now - last < minutes {
+                return Ok(netease_sync_skipped(&format!(
+                    "距上次同步不足 {} 分钟",
+                    settings.interval_minutes
+                )));
+            }
+        }
+    }
+    if state.netease.cookie_value().is_none() {
+        return Ok(netease_sync_skipped("未登录网易云，跳过同步"));
+    }
+    if settings.playlist_ids.is_empty() {
+        return Ok(netease_sync_skipped("还没有登记要同步的歌单，先导入一次歌单"));
+    }
+
+    let mut remote_union: HashSet<String> = HashSet::new();
+    let mut to_import: Vec<ExportItem> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    let mut playlists: i64 = 0;
+    // ⚠️ 只要有任意一个歌单没拉成功，就**不许**做取消收藏清理：
+    // remote_union 缺了它的曲目，会把整张歌单误判成「用户全删了」。
+    let mut all_playlists_ok = true;
+
+    for playlist_id in settings.playlist_ids.clone() {
+        let tracks = match state.netease.fetch_track_ids(&playlist_id).await {
+            Ok(tracks) => tracks,
+            Err(err) => {
+                all_playlists_ok = false;
+                errors.push(format!("歌单 {playlist_id} 曲目列表拉取失败：{err}"));
+                continue;
+            }
+        };
+        // ⚠️ 歌单突然变成 0 首：99% 是接口变了 / 参数不对，而不是用户真把两千首删空了。
+        // 拿这个当「全部取消收藏」去软删除是灾难性的，所以直接判本轮不可信。
+        if tracks.is_empty() {
+            all_playlists_ok = false;
+            errors.push(format!(
+                "歌单 {playlist_id} 返回 0 首曲目，疑似接口异常，本轮不做取消收藏清理"
+            ));
+            continue;
+        }
+        playlists += 1;
+
+        let water_mark = settings.water_marks.get(&playlist_id).copied();
+        let plan = netease::plan_incremental(&tracks, water_mark);
+        if let Some(mark) = plan.new_water_mark {
+            settings.water_marks.insert(playlist_id.clone(), mark);
+        }
+        let added_at: HashMap<i64, Option<i64>> = tracks.iter().copied().collect();
+        for (id, _) in &tracks {
+            remote_union.insert(id.to_string());
+        }
+
+        if plan.new_ids.is_empty() {
+            continue;
+        }
+        match state
+            .netease
+            .fetch_songs(&plan.new_ids, &added_at, &playlist_id)
+            .await
+        {
+            Ok(items) => {
+                for item in items {
+                    to_import.push(ExportItem {
+                        source: item.source,
+                        external_id: item.external_id,
+                        source_url: item.source_url,
+                        title: item.title,
+                        description: item.description,
+                        cover_url: item.cover_url,
+                        author_name: item.author_name,
+                        author_id: item.author_id,
+                        partition_name: item.partition_name,
+                        published_at: item.published_at,
+                        duration: item.duration,
+                        favorite_time: item.favorite_time,
+                        notes: String::new(),
+                        obsidian_path: None,
+                        starred: false,
+                        starred_at: None,
+                        extra: item.extra,
+                        tags: Vec::new(),
+                    });
+                }
+            }
+            Err(err) => errors.push(format!("歌单 {playlist_id} 曲目详情拉取失败：{err}")),
+        }
+    }
+
+    // ── 取消收藏 → 软删除进回收站（用户拍板：默认开，可关） ──
+    let mut removed: i64 = 0;
+    if settings.auto_remove_unfavorited {
+        if all_playlists_ok {
+            let rows = db::list_netease_active_items(&state.pool).await?;
+            let rows: Vec<(i64, String, Option<String>)> = rows
+                .into_iter()
+                .map(|(id, external_id, extra)| {
+                    (id, external_id, netease::extra_playlist_id(&extra))
+                })
+                .collect();
+            let synced: HashSet<String> = settings.playlist_ids.iter().cloned().collect();
+            let doomed = netease::pick_unfavorited(&rows, &synced, &remote_union);
+            if !doomed.is_empty() {
+                // 单事务批量软删（3.15）：逐条删每条一次 fsync
+                removed = db::soft_delete_items_bulk(&state.pool, &doomed).await? as i64;
+            }
+        } else {
+            errors.push("有歌单拉取失败，本轮跳过「取消收藏」清理以避免误删".into());
+        }
+    }
+
+    // ── 新歌入库：复用 JSON 导入（单事务 + 回收站恢复语义） ──
+    let mut added: i64 = 0;
+    if !to_import.is_empty() {
+        let payload = serde_json::to_string(&CollectionExport {
+            format_version: 1,
+            exported_at: now,
+            app: "collectorlite".into(),
+            items: to_import,
+        })
+        .map_err(|e| AppError::Other(format!("组装同步数据失败：{e}")))?;
+        let (result, _) = db::import_collection(&state.pool, &payload).await?;
+        added = result.imported;
+        errors.extend(result.errors);
+    }
+
+    settings.last_sync_at = Some(now);
+    // 水位已经更新了；写失败只影响下次是否重抓，不该让整轮同步报错
+    let _ = netease::save_sync_settings(&state.data_dir, &settings);
+
+    if added > 0 {
+        cover_cache::spawn_cover_cache(app);
+    }
+
+    Ok(NeteaseSyncReport {
+        added,
+        removed,
+        playlists,
+        synced_at: Some(now),
+        skipped_reason: None,
+        errors,
+    })
+}
+
+/// 启动后延迟多久跑第一次同步：别和首屏渲染、封面断点续传抢连接池和磁盘。
+const NETEASE_STARTUP_DELAY_SECS: u64 = 20;
+
+/// 拉起网易云自动同步的后台循环（启动时调一次，整个进程生命周期内常驻）。
+///
+/// 间隔每次都从配置里重新读，改了「同步频率」不用重启应用。
+/// 关掉开关时循环**不退出**，只是每轮都空转 —— 否则重新打开还得重启。
+pub fn start_netease_sync_loop(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(NETEASE_STARTUP_DELAY_SECS)).await;
+        loop {
+            let wait_seconds = {
+                let guard = app.state::<AppState>();
+                let state: &AppState = &guard;
+                let settings = netease::load_sync_settings(&state.data_dir);
+                let minutes = settings
+                    .interval_minutes
+                    .max(netease::MIN_SYNC_INTERVAL_MINUTES) as u64;
+
+                // 没登录 / 没登记歌单 / 开关关着 → 直接空转，连请求都不发
+                if settings.enabled
+                    && !settings.playlist_ids.is_empty()
+                    && state.netease.cookie_value().is_some()
+                {
+                    match sync_netease_inner(&app, state, false).await {
+                        Ok(report) => {
+                            if report.added > 0 || report.removed > 0 {
+                                let _ = app.emit("netease://sync", &report);
+                            }
+                        }
+                        Err(err) => eprintln!("[netease] 自动同步失败：{err}"),
+                    }
+                }
+                minutes * 60
+            };
+            tokio::time::sleep(std::time::Duration::from_secs(wait_seconds)).await;
+        }
+    });
+}
+
+#[tauri::command]
+pub async fn list_netease_collections(
+    state: State<'_, AppState>,
+) -> Result<Vec<CollectionInfo>, String> {
+    state
+        .netease
+        .list_collections()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn parse_netease_collection_url(
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<CollectionInfo, String> {
+    state
+        .netease
+        .resolve_collection(&url)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn preview_netease_import(
+    state: State<'_, AppState>,
+    input: ImportRequest,
+) -> Result<ImportPreview, String> {
+    let collection = resolve_netease_collection(&state, &input)
+        .await
+        .map_err(|e| e.to_string())?;
+    let items = state
+        .netease
+        .fetch_collection(&collection)
+        .await
+        .map_err(|e| e.to_string())?;
+    let items: Vec<VideoItem> = items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| to_video_item(item, -(i as i64 + 1)))
+        .collect();
+    let partition_suggestions: Vec<PartitionSuggestion> = items
+        .iter()
+        .filter_map(|item| item.partition_name.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .map(|name| PartitionSuggestion {
+            name,
+            count: 0,
+            selected: false,
+        })
+        .collect();
+    Ok(ImportPreview {
+        collection,
+        items,
+        partition_suggestions,
+    })
+}
+
+#[tauri::command]
+pub async fn execute_netease_import(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    input: ImportRequest,
+) -> Result<ImportResult, String> {
+    let collection = resolve_netease_collection(&state, &input)
+        .await
+        .map_err(|e| e.to_string())?;
+    let items = state
+        .netease
+        .fetch_collection(&collection)
+        .await
+        .map_err(|e| e.to_string())?;
+    let enriched = state
+        .netease
+        .enrich_items(&items)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 与其他来源一致：前端「配置标签」步骤剔除的项不会进 assignments，故 assignments 即白名单
+    let assignments: HashMap<&str, &Vec<TagInput>> = input
+        .item_tag_assignments
+        .iter()
+        .map(|a| (a.external_id.as_str(), &a.tag_specs))
+        .collect();
+
+    // 导出结构里分类用**名字**表示，而前端传的是 category_id，这里查一次做映射
+    let category_names: HashMap<i64, String> = db::list_tag_categories(&state.pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| (c.id, c.name))
+        .collect();
+
+    let export_items: Vec<ExportItem> = enriched
+        .iter()
+        .filter(|item| assignments.contains_key(item.external_id.as_str()))
+        .map(|item| ExportItem {
+            source: item.source.clone(),
+            external_id: item.external_id.clone(),
+            source_url: item.source_url.clone(),
+            title: item.title.clone(),
+            description: item.description.clone(),
+            cover_url: item.cover_url.clone(),
+            author_name: item.author_name.clone(),
+            author_id: item.author_id.clone(),
+            partition_name: item.partition_name.clone(),
+            published_at: item.published_at,
+            duration: item.duration,
+            favorite_time: item.favorite_time,
+            notes: String::new(),
+            obsidian_path: None,
+            starred: false,
+            starred_at: None,
+            extra: item.extra.clone(),
+            tags: assignments
+                .get(item.external_id.as_str())
+                .map(|specs| {
+                    specs
+                        .iter()
+                        .map(|t| ExportTag {
+                            namespace: t.namespace.clone(),
+                            name: t.name.clone(),
+                            color: t.color.clone(),
+                            category: t
+                                .category_id
+                                .and_then(|id| category_names.get(&id).cloned()),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+        .collect();
+
+    let payload = serde_json::to_string(&CollectionExport {
+        format_version: 1,
+        exported_at: db::now_seconds(),
+        app: "collectorlite".into(),
+        items: export_items,
+    })
+    .map_err(|e| format!("组装导入数据失败：{e}"))?;
+
+    // 复用 JSON 导入：它把所有写操作收进**一个事务**（3.15：3000 条 48 s → 0.6 s），
+    // 还自带回收站恢复语义。逐条 upsert 在 2934 首这个量级会跑几十秒纯 fsync。
+    let (result, _new_items) = db::import_collection(&state.pool, &payload)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 登记进自动同步范围，并用本次导入的最大收藏时间当水位：
+    // 没有水位的话，「导入之后、首次同步之前」新收藏的歌会被漏掉。
+    let water_mark = enriched.iter().filter_map(|item| item.favorite_time).max();
+    if let Err(err) =
+        netease::register_playlist_for_sync(&state.data_dir, &collection.id, water_mark)
+    {
+        // 登记失败不影响本次导入结果，只写日志
+        eprintln!("[netease] 登记同步歌单失败：{err}");
+    }
+
+    // 封面不等：数据已落库，交给后台队列慢慢补（3.17）
+    cover_cache::spawn_cover_cache(&app);
+
+    Ok(result)
+}
+
+async fn resolve_netease_collection(
+    state: &AppState,
+    input: &ImportRequest,
+) -> Result<CollectionInfo, AppError> {
+    match input.kind {
+        crate::models::ImportKind::Favorites => {
+            let media_id = input
+                .media_id
+                .as_deref()
+                .ok_or_else(|| AppError::InvalidInput("请选择歌单".into()))?;
+            state.netease.resolve_collection(media_id).await
+        }
+        crate::models::ImportKind::PublicUrl => {
+            let url = input
+                .url
+                .as_deref()
+                .ok_or_else(|| AppError::InvalidInput("请提供歌单链接".into()))?;
+            state.netease.resolve_collection(url).await
         }
     }
 }

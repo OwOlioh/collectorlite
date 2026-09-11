@@ -8,6 +8,7 @@ import { TrashPage } from "./components/TrashPage";
 import { Sidebar } from "./components/Sidebar";
 import { CaptureBridgeListener } from "./components/CaptureBridgeListener";
 import { CoverCacheListener } from "./components/CoverCacheListener";
+import { NeteaseSyncListener } from "./components/NeteaseSyncListener";
 import { ToastProvider } from "./components/Toast";
 import { AutoBackupRunner } from "./components/AutoBackupRunner";
 import { applyTheme, getStoredTheme, watchSystemTheme } from "./lib/theme";
@@ -19,6 +20,9 @@ export default function App() {
   const [trashCount, setTrashCount] = useState(0);
   // 浏览器扩展入库后递增，用来通知收藏库重新拉列表
   const [libraryVersion, setLibraryVersion] = useState(0);
+  // 打开方式偏好独立成一个版本号：`libraryVersion` 递增会让收藏库整列表重刷，
+  // 而切「客户端 / 浏览器」只是改卡片的行为提示，没必要重新拉一次数据。
+  const [openPrefsVersion, setOpenPrefsVersion] = useState(0);
 
   const refreshTags = useCallback(async () => {
     setTags(await api.listTags());
@@ -61,6 +65,7 @@ export default function App() {
       <AutoBackupRunner />
       <CaptureBridgeListener onCaptured={handleCaptured} />
       <CoverCacheListener onCoversCached={handleCaptured} />
+      <NeteaseSyncListener onSynced={handleCaptured} />
       <div className="app-shell">
         <Sidebar active={active} trashCount={trashCount} onChange={setActive} />
         <main className="main-panel">
@@ -69,6 +74,7 @@ export default function App() {
               tags={tags}
               refreshToken={libraryVersion}
               isActive={active === "library"}
+              openPrefsVersion={openPrefsVersion}
               onTagsChanged={refreshTags}
               onTrashChanged={refreshTrashCount}
             />
@@ -83,6 +89,8 @@ export default function App() {
             <SettingsPage
               onOpenTrash={() => setActive("trash")}
               onObsidianChanged={() => setLibraryVersion((version) => version + 1)}
+              onNeteaseSynced={() => setLibraryVersion((version) => version + 1)}
+              onOpenPrefsChanged={() => setOpenPrefsVersion((version) => version + 1)}
             />
           </div>
         </main>

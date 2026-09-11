@@ -18,5 +18,6 @@ pub mod bilibili;
 pub mod browser;
 pub mod csdn;
 pub mod github;
+pub mod netease;
 pub mod proxy;
 pub mod zhihu;

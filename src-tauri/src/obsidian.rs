@@ -6,6 +6,8 @@ use serde_yaml;
 
 use crate::error::AppError;
 use crate::models::VideoItem;
+// 自定义协议（obsidian://）统一走公共模块，避免与网易云 orpheus:// 各写一份
+use crate::uri::open_uri_system;
 
 /// 分区托管标记：Obsidian 阅读视图下 HTML 注释不可见，但能圈出 app 的责任边界。
 /// 同步时只替换这两个标记之间的内容，标记之外的用户区永不触动。
@@ -317,47 +319,6 @@ fn build_new_uri(vault: &str, rel_path: &str, content: &str) -> String {
         urlencode(content)
     ));
     uri
-}
-
-/// 用系统默认方式打开 URI。
-///
-/// Windows 下**不能**用 `webbrowser`：它在 Windows 只认「默认浏览器」—— 实现里硬编码
-/// 去查 `http` 协议的关联程序，然后把**任何 scheme**（包括 `obsidian://`）都丢给浏览器，
-/// 表现为「点打开却跳到浏览器」。Obsidian 链接必须走 `ShellExecuteW`，由系统按注册表里
-/// `obsidian://` 协议关联唤起 Obsidian.exe。
-#[cfg(windows)]
-fn open_uri_system(uri: &str) -> Result<(), AppError> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::UI::Shell::ShellExecuteW;
-    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-
-    let wide: Vec<u16> = std::ffi::OsStr::new(uri).encode_wide().chain(Some(0)).collect();
-    // hwnd / lpOperation / lpParameters / lpDirectory 传空：用系统为该协议注册的默认动作打开
-    let code = unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            wide.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            SW_SHOWNORMAL,
-        )
-    };
-    // ShellExecute 返回值 <= 32 表示失败
-    if (code as isize) <= 32 {
-        Err(AppError::Other(format!(
-            "系统未能打开链接（错误码 {}）：{}",
-            code as isize,
-            std::io::Error::last_os_error()
-        )))
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(not(windows))]
-fn open_uri_system(uri: &str) -> Result<(), AppError> {
-    webbrowser::open(uri).map_err(|e| AppError::Other(format!("无法打开链接: {e}")))
 }
 
 /// 在 Obsidian 中打开（或兜底新建）该收藏对应的笔记。

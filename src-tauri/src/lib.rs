@@ -9,8 +9,11 @@ mod error;
 mod models;
 mod notes;
 mod obsidian;
+mod open_prefs;
 mod source;
 mod state;
+mod uri;
+mod weapi;
 mod wbi;
 
 use tauri::Manager;
@@ -33,11 +36,13 @@ use commands::{
     execute_csdn_import,
     execute_github_import,
     execute_import,
+    execute_netease_import,
     execute_zhihu_import,
     export_collection,
     export_items_to_obsidian,
     get_bridge_info,
     get_item_obsidian_path,
+    get_netease_sync_settings,
     // Obsidian 单向联动
     get_obsidian_settings,
     get_trash_count,
@@ -48,15 +53,22 @@ use commands::{
     list_bilibili_opus_favorite,
     list_csdn_collections,
     list_github_stars,
+    list_netease_collections,
     list_tag_categories,
     list_tags,
     list_trash,
     list_zhihu_collections,
     logout,
     merge_tags,
+    netease_logout,
+    netease_profile,
+    netease_set_cookie,
+    get_open_prefs,
+    open_in_netease,
     open_note_in_obsidian,
     open_url,
     parse_csdn_collection_url,
+    parse_netease_collection_url,
     parse_public_favorite_url,
     parse_zhihu_collection_url,
     pick_backup_folder,
@@ -64,6 +76,7 @@ use commands::{
     preview_csdn_import,
     preview_github_import,
     preview_import,
+    preview_netease_import,
     preview_zhihu_import,
     purge_item,
     purge_items,
@@ -74,9 +87,13 @@ use commands::{
     restore_item,
     restore_items,
     save_export_file,
+    save_netease_sync_settings,
     search_items,
     set_item_star,
     set_obsidian_settings,
+    set_open_target,
+    start_netease_sync_loop,
+    sync_netease,
     ungroup_tag_category,
     update_item_notes,
     update_item_tags,
@@ -101,6 +118,8 @@ pub fn run() {
             // 断点续传：上次没缓存完的封面，这次启动接着补。
             // 队列就存在数据库里（cover_url 有值但 cover_local_path 为空），没有待办时会立刻空转退出。
             cover_cache::spawn_cover_cache(&handle);
+            // 网易云自动同步：启动 20 s 后跑一轮（内部自带间隔判断，太近会跳过），之后按配置轮询。
+            start_netease_sync_loop(handle.clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -108,11 +127,22 @@ pub fn run() {
             bilibili_poll_qr_login,
             bilibili_profile,
             logout,
+            netease_logout,
+            netease_profile,
+            netease_set_cookie,
+            get_netease_sync_settings,
+            save_netease_sync_settings,
+            sync_netease,
+            get_open_prefs,
             list_bilibili_favorites,
             list_bilibili_opus_favorite,
+            list_netease_collections,
+            parse_netease_collection_url,
             parse_public_favorite_url,
             preview_import,
+            preview_netease_import,
             execute_import,
+            execute_netease_import,
             search_items,
             delete_item,
             delete_items,
@@ -142,6 +172,7 @@ pub fn run() {
             update_item_tags,
             set_item_star,
             import_browser_bookmarks,
+            open_in_netease,
             open_url,
             // Zhihu
             zhihu_set_cookie,
@@ -177,6 +208,7 @@ pub fn run() {
             get_item_obsidian_path,
             open_note_in_obsidian,
             export_items_to_obsidian,
+            set_open_target,
             pick_obsidian_vault,
         ])
         .run(tauri::generate_context!())

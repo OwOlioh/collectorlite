@@ -8,3 +8,17 @@ src-tauri/target
 *.log
 src-tauri/gen
 .workbuddy
+
+# 网易云探针产出的登录凭证，等同密码，切勿入库
+tools/netease_probe/cookie.txt
+tools/netease_probe/qr_state.json
+tools/netease_probe/qr.png
+tools/netease_probe/qr*.svg
+tools/netease_probe/cookie*.txt
+tools/netease_probe/uid.txt
+tools/netease_probe/playlists.json
+tools/netease_probe/ports.txt
+tools/netease_probe/result.txt
+tools/netease_probe/smtc_result.txt
+tools/netease_probe/silence.wav
+**/__pycache__
