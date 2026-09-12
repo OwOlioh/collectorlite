@@ -238,6 +238,95 @@ impl NeteaseClient {
         }
         Ok(items)
     }
+
+    /// 按「曲名 + 歌手」反查完整曲目。速记面板走这条路：
+    /// 窗口标题只有文字，没有 song id，必须先反查才能建出真正的条目。
+    ///
+    /// ⚠️ **宁可查不到也不要猜**（DEVELOPMENT.md 9.8）。判定刻意做得极严：
+    /// 曲名**完全相等** + 歌手**有交集**。实测搜「晴天 周杰伦」第一条返回的是翻唱版，
+    /// 不加歌手过滤必然错配 —— **错配比查不到危险得多**，错配会污染 `(source, external_id)`
+    /// 复合去重键，以后导入同一首歌就永远对不上了。
+    ///
+    /// 匿名可用（9.2.1 实测 `/weapi/search/get` 不需要 cookie），
+    /// 所以即使没登录也能反查；拿不到就返回 `Ok(None)`，让调用方降级到合成 id。
+    pub async fn resolve_track(
+        &self,
+        title: &str,
+        artist: &str,
+        favorite_time: Option<i64>,
+    ) -> Result<Option<ExternalItem>, AppError> {
+        let res = self
+            .weapi_post(
+                "/weapi/search/get",
+                json!({ "s": title, "type": 1, "limit": 20, "offset": 0, "csrf_token": "" }),
+            )
+            .await?;
+
+        // 标题里多个歌手用 "/" 分隔，任意一个对上就算命中
+        let wanted: Vec<&str> = artist
+            .split('/')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let songs = res["result"]["songs"].as_array();
+        for song in songs.into_iter().flatten() {
+            if song["name"].as_str() != Some(title) {
+                continue;
+            }
+            let names: Vec<&str> = song["artists"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|a| a["name"].as_str())
+                .collect();
+            if !wanted.iter().any(|w| names.contains(w)) {
+                continue;
+            }
+            if let Some(mut item) = song_to_item(song, favorite_time) {
+                // 标记来源：将来排查「这条为什么没有 playlistId」时一眼能看出是速记建的
+                item.extra = json!({ "kind": "song", "resolvedBy": "search" });
+                // search/get 命中后**单独再发一次 song/detail** 补封面。
+                // 实测：search/get 返回的 song.album.picUrl 全为 None（轻量响应不带这一字段），
+                // 不补就入库成 cover_url=NULL → 永远不进缓存队列 → 「收藏库里看不到封面」。
+                // song/detail 用的歌单导入路径就有封面，因为它本来就走 song/detail。
+                // 单 id 远低于 200 上限（见 SONG_DETAIL_CHUNK）。
+                //
+                // 补不到不算错：保留 search 已给的外部信息，UI 层仍能展示；
+                // 只是封面继续空着，由用户用其他方式补。
+                if let Some(id) = song["id"].as_i64() {
+                    match self
+                        .weapi_post(
+                            "/weapi/song/detail",
+                            json!({
+                                "ids": [id],
+                                "csrf_token": "",
+                            }),
+                        )
+                        .await
+                    {
+                        Ok(detail) => {
+                            if let Some(full) =
+                                detail["songs"].as_array().and_then(|arr| arr.first())
+                            {
+                                if let Some(pic) = full["album"]["picUrl"].as_str() {
+                                    item.cover_url = Some(pic.to_string());
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // search 已命中，能入库就入库；补封面这一步失败不算致命。
+                            eprintln!(
+                                "[netease] resolve_track song/detail 失败 id={id} err={e}"
+                            );
+                        }
+                    }
+                }
+                return Ok(Some(item));
+            }
+        }
+        Ok(None)
+    }
 }
 
 /// 从「歌单链接」或「纯数字 id」里取出歌单 id。

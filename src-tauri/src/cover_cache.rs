@@ -85,9 +85,15 @@ pub async fn run_pass(app: &AppHandle) -> Result<CoverCacheProgress, AppError> {
                     let download = match item.source.as_str() {
                         "bilibili" => state.bili.download_cover(url).await,
                         "csdn" => state.csdn.download_cover(url).await,
-                        // 其余来源（知乎 / GitHub / 浏览器）封面是 https 远程链接，
-                        // WebView 能直接加载，无需本地化。
-                        _ => return None,
+                        // 其余来源（知乎 / GitHub / 浏览器）的远程封面 / favicon 复用
+                        // capture.rs 里的 download_cover_for 分发（已带系统代理 + UA + timeout）。
+                        // 之前这里直接 return None、注释「WebView 能直接加载」是基于过期假设——
+                        // 实际 WebView 默认不继承 app 代理，远程 favicon 在很多网络下加载失败，
+                        // 这些源的封面永远进不了本地缓存队列，只能指望导入时一次性成功。
+                        _ => match crate::capture::download_cover_for(state, &item.source, url).await {
+                            Some(v) => Ok(v),
+                            None => Err(AppError::Other("通用封面下载返回 None".into())),
+                        },
                     };
                     let (bytes, extension) = download.ok()?;
                     let path =

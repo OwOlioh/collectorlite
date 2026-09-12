@@ -198,6 +198,53 @@ pub struct NeteaseSyncReport {
     pub errors: Vec<String>,
 }
 
+// ── 速记浮窗（P1） ──────────────────────────────────────────────────────────
+
+/// 曲目反查结果（速记面板打开时用）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackResolveResult {
+    /// 是否拿到真实 song id。`false` 时 `songId` / `coverUrl` / `duration` 都可能为空，
+    /// 但 `title` / `artist` 仍可信（来自窗口标题），面板照样能记批注。
+    pub resolved: bool,
+    pub song_id: Option<String>,
+    pub title: String,
+    pub artist: String,
+    pub cover_url: Option<String>,
+    pub duration: Option<i64>,
+    /// 库里是否已存在（决定面板显示「更新」还是「新建」）
+    pub in_library: bool,
+    pub item_id: Option<i64>,
+}
+
+/// 速记面板的一键入库请求。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuickCaptureRequest {
+    pub title: String,
+    pub artist: String,
+    /// 反查到的真实 song id；`None` 表示反查失败 → 用合成 id 落库，**批注照样记**
+    pub song_id: Option<String>,
+    pub cover_url: Option<String>,
+    pub duration: Option<i64>,
+    /// 批注正文，可以为空
+    pub note: String,
+    /// 只传标签名，服务端按「空 namespace + 名称」归位
+    pub tags: Vec<String>,
+}
+
+/// 速记面板的一键入库结果。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuickCaptureResult {
+    pub item_id: i64,
+    /// `true` = 新建条目；`false` = 库里已有，这次只是补了批注 / 标签
+    pub created: bool,
+    /// `true` = 没反查到真实 id，用的是合成 external_id。
+    /// 将来歌单导入同一首歌时会产生**两条**，前端如实提示、不擅自合并。
+    pub unresolved: bool,
+}
+
 /// 导出文件中单个标签的精简表示（不含库内 id，靠 name+namespace 重新关联）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

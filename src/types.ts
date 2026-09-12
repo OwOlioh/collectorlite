@@ -202,3 +202,48 @@ export interface NeteaseSyncReport {
   skippedReason: string | null;
   errors: string[];
 }
+
+// ── 速记浮窗（P1） ──────────────────────────────────────────────────────────
+
+/** 从网易云窗口标题解析出的曲目。 */
+export interface NowPlayingTrack {
+  title: string;
+  artist: string;
+  rawTitle: string;
+}
+
+/** 当前播放状态。`track` 为 null 时看 `hint` 判断具体原因。 */
+export interface NowPlayingState {
+  track: NowPlayingTrack | null;
+  hint: string | null;
+}
+
+/** 曲目反查结果。resolved=false 表示没匹配到正式条目，但仍可记批注。 */
+export interface TrackResolveResult {
+  resolved: boolean;
+  songId: string | null;
+  title: string;
+  artist: string;
+  coverUrl: string | null;
+  duration: number | null;
+  inLibrary: boolean;
+  itemId: number | null;
+}
+
+/** 速记一键入库的请求。 */
+export interface QuickCaptureRequest {
+  title: string;
+  artist: string;
+  songId: string | null;
+  coverUrl: string | null;
+  duration: number | null;
+  note: string;
+  tags: string[];
+}
+
+/** 速记一键入库的结果。 */
+export interface QuickCaptureResult {
+  itemId: number;
+  created: boolean;
+  unresolved: boolean;
+}

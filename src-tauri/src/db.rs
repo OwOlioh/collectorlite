@@ -322,6 +322,23 @@ impl ItemRow {
     }
 }
 
+/// 按复合键 `(source, external_id)` 查本地条目 id，查不到返回 `None`。
+///
+/// 速记面板用它判断「这首歌是不是已经在库里」，从而显示「更新」而不是「新建」。
+pub async fn find_item_id(
+    pool: &SqlitePool,
+    source: &str,
+    external_id: &str,
+) -> Result<Option<i64>, AppError> {
+    let id =
+        sqlx::query_scalar::<_, i64>("SELECT id FROM items WHERE source = ? AND external_id = ?")
+            .bind(source)
+            .bind(external_id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(id)
+}
+
 pub async fn upsert_item(pool: &SqlitePool, item: &ExternalItem) -> Result<(i64, bool), AppError> {
     let now = now_seconds();
     let existing =
@@ -1917,7 +1934,12 @@ pub async fn item_has_local_cover(
 
 /// 「待缓存封面」的判定条件。数据库本身就是封面缓存的任务队列，这个条件就是队列的定义，
 /// 计数与取任务必须用它，避免两边漂移。
-const PENDING_COVER_WHERE: &str = "source IN ('bilibili', 'csdn')
+///
+/// 历史上只覆盖 bilibili/csdn（带 source 适配器的「准官方」源）；browser/zhihu/github
+/// 走 `download_cover_generic`（capture.rs），但它们的 item 从不入队，导入时下载一旦失败
+/// 就再也救不回来 —— 是「侧边栏入库封面爬不到」系列的连锁放大点之一。把它们也纳入队列
+/// 后，任何漏抓的封面都会被后台 `cover_cache` 任务自然补上。
+const PENDING_COVER_WHERE: &str = "source IN ('bilibili', 'csdn', 'browser', 'zhihu', 'github')
            AND cover_url IS NOT NULL AND cover_url <> ''
            AND (cover_local_path IS NULL OR cover_local_path = '')";
 
@@ -3409,20 +3431,24 @@ mod tests {
 
         insert("bilibili", "BV1", Some("http://cover/1.jpg")).await;
         insert("bilibili", "BV2", Some("http://cover/2.jpg")).await;
-        // 知乎走远程 https 封面，不需要本地缓存 → 不该进队列
+        // 知乎 / 浏览器 / GitHub 现在也进队列 —— 历史版本注释「走远程 https 封面、不需要本地缓存」
+        // 是基于「WebView 能直接加载」的错误假设，实际上 WebView 默认不继承 app 代理，
+        // 远程 favicon / 部分 https 封面加载会失败，必须落本地。改 PENDING_COVER_WHERE 时同步。
         insert("zhihu", "Z1", Some("https://cover/3.jpg")).await;
-        // 没有封面的项也不该进队列
+        insert("browser", "B1", Some("https://favicon/4.ico")).await;
+        insert("github", "G1", Some("https://avatars/5.jpg")).await;
+        // 没有封面的项不该进队列
         insert("bilibili", "BV3", None).await;
 
         assert_eq!(
             count_pending_cover_cache(&pool).await.expect("计数失败"),
-            2,
-            "只有 bilibili 里有 cover_url 的两条待缓存"
+            5,
+            "所有有 cover_url 的项都该进队列（bilibili/zhihu/browser/github 四个源）"
         );
         let pending = fetch_items_needing_cover_cache(&pool)
             .await
             .expect("取队列失败");
-        assert_eq!(pending.len(), 2, "计数与取任务必须用同一套条件");
+        assert_eq!(pending.len(), 5, "计数与取任务必须用同一套条件");
 
         // 写回本地路径后自动出队
         set_items_cover_local_paths(
@@ -3433,7 +3459,7 @@ mod tests {
         .expect("回写失败");
         assert_eq!(
             count_pending_cover_cache(&pool).await.expect("计数失败"),
-            1,
+            4,
             "已缓存的项应出队"
         );
     }

@@ -8,6 +8,7 @@ mod db;
 mod error;
 mod models;
 mod notes;
+mod nowplaying;
 mod obsidian;
 mod open_prefs;
 mod source;
@@ -63,6 +64,15 @@ use commands::{
     netease_logout,
     netease_profile,
     netease_set_cookie,
+    now_playing_capture,
+    now_playing_current,
+    now_playing_resolve,
+    nowplaying_close,
+    nowplaying_enabled,
+    nowplaying_hotkey,
+    nowplaying_open,
+    nowplaying_is_playing,
+    nowplaying_set_enabled,
     get_open_prefs,
     open_in_netease,
     open_note_in_obsidian,
@@ -109,6 +119,26 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        // 速记面板的全局快捷键唤起。按一次开、再按一次关（关闭即销毁窗口）。
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    use tauri_plugin_global_shortcut::ShortcutState;
+
+                    if event.state() != ShortcutState::Pressed {
+                        return;
+                    }
+                    // 尊重设置页的开关
+                    if let Some(st) = app.try_state::<state::AppState>() {
+                        if !nowplaying::load_enabled(&st.data_dir) {
+                            return;
+                        }
+                    }
+                    // 同样绕到后台线程：快捷键回调也在主线程上，内联建窗口会自锁。
+                    nowplaying::toggle_window_async(app);
+                })
+                .build(),
+        )
         .setup(|app| {
             let handle = app.handle().clone();
             let state = tauri::async_runtime::block_on(state::AppState::new(&handle))?;
@@ -120,6 +150,14 @@ pub fn run() {
             cover_cache::spawn_cover_cache(&handle);
             // 网易云自动同步：启动 20 s 后跑一轮（内部自带间隔判断，太近会跳过），之后按配置轮询。
             start_netease_sync_loop(handle.clone());
+            // 全局快捷键：注册失败只告警、不阻断启动（很可能被别的程序占用了同一个组合）
+            {
+                use tauri_plugin_global_shortcut::GlobalShortcutExt;
+                let hotkey = nowplaying::load_hotkey(&handle.state::<state::AppState>().data_dir);
+                if let Err(e) = handle.global_shortcut().register(hotkey.as_str()) {
+                    eprintln!("[nowplaying] 全局快捷键 {hotkey} 注册失败（可能被其它程序占用）：{e}");
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -210,6 +248,16 @@ pub fn run() {
             export_items_to_obsidian,
             set_open_target,
             pick_obsidian_vault,
+            // 速记浮窗（P1）
+            now_playing_current,
+            now_playing_resolve,
+            now_playing_capture,
+            nowplaying_enabled,
+            nowplaying_set_enabled,
+            nowplaying_open,
+            nowplaying_close,
+            nowplaying_hotkey,
+            nowplaying_is_playing,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Bilibili Collector");

@@ -9,6 +9,7 @@ import {
   FolderPlus,
   LogOut,
   Music,
+  PenLine,
   Puzzle,
   RefreshCw,
   ShieldCheck,
@@ -72,6 +73,8 @@ export function SettingsPage({
   const [retention, setRetention] = useState<number>(getRetentionDays());
   const [recaching, setRecaching] = useState(false);
   const [bridge, setBridge] = useState<BridgeInfo | null>(null);
+  const [floatEnabled, setFloatEnabled] = useState(true);
+  const [floatHotkey, setFloatHotkey] = useState("Ctrl+Alt+S");
   const [copied, setCopied] = useState(false);
   const [obsidian, setObsidian] = useState<ObsidianSettings>({
     enabled: false,
@@ -96,6 +99,12 @@ export function SettingsPage({
       .getNeteaseSyncSettings()
       .then(setSync)
       .catch(() => setSync(null));
+  }, []);
+
+  // 速记浮窗的开关与快捷键
+  useEffect(() => {
+    void api.nowplayingEnabled().then(setFloatEnabled).catch(() => undefined);
+    void api.nowplayingHotkey().then(setFloatHotkey).catch(() => undefined);
   }, []);
 
   // 打开方式偏好。读失败的兜底是 client-first（后端默认值），卡片因此不会变成打不开。
@@ -413,6 +422,48 @@ export function SettingsPage({
           >
             <RefreshCw size={16} className={syncing ? "spin" : ""} />
             {syncing ? "同步中..." : "立即同步"}
+          </button>
+        </div>
+
+        <div className="settings-card is-wide">
+          <div className="settings-icon"><PenLine size={20} /></div>
+          <div style={{ minWidth: 0 }}>
+            <h2>速记浮窗</h2>
+            <p>
+              听歌时按 <strong>{floatHotkey}</strong> 唤出一个贴边小面板，给当前这首记批注、
+              插时间戳、打标签。不用就关掉，窗口随即销毁，不留后台。
+            </p>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, margin: "8px 0" }}>
+              <input
+                type="checkbox"
+                checked={floatEnabled}
+                onChange={(e) => {
+                  const next = e.target.checked;
+                  setFloatEnabled(next);
+                  void api
+                    .nowplayingSetEnabled(next)
+                    .catch((error) => {
+                      setFloatEnabled(!next);
+                      toast("error", `保存失败：${String(error)}`);
+                    });
+                }}
+              />
+              <span>启用全局快捷键</span>
+            </label>
+            <p className="muted">
+              关掉后仍可从这里手动打开。快捷键改动需要重启应用生效；若组合被其它程序占用，
+              启动日志会给出提示。
+            </p>
+          </div>
+          <button
+            className="ghost-button"
+            type="button"
+            onClick={() =>
+              void api.nowplayingOpen().catch((e) => toast("error", `打开失败：${String(e)}`))
+            }
+          >
+            <PenLine size={16} />
+            打开面板
           </button>
         </div>
 

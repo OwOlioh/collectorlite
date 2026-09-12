@@ -11,9 +11,10 @@ use crate::error::AppError;
 use crate::models::{
     BilibiliProfile, BridgeInfo, CollectionExport, CollectionInfo, CoverCacheStatus, ExportItem,
     ExportTag, ImportPreview, ImportRequest, ImportResult, ItemFilters, ItemTagAssignment,
-    NeteaseSyncReport, PartitionSuggestion, QrSession, QrStatus, RecacheResult, Tag, TagCategory,
-    TagInput, VideoItem,
+    NeteaseSyncReport, PartitionSuggestion, QrSession, QrStatus, QuickCaptureRequest,
+    QuickCaptureResult, RecacheResult, Tag, TagCategory, TagInput, TrackResolveResult, VideoItem,
 };
+use crate::nowplaying;
 use crate::obsidian;
 use crate::open_prefs::{self, OpenPrefs};
 use crate::source::browser::BrowserBookmarkClient;
@@ -2127,4 +2128,206 @@ pub async fn recache_covers(app: tauri::AppHandle) -> Result<RecacheResult, Stri
         failed: progress.failed,
         errors: Vec::new(),
     })
+}
+
+// ── 速记浮窗（P1） ──────────────────────────────────────────────────────────
+//
+// 定位：**随手记**，不是第二个收藏入口。红心的歌由 P2 同步自动带进库，
+// 这个面板负责同步做不到的两件事 —— 即时，以及批注 / 时间戳。
+//
+// 形态是**按需创建 / 用完销毁**：不常驻、不 hide/show、不轮询（见 nowplaying.rs 顶部）。
+
+/// 当前播放状态（读网易云窗口标题）。`track` 为 `null` 时看 `hint`：
+/// 有 hint = 客户端在跑但读不到曲目（迷你模式等）；没有 = 压根没启动。
+#[tauri::command]
+pub async fn now_playing_current() -> nowplaying::NowPlayingState {
+    // 读窗口是同步 Win32 调用，挪出 tokio 工作线程
+    tokio::task::spawn_blocking(nowplaying::current_state)
+        .await
+        .ok()
+        .unwrap_or(nowplaying::NowPlayingState {
+            track: None,
+            hint: None,
+        })
+}
+
+/// 把当前曲目反查成完整条目（真实 song id + 封面 + 时长）。
+///
+/// 反查失败**不报错**：`resolved = false` 时前端仍可用 `title` / `artist` 记批注，
+/// 只是拿不到真实 id（最终会用合成 id 落库）。
+/// 原则：**绝不让「认不出歌」挡住用户写字**。
+#[tauri::command]
+pub async fn now_playing_resolve(
+    state: State<'_, AppState>,
+    title: String,
+    artist: String,
+) -> Result<TrackResolveResult, String> {
+    let item = state
+        .netease
+        .resolve_track(&title, &artist, None)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let (resolved, song_id, cover_url, duration) = match &item {
+        Some(it) => (
+            true,
+            Some(it.external_id.clone()),
+            it.cover_url.clone(),
+            it.duration,
+        ),
+        None => (false, None, None, None),
+    };
+
+    let existing = match &song_id {
+        Some(id) => db::find_item_id(&state.pool, "netease", id)
+            .await
+            .map_err(|e| e.to_string())?,
+        None => None,
+    };
+
+    Ok(TrackResolveResult {
+        resolved,
+        song_id,
+        title,
+        artist,
+        cover_url,
+        duration,
+        in_library: existing.is_some(),
+        item_id: existing,
+    })
+}
+
+/// 速记面板一键入库：建条目 + 打标签 + 写批注。
+#[tauri::command]
+pub async fn now_playing_capture(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    input: QuickCaptureRequest,
+) -> Result<QuickCaptureResult, String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let unresolved = input.song_id.is_none();
+
+    // 反查失败也要能记：用「曲名 + 歌手」合成稳定 id，
+    // 保证同一首歌反复记不会堆出一堆重复条目。**批注比条目整洁重要**。
+    let external_id = match &input.song_id {
+        Some(id) => id.clone(),
+        None => format!(
+            "np:{}|{}",
+            input.title.trim().to_lowercase(),
+            input.artist.trim().to_lowercase()
+        ),
+    };
+    let source_url = match &input.song_id {
+        Some(id) => format!("https://music.163.com/#/song?id={id}"),
+        None => "https://music.163.com".to_string(),
+    };
+
+    let item = crate::models::ExternalItem {
+        source: "netease".to_string(),
+        external_id,
+        source_url,
+        title: input.title.clone(),
+        description: input.artist.clone(),
+        cover_url: input.cover_url.clone(),
+        cover_local_path: None,
+        author_name: Some(input.artist.clone()),
+        author_id: None,
+        partition_name: None,
+        published_at: None,
+        duration: input.duration,
+        favorite_time: Some(now),
+        extra: serde_json::json!({
+            "kind": "song",
+            "capturedBy": "float",
+            "unresolved": unresolved,
+        }),
+    };
+
+    let (item_id, created) = db::upsert_item(&state.pool, &item)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 标签：前端只传名称，这里补成「空 namespace + 名称」
+    let specs: Vec<TagInput> = input
+        .tags
+        .iter()
+        .filter(|t| !t.trim().is_empty())
+        .map(|t| TagInput {
+            id: None,
+            namespace: String::new(),
+            name: t.trim().to_string(),
+            color: None,
+            description: None,
+            category_id: None,
+        })
+        .collect();
+    if !specs.is_empty() {
+        db::replace_item_tags(&state.pool, item_id, &specs)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    // 批注：走 notes::save_notes —— 它是唯一写入入口，Obsidian 联动自动生效
+    if !input.note.trim().is_empty() {
+        crate::notes::save_notes(&state, item_id, &input.note)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    // 封面照旧交给后台队列，不等它
+    cover_cache::spawn_cover_cache(&app);
+
+    Ok(QuickCaptureResult {
+        item_id,
+        created,
+        unresolved,
+    })
+}
+
+/// 浮窗功能是否启用（影响全局快捷键是否注册）。
+#[tauri::command]
+pub fn nowplaying_enabled(state: State<'_, AppState>) -> bool {
+    nowplaying::load_enabled(&state.data_dir)
+}
+
+#[tauri::command]
+pub fn nowplaying_set_enabled(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    nowplaying::set_enabled(&state.data_dir, enabled).map_err(|e| e.to_string())
+}
+
+/// 打开速记面板。**由前端调用（设置页的「打开」按钮），Rust 侧建窗口，
+/// 因此不需要任何 window 权限** —— 权限只拦前端直接调窗口 API。
+/// ⚠️ **这个命令必须是 `async`，不能改成同步。**
+///
+/// 同步命令跑在主线程，而 `WebviewWindowBuilder::build()` 要等 WebView 初始化完成 —— 它依赖主线程
+/// 继续泵消息。在主线程里等它 = 自锁，表现为**新窗口白屏且无响应**（连关闭按钮都点不动）。
+/// 官方维护者在 tauri-apps/tauri#13963 明确要求：
+/// “you'll need to use `async` command for it to work or the app (rust side) will dead lock”。
+#[tauri::command]
+pub async fn nowplaying_open(app: tauri::AppHandle) -> Result<(), String> {
+    nowplaying::open_window(&app).map_err(|e| e.to_string())
+}
+
+/// 关闭速记面板 —— **销毁而非隐藏**（本形态的核心，见 nowplaying.rs）。
+#[tauri::command]
+pub async fn nowplaying_close(app: tauri::AppHandle) {
+    nowplaying::close_window(&app);
+}
+
+/// 当前生效的快捷键，设置页展示用。
+#[tauri::command]
+pub fn nowplaying_hotkey(state: State<'_, AppState>) -> String {
+    nowplaying::load_hotkey(&state.data_dir)
+}
+
+/// 网易云是否正在出声（暂停 / 停止 = false）。面板的计时器只在 true 时走。
+/// ⚠️ 必须是 `async`：WASAPI 的 COM 调用是阻塞的，放 blocking 线程池，别占 tokio worker。
+#[tauri::command]
+pub async fn nowplaying_is_playing() -> bool {
+    tauri::async_runtime::spawn_blocking(nowplaying::netease_is_playing)
+        .await
+        .unwrap_or(false)
 }

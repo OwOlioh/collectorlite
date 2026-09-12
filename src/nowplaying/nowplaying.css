@@ -1,0 +1,182 @@
+/* 速记面板（独立窗口）。颜色一律走 styles.css 的 CSS 变量，深浅色主题自动跟随。 */
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  /* 窗口是 decorations(false) 的无边框形态，底色必须由页面自己给 */
+  background: var(--surface, #fff);
+  overflow: hidden;
+}
+
+.np-root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  box-sizing: border-box;
+  padding: 10px 12px 12px;
+  gap: 10px;
+  color: var(--text, #1b1b1f);
+  font-size: 13px;
+}
+
+.np-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: 0 0 auto;
+}
+
+.np-header-title {
+  font-size: 12px;
+  color: var(--text-secondary, #6b7280);
+  letter-spacing: 0.04em;
+}
+
+.np-icon-button {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary, #6b7280);
+  font-size: 18px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.np-icon-button:hover {
+  background: var(--hover, rgba(0, 0, 0, 0.06));
+}
+
+.np-track {
+  flex: 0 0 auto;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--surface-2, rgba(127, 127, 127, 0.12));
+}
+
+.np-title {
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.4;
+  word-break: break-all;
+}
+
+.np-artist {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--text-secondary, #6b7280);
+}
+
+.np-idle {
+  font-size: 13px;
+  color: var(--text-secondary, #6b7280);
+}
+
+.np-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.np-meta {
+  font-size: 12px;
+  color: var(--text-secondary, #6b7280);
+  min-height: 16px;
+}
+
+.np-ok {
+  color: var(--success, #0f766e);
+}
+
+.np-warn {
+  color: var(--warning, #b45309);
+}
+
+.np-elapsed,
+.np-input,
+.np-textarea,
+.np-primary {
+  width: 100%;
+  box-sizing: border-box;
+  border-radius: 8px;
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.35));
+  background: var(--input-bg, transparent);
+  color: var(--text, #1b1b1f);
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.np-elapsed {
+  padding: 6px 8px;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.np-elapsed:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.np-input {
+  padding: 7px 9px;
+  flex: 0 0 auto;
+}
+
+.np-textarea {
+  flex: 1 1 auto;
+  min-height: 120px;
+  padding: 9px;
+  resize: none;
+  line-height: 1.6;
+}
+
+.np-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.np-primary {
+  flex: 0 0 auto;
+  width: auto;
+  padding: 7px 18px;
+  border: none;
+  background: var(--accent, #534ab7);
+  color: #fff;
+  cursor: pointer;
+}
+
+.np-primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.np-flash {
+  font-size: 12px;
+  color: var(--text-secondary, #6b7280);
+  line-height: 1.4;
+}
+
+.np-footer {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-tertiary, #9ca3af);
+}
+
+/* ── TagPoolInput 在面板里的局部覆盖 ───────────────────────────────────
+   主样式 src/styles.css 里的 .tag-pool-* 沿用过来就行，但有两处要放宽：
+   - .tag-pool-selected 默认 max-width:55% 在 360px 面板里只够 1-2 个 chip，
+     面板宽度本身就紧张，让 chip 横铺、满了再换行更舒服；
+   - .tag-pool-menu 默认 220px 高，面板里下面紧挨着 np-textarea，
+     8 个建议会盖住已写的批注，缩到 140px 后只盖 ~4 行，仍能看清。 */
+.np-panel .tag-pool-selected {
+  max-width: none;
+}
+
+.np-panel .tag-pool-menu {
+  max-height: 140px;
+}

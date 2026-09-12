@@ -415,9 +415,18 @@ fn handle_capture(
     }
 
     let external_id = external_id_for_url(&url);
-    // 浏览器快速入库之前漏了 favicon：这里按域名取 favicon.im 图标地址，
-    // 后续落盘到本地 covers/，WebView 才能正常显示（远程 favicon 在 WebView 无代理时加载失败）。
-    let cover_url = BrowserBookmarkClient::resolve_favicon_url(&url);
+    // 优先用扩展抓的 og:image，没有再回退到 favicon.im；通用浏览器分支
+    // 之前直接丢 og_image 是「侧边栏入库封面爬不到」的根因之一。
+    // favicon 后续会被 localize_cover 落到本地 covers/，WebView 才能正常显示
+    // （远程 favicon 在 WebView 无代理时加载失败）。
+    let cover_url: Option<String> = {
+        let trimmed = payload.og_image.trim();
+        if !trimmed.is_empty() {
+            Some(trimmed.to_string())
+        } else {
+            BrowserBookmarkClient::resolve_favicon_url(&url)
+        }
+    };
     let existing = tauri::async_runtime::block_on(db::find_item_by_source_id(
         pool,
         "browser",
@@ -827,7 +836,11 @@ async fn localize_cover(
 
 /// 按来源选择下载器：bilibili / csdn 用各自客户端（带 Referer 等），
 /// 其余（浏览器 favicon、知乎、GitHub 头像）走通用带代理的 GET。
-async fn download_cover_for(
+///
+/// 之所以走 `pub(crate)`：cover_cache.rs 后台补封面队列要走同样的分发逻辑，
+/// 否则 browser/zhihu/github 即使入队了也会被 `_ => return None` 跳过（之前是的，
+/// 这是「侧边栏入库封面爬不到」系列的连锁放大点之一）。
+pub(crate) async fn download_cover_for(
     state: &AppState,
     source: &str,
     url: &str,
@@ -849,30 +862,61 @@ async fn download_cover_for(
     }
 }
 
-/// 通用封面下载：带系统代理（与 B站客户端一致），用于浏览器 favicon / 知乎 / GitHub 等
-/// 远程 https 封面。WebView 默认不继承 app 代理，所以必须落本地。
+/// 通用封面下载：用于浏览器 favicon / 知乎 / GitHub 等远程 https 封面。
+///
+/// 两件决不能少的事：
+/// 1. **`no_proxy()` 强制直连**。reqwest 默认读 `HTTPS_PROXY`，但 dev 代理（典型 `127.0.0.1:10580`）
+///    去 favicon.im / opengraph CDN 经常被防火墙打回来（curl 实测 connect failed 2s）。
+///    这些 CDN 是公开服务，**强制不代理**才是正确语义。
+///    （B 站 / CSDN 各有自己的下载器：它们仍走代理，因为是模拟登录态，需保留 IP 一致性。）
+/// 2. **UA 用 Chrome 完整串 + Referer**。favicon.im 等 CDN 对裸 `Mozilla/5.0` 会风控。
+///
+/// 30s timeout + 失败每步都打 stderr —— 用户报告「下载失败」时一眼能看出卡在哪。
 async fn download_cover_generic(url: &str) -> Option<(Vec<u8>, String)> {
-    let mut builder = reqwest::Client::builder();
-    if let Some(proxy) = crate::source::proxy::resolve_system_proxy() {
-        builder = builder.proxy(proxy);
-    }
-    let client = builder.build().ok()?;
-    let response = client
+    const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+         (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+    let client = match reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[capture] download_cover_generic 客户端构建失败 url={url} err={e}");
+            return None;
+        }
+    };
+    let response = match client
         .get(url)
-        .header(reqwest::header::USER_AGENT, "Mozilla/5.0")
+        .header(reqwest::header::USER_AGENT, UA)
+        .header(reqwest::header::REFERER, url)
         .send()
         .await
-        .ok()?;
-    if !response.status().is_success() {
+    {
+        Ok(r) => r,
+        Err(e) => {
+            // 这里就是「侧边栏封面爬不到」的常见根因：reqwest 自动读了用户的
+            // HTTPS_PROXY 环境变量，那个 dev 代理去不了 favicon.im / opengraph CDN。
+            // 看到本行 ERROR 大概率就是它，加 .no_proxy() 就好。
+            eprintln!("[capture] download_cover_generic 网络请求失败 url={url} err={e}");
+            return None;
+        }
+    };
+    let status = response.status();
+    if !status.is_success() {
+        eprintln!("[capture] download_cover_generic HTTP {status} url={url}");
         return None;
     }
-    // 先取出 content-type，再消费 response 拿 bytes（bytes() 会转移所有权）。
+    // favicon.im 返回 `image/svg+xml`（直连实测 size=257 ctype=image/svg+xml），
+    // 扩展名必须从 content-type 推导，否则 SVG 内容被以 .jpg 写盘 WebView 加载失败。
     let extension = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(|ct| {
-            if ct.contains("png") {
+            if ct.contains("svg") {
+                "svg"
+            } else if ct.contains("png") {
                 "png"
             } else if ct.contains("webp") {
                 "webp"
@@ -884,7 +928,20 @@ async fn download_cover_generic(url: &str) -> Option<(Vec<u8>, String)> {
         })
         .unwrap_or("jpg")
         .to_string();
-    let bytes = response.bytes().await.ok()?;
+    let bytes = match response.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("[capture] download_cover_generic 读 body 失败 url={url} err={e}");
+            return None;
+        }
+    };
+    if bytes.len() < 64 {
+        eprintln!(
+            "[capture] download_cover_generic 内容过小 url={url} bytes={}",
+            bytes.len()
+        );
+        return None;
+    }
     Some((bytes.to_vec(), extension))
 }
 

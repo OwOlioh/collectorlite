@@ -43,6 +43,7 @@ Multi-platform local desktop app for collecting favorites (Bilibili, browser boo
 | `src/components/CoverCacheListener.tsx` | 后台封面缓存的进度提示（启动续传提示 + 完成提示 + 触发列表刷新） |
 | `src/components/NeteaseSyncListener.tsx` | 网易云后台同步结果提示：**只在有变化时** toast + 刷列表，否则每 15 分钟弹一次会烦死人 |
 | `src/components/import/NeteaseForm.tsx` | 网易云导入卡片（Cookie 登录 + 「我的歌单」「歌单链接」双入口） |
+| `nowplaying.html` + `src/nowplaying/` | 速记浮窗的**独立入口**（`main.tsx` / `NowPlayingApp.tsx` / `nowplaying.css`）。独立打包约 3.6 kB，不加载收藏库前端。⚠️ 只用 app 命令，**不要引入 window 插件 API**（本项目无 capabilities 文件，会被权限拒绝） |
 | `src/lib/api.ts` | Tauri invoke wrapper with mock fallback |
 | `src/lib/format.ts` | Shared `formatDuration` / `formatDate` helpers |
 | `src/lib/theme.ts` | Theme persistence (localStorage + system preference) and `applyTheme` |
@@ -70,6 +71,7 @@ Multi-platform local desktop app for collecting favorites (Bilibili, browser boo
 | `src-tauri/src/open_prefs.rs` | 打开方式偏好（客户端 / 浏览器），按 source 存入 `open_prefs.json`，默认客户端优先 |
 | `src-tauri/src/state.rs` | App state, cookie/token persistence (file + keyring) |
 | `src-tauri/src/cover_cache.rs` | 后台封面缓存队列：并发下载 + 批量回写 + 进度广播，导入与启动都会拉起 |
+| `src-tauri/src/nowplaying.rs` | 网易云速记浮窗（P1a）：Windows 窗口管理 + 标题解析 + 偏好持久化 + **吸附网易云**（`SetWinEventHook` 事件驱动跟随，失主即关）+ **播放状态检测**（WASAPI 会话状态，给时间戳计时用；⚠️ 必须扫**全部**渲染设备 —— 网易云的会话不在默认设备上）。**按需创建 / 用完 destroy**，不做 hide/show。⚠️ 读当前曲目/吸附都必须**按窗口类名**筛 `OrpheusBrowserHost` |
 | `src-tauri/src/wbi.rs` | Bilibili WBI signing |
 | `src-tauri/src/error.rs` | `AppError` enum |
 
@@ -104,6 +106,10 @@ Multi-platform local desktop app for collecting favorites (Bilibili, browser boo
 - **封面后台缓存（断点续传）**: 导入只写数据库、不等封面，封面交给后台队列并发下载；"cover_url 有值但 cover_local_path 为空"即待办，中途关掉应用不丢任务，下次启动自动接着缓存
 - **网易云深链打开（P0）**: `netease` 来源卡片点封面 / 标题唤起桌面客户端并播放（`orpheus://` + base64 JSON，必须带 `cmd:"play"`，这是唯一实测可用的格式）；客户端未安装 / 协议未注册时自动回退浏览器并 toast 说明，hover 菜单保留网页版出口。**打开方式可在设置页切换（客户端优先 / 浏览器），判定在 Rust 侧兜底**，hover 菜单始终提供另一个方向的出口。方案与实测结论见 `DEVELOPMENT.md` 第九章
 - **网易云歌单导入 + 增量同步（P2）**: 手动粘贴 cookie（扫码被 8821 风控拦）→ 导入歌单 → 该歌单自动登记进同步范围；启动延迟 20 s 跑一轮、之后按配置间隔（默认 15 分钟，下限 5）后台轮询，设置页可改可关可「立即同步」。水位取 `trackIds[].at`，取消收藏的歌软删除进回收站（默认开）。⚠️ 清理有三道安全阀（导入时立水位 / 任一歌单拉失败就跳过清理 / 按所有同步歌单的并集判定），改这块前先看 `DEVELOPMENT.md` 9.13.2
+- **网易云速记浮窗（P1a，🟡 已实现待真机验证、未提交）**: `Ctrl+Alt+S` 唤起**按需面板**（用完 **destroy** 不是 hide，不常驻 / 不轮询 / 不拖拽）→ 读网易云主窗口标题 → 匿名搜索反查真实 id → 可打标签、写批注、插入**估算**时间戳（UI 带「约」字，因为窗口标题里没有播放进度）。反查不到时**允许凭空记**：用合成 id `np:{曲名}|{歌手}` 落库（`unresolved: true`）。批注走 `notes::save_notes`，Obsidian 同步自动生效。设置页可开关 + 有「打开面板」兜底按钮（快捷键被占用时用户看不到注册失败的告警，只有 eprintln）。
+  ⚠️ 三条硬约束：① 读曲目**按窗口类名**筛 `OrpheusBrowserHost`（`MiniPlayer` / `DesktopLyrics` 等也带标题但都不是曲目来源）；② 面板前端**只用 app 命令**，窗口操作全在 Rust 侧（本项目无 capabilities 文件，前端调窗口 API 会被拒绝）；③ `place_at_edge()` 里 `monitor.size()` 是物理像素、`set_position` 收逻辑像素，**必须除 scale factor**。
+  **吸附网易云**：面板打开时贴到网易云主窗口边缘并**实时跟随**（`SetWinEventHook` 事件驱动，不轮询；贴左缘、放不下自动换右缘、按网易云所在显示器夹取）；网易云最小化 / 隐藏 / 销毁时**面板跟着关闭**。窗口矩形用 DWM 扩展边界（`GetWindowRect` 含阴影）；详情与坑见 `DEVELOPMENT.md` 9.8 / 9.9。
+  ⚠️ **改窗口类功能前先读 `DEVELOPMENT.md` 9.14**：本机自动化观测有多种假阴性（含"主窗口前端也不跑"这个对照组结论），别把环境问题误判成功能 bug。
 
 ## Frontend Features (added later)
 

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>速记</title>
+  </head>
+  <body>
+    <!--
+      这行占位文本是**诊断阶梯的第一级**，别删：
+      React 挂载成功后会被整体替换掉；如果一直停在这句，说明 HTML 加载了但 JS 没跑。
+      完全空白 = HTML 都没加载；出现红字 = JS 跑了但抛异常（见 main.tsx 的错误兜底）。
+    -->
+    <div id="root">启动中…</div>
+
+    <!--
+      诊断阶梯第二级：普通 <script>（非 module）同步执行。
+      看到「模块加载中」= HTML 与 JS 引擎都正常，问题出在 module 那一侧；
+      一直停在「启动中」= JS 压根没跑；完全空白 = HTML 都没加载到。
+    -->
+    <script>
+      (function () {
+        var el = document.getElementById("root");
+        if (el) el.textContent = "模块加载中…";
+        window.__npBootAt = Date.now();
+      })();
+    </script>
+    <script type="module" src="/src/nowplaying/main.tsx"></script>
+  </body>
+</html>

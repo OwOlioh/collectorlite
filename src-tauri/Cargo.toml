@@ -16,6 +16,8 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
+# 速记面板的全局快捷键唤起（本功能唯一新增的插件）
+tauri-plugin-global-shortcut = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
@@ -47,6 +49,12 @@ tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+# 速记面板「是否正在播放」检测：WASAPI 会话状态（IAudioSessionManager2 / IAudioSessionControl2）。
+# 版本对齐 Cargo.lock 里已有的 0.61（tauri 传递依赖），避免拉新副本。
+windows = { version = "0.61", features = [
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+] }
 # ShellExecute 系列：自定义协议（obsidian:// / orpheus://）必须走系统路由，
 # webbrowser 在 Windows 只会丢给默认浏览器。
 # - ShellExecuteW         打开引抛类协议时会同步等 Shell 收尾（实测 310 ms）
@@ -57,4 +65,10 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Registry",
+    # 速记面板要枚举窗口并读进程镜像名（OpenProcess / QueryFullProcessImageNameW）
+    "Win32_System_Threading",
+    # 速记面板吸附网易云：SetWinEventHook 监听窗口移动/销毁/最小化
+    "Win32_UI_Accessibility",
+    # DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)：取去掉阴影后的真实可见边界
+    "Win32_Graphics_Dwm",
 ] }

@@ -11,15 +11,19 @@ import type {
   ItemFilters,
   NeteaseSyncReport,
   NeteaseSyncSettings,
+  NowPlayingState,
   ObsidianSettings,
   OpenPrefs,
   OpenTarget,
+  QuickCaptureRequest,
+  QuickCaptureResult,
   RecacheResult,
   QrSession,
   QrStatus,
   Tag,
   TagCategory,
   TagInput,
+  TrackResolveResult,
   VideoItem
 } from "../types";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -163,6 +167,20 @@ export const api = {
    */
   syncNetease: (force: boolean) =>
     call<NeteaseSyncReport>("sync_netease", { force }),
+  // 速记浮窗（P1）
+  nowPlayingCurrent: () => call<NowPlayingState>("now_playing_current"),
+  nowPlayingResolve: (title: string, artist: string) =>
+    call<TrackResolveResult>("now_playing_resolve", { title, artist }),
+  nowPlayingCapture: (request: QuickCaptureRequest) =>
+    call<QuickCaptureResult>("now_playing_capture", { input: request }),
+  nowplayingEnabled: () => call<boolean>("nowplaying_enabled"),
+  nowplayingSetEnabled: (enabled: boolean) =>
+    call<null>("nowplaying_set_enabled", { enabled }),
+  nowplayingOpen: () => call<null>("nowplaying_open"),
+  nowplayingClose: () => call<null>("nowplaying_close"),
+  nowplayingHotkey: () => call<string>("nowplaying_hotkey"),
+  /** 网易云是否正在出声（暂停 / 停止 = false）。面板计时器只在 true 时走。 */
+  neteaseIsPlaying: () => call<boolean>("nowplaying_is_playing"),
   // Zhihu
   zhihuSetCookie: (cookie: string) =>
     call<null>("zhihu_set_cookie", { cookie }),
@@ -1051,6 +1069,29 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
       return 0 as T;
     case "pick_obsidian_vault":
       return null as T;
+    // 速记浮窗：这些都是「读本机状态」的命令，浏览器预览模式**给不出真实值**。
+    // 刻意不伪造看起来正常的结论 —— 面板自己会先判 inTauri() 并给出明确提示。
+    case "now_playing_current":
+      return { track: null, hint: "浏览器预览模式读不到播放曲目" } as T;
+    case "now_playing_resolve":
+      return {
+        resolved: false,
+        songId: null,
+        title: "",
+        artist: "",
+        coverUrl: null,
+        duration: null,
+        inLibrary: false,
+        itemId: null
+      } as T;
+    case "now_playing_capture":
+      return { itemId: 0, created: false, unresolved: true } as T;
+    case "nowplaying_enabled":
+      return false as T;
+    case "nowplaying_hotkey":
+      return "Ctrl+Alt+S" as T;
+    case "nowplaying_is_playing":
+      return false as T;
     default:
       return null as T;
   }

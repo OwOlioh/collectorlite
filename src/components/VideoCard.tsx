@@ -76,7 +76,11 @@ export function VideoCard({
         onClick={openPrimary}
         title={clientFirst ? "在网易云客户端打开并播放" : "在浏览器打开"}
       >
-        {isBrowser ? (
+        {isBrowser && item.coverLocalPath ? (
+          // 浏览器来源有本地图标（og:image 或 favicon 已落盘）→ 走标准封面大图，
+          // 不再保留占位风格 —— og:image 是大图，跟 favicon 视觉规格不一样。
+          <CoverImage src={cover} alt="" />
+        ) : isBrowser ? (
           item.coverUrl ? (
             <div className="browser-cover-placeholder">
               <img src={item.coverUrl} alt="" className="browser-favicon" />
