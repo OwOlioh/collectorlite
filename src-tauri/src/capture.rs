@@ -1443,13 +1443,11 @@ fn handle_obsidian_link(
     }
     let vault = Path::new(&settings.vault_path);
 
-    // 关联 = **整篇接管**：把文件原文读出来当正文写进 `items.notes`，用户文件一字不改。
-    //
-    // 早期版本会在文件末尾追加一对托管标记，于是 app 只认标记之间的那一小段 ——
-    // 用户关联一篇写了几百字的笔记，侧边栏却只能看到一个空框。现在整篇就是正文。
-    //
-    // 唯一例外：文件本来就有托管标记（关联到了 collector 自己建的笔记）时仍按托管区取，
-    // 否则标记会被当成正文读进来，写回时套娃。
+    // 关联 = **整篇接管 + 零 collector 痕迹**：把文件原文读出来当正文写进 `items.notes`。
+    // 若文件带 collector 的托管标记 / collector_id frontmatter，`link_item_to_note_file`
+    // 会就地剥离、改成纯 Markdown，于是关联后侧边栏看到并编辑的是整个文件，且 app 不在
+    // 用户文件里留任何专属标记。（已关联的旧版带标记笔记不在此处理，仍走同步的托管区逻辑。）
+    // 干净文件则一字不改。
     let body = match obsidian::link_item_to_note_file(vault, &rel) {
         Ok(body) => body,
         Err(error) => return json(500, &ErrorResponse::new(&error.to_string())),

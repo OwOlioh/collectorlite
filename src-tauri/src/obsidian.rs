@@ -129,8 +129,10 @@ fn build_frontmatter(item: &VideoItem) -> Result<String, AppError> {
 }
 
 fn render_note(item: &VideoItem, notes: &str) -> Result<String, AppError> {
-    let fm = build_frontmatter(item)?;
-    Ok(format!("{fm}{NOTES_START}\n{notes}\n{NOTES_END}\n"))
+    // 新建笔记：纯笔记内容，不写 collector frontmatter、不写托管标记（零 collector 痕迹）。
+    // 身份识别靠数据库里的 `items.obsidian_path`，不需要在用户文件里留任何 collector 专属标记。
+    let _ = item;
+    Ok(notes.to_string())
 }
 
 fn write_utf8_no_bom(path: &Path, content: &str) -> Result<(), AppError> {
@@ -309,28 +311,40 @@ pub fn apply_note_body(path: &Path, item: &VideoItem, notes: &str) -> Result<(),
     write_managed_note_file(path, &new_head, notes, &managed.user_zone)
 }
 
+/// 把一个可能带 collector 托管标记 / frontmatter 的笔记，整理成「整篇纯 Markdown」。
+///
+/// - 有托管标记：去掉 `<!-- collector:notes:start/end -->` 那对注释，保留 head + 托管区正文 +
+///   用户区，三者拼接回原样内容（只删标记，不丢任何文字）。
+/// - head 若是 collector 自己的 frontmatter（开头 `---` 且含 `collector_id:`）：一并去掉，
+///   做到「零 collector 痕迹」。用户自己的 frontmatter 原样保留。
+/// - 本来就干净的文件：原样返回。
+fn strip_collector_traces(content: &str) -> String {
+    let body = match read_managed_note(content) {
+        Some(m) => format!("{}{}{}", m.head, m.notes, m.user_zone),
+        None => content.to_string(),
+    };
+    // 去掉 collector 专属 frontmatter（只认自己写的那种：开头 `---` 且含 `collector_id:`）
+    if body.starts_with("---\n") && body.contains("collector_id:") {
+        if let Some(pos) = body.find("\n---\n") {
+            return body[pos + 5..].to_string();
+        }
+    }
+    body
+}
+
 /// 把一条收藏关联到用户自选的笔记文件，返回**应写入 `items.notes` 的正文**。
 ///
-/// ## 为什么不再往文件里追加托管区
+/// ## 整篇接管 + 零 collector 痕迹
 ///
-/// 早期版本会在文件末尾追加一对托管标记，于是 app 只负责标记之间的那一小段 ——
-/// 用户关联一篇写了几百字的笔记，侧边栏看到的却是一个空框，因为内容全在标记之外。
-/// 用户要的是「关联后看到并编辑整篇内容」，所以关联一律走**整篇接管**：
-/// 文件原文一字不改地读出来当正文，不注入任何标记。
+/// 直接读取文件原文当正文，不去动用户的文件；但若文件里带有 collector 的托管标记
+/// （`<!-- collector:notes:start/end -->`）或 collector 专属 frontmatter（`collector_id:`），
+/// 关联即**就地剥离**，使文件变成纯 Markdown、正文即整篇原文。这样「关联已有」与「新建笔记」
+/// 产出的文件完全一样：侧边栏看到并编辑的是整个文件，app 不在用户文件里留任何专属标记。
 ///
-/// ⚠️ 注入标记还有个更隐蔽的害处：一旦注入，下一轮 `apply_note_body` 就会把这篇
-/// 判成 Managed 模式、只替换托管区，行为凭空跳变 —— 而正文此刻是整篇，写回去
-/// 会让标记套娃。
+/// ⚠️ 已关联的旧版带标记笔记（vault 里现存的那些）**不**走这里 —— 它们仍走同步的托管区逻辑
+/// （`read_note_body` / `apply_note_body` 的 Managed 分支），行为保持不变，只对新增关联生效。
 ///
-/// ## 唯一的例外
-///
-/// 若文件**本来就有**托管标记（比如关联了 collector 自己建的笔记、或别的收藏管过的），
-/// 那就尊重既有模式，正文取托管区 —— 否则会把标记本身当成正文读进来，同样套娃。
-/// 这条分派与 `apply_note_body` 严格互逆。
-///
-/// 关联本身**不写** collector 的 frontmatter：YAML frontmatter 只有位于文件开头才有效，
-/// 塞到文件中间在 Obsidian 里会被渲染成一条分隔线。识别关系靠数据库里的
-/// `items.obsidian_path`，不需要在用户文件里留 collector_id。
+/// 关联本身**不写** collector 的 frontmatter：识别关系靠数据库里的 `items.obsidian_path`。
 pub fn link_item_to_note_file(vault: &Path, rel: &str) -> Result<String, AppError> {
     let abs = vault.join(rel);
     ensure_within_vault(vault, &abs)?;
@@ -339,7 +353,13 @@ pub fn link_item_to_note_file(vault: &Path, rel: &str) -> Result<String, AppErro
     } else {
         String::new()
     };
-    Ok(read_note_body(&content))
+    // 整篇接管 + 零 collector 痕迹：若文件带标记 / collector frontmatter，关联即接管为纯笔记，
+    // 就地改写成干净版本（`body != content` 时才动盘，干净文件一个字节都不改）。
+    let body = strip_collector_traces(&content);
+    if body != content {
+        write_utf8_no_bom(&abs, &body)?;
+    }
+    Ok(body)
 }
 
 /// 计算不冲突的相对路径；若已存在文件且 `collector_id` 是自己的就复用，否则追加 `[source-id前8]` 消歧。
@@ -631,6 +651,47 @@ mod tests {
             fs::read_to_string(&abs).unwrap(),
             original,
             "关联不得修改用户的文件"
+        );
+    }
+
+    #[test]
+    fn link_strips_markers_and_collector_frontmatter() {
+        // 关联一篇 collector 自己建的（带标记 + collector_id frontmatter）旧笔记：
+        // 应就地剥离成纯 Markdown，正文即整篇原文，文件被改写干净。
+        let vault = tmp_dir("link-strip");
+        let rel = "收藏/旧笔记.md";
+        let abs = vault.join("收藏").join("旧笔记.md");
+        fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        let original = "---\ncollector_id: bilibili:BV1\ntitle: x\n---\n\
+            <!-- collector:notes:start -->\napp 笔记\n<!-- collector:notes:end -->\n用户区\n";
+        fs::write(&abs, original).unwrap();
+
+        let body = link_item_to_note_file(&vault, rel).expect("关联应成功");
+        assert_eq!(body, "app 笔记\n用户区\n", "整篇接管：去掉标记与 collector frontmatter");
+
+        let after = fs::read_to_string(&abs).unwrap();
+        assert!(!after.contains(NOTES_START), "关联后应去掉托管标记");
+        assert!(!after.contains(NOTES_END));
+        assert!(!after.contains("collector_id:"), "关联后应去掉 collector frontmatter");
+        assert_eq!(after, body, "文件应被改写为干净纯笔记");
+    }
+
+    #[test]
+    fn link_leaves_plain_file_untouched() {
+        // 本来就干净的笔记：关联不得改写用户文件，正文即整篇原文。
+        let vault = tmp_dir("link-plain");
+        let rel = "收藏/普通.md";
+        let abs = vault.join("收藏").join("普通.md");
+        fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        let original = "# 我自己的笔记\n\n正文\n";
+        fs::write(&abs, original).unwrap();
+
+        let body = link_item_to_note_file(&vault, rel).expect("关联应成功");
+        assert_eq!(body, original, "关联后的正文应是整篇原文");
+        assert_eq!(
+            fs::read_to_string(&abs).unwrap(),
+            original,
+            "干净文件不应被改写"
         );
     }
 

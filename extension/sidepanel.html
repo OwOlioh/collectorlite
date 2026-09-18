@@ -80,8 +80,8 @@
               <h2>还没有对应的 Obsidian 笔记</h2>
               <p>先新建一个，或关联一个已有的笔记文件。</p>
               <div class="acts">
-                <button id="nb-create" type="button" class="primary">新建笔记</button>
-                <button id="nb-link" type="button">关联已有</button>
+                <button id="nb-create" type="button" class="btn">新建笔记</button>
+                <button id="nb-link" type="button" class="btn">关联已有</button>
               </div>
             </div>
 
@@ -112,8 +112,8 @@
 
               <div class="obs-acts">
                 <button id="open-obsidian" type="button" class="primary">在 Obsidian 中打开</button>
-                <button id="link-obsidian" type="button" title="把这条收藏关联到你指定的笔记文件">关联笔记</button>
-                <button id="sync-obsidian" type="button" title="不等下一轮轮询，立刻与 Obsidian 同步一次">立即同步</button>
+                <button id="link-obsidian" type="button" class="btn" title="把这条收藏关联到你指定的笔记文件">关联笔记</button>
+                <button id="sync-obsidian" type="button" class="btn" title="不等下一轮轮询，立刻与 Obsidian 同步一次">立即同步</button>
               </div>
 
               <div id="linked-note" class="linked-note" hidden>
@@ -121,19 +121,21 @@
                 <button id="unlink-obsidian" type="button" class="ghost">取消关联</button>
               </div>
 
-              <div id="link-panel" class="link-panel" hidden>
-                <div class="link-head">
-                  <input id="link-search" type="search" placeholder="搜索 vault 里的笔记…" autocomplete="off" />
-                  <button id="link-close" type="button" class="ghost">关闭</button>
-                </div>
-                <div id="link-list" class="link-list"></div>
-                <div id="link-hint" class="link-hint"></div>
-              </div>
-
               <div class="savebar">
                 <span id="save-dot" class="dot"></span>
                 <span id="save-text">已保存</span>
               </div>
+            </div>
+
+            <!-- 关联搜索面板：必须放在 note-editor 之外，否则未关联笔记时
+                 note-editor 被 hidden，面板虽 hidden=false 仍不可见，点了像没反应。 -->
+            <div id="link-panel" class="link-panel" hidden>
+              <div class="link-head">
+                <input id="link-search" type="search" placeholder="搜索 vault 里的笔记…" autocomplete="off" />
+                <button id="link-close" type="button" class="ghost">关闭</button>
+              </div>
+              <div id="link-list" class="link-list"></div>
+              <div id="link-hint" class="link-hint"></div>
             </div>
           </div>
         </div>
