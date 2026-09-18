@@ -4,7 +4,9 @@ import type {
   BridgeInfo,
   BrowserImportRequest,
   CollectionInfo,
+  CollectionStats,
   CoverCacheStatus,
+  DuplicateGroup,
   ImportPreview,
   ImportRequest,
   ImportResult,
@@ -12,6 +14,7 @@ import type {
   NeteaseSyncReport,
   NeteaseSyncSettings,
   NowPlayingState,
+  // NowPlayingProgress 已移除（手动时间轴）
   ObsidianSettings,
   OpenPrefs,
   OpenTarget,
@@ -83,6 +86,11 @@ export const api = {
     call<number>("purge_items", { itemIds }),
   emptyTrash: () => call<number>("empty_trash", {}),
   getTrashCount: () => call<number>("get_trash_count", {}),
+  getCollectionStats: (rangeDays = 0) =>
+    call<CollectionStats>("get_collection_stats", { rangeDays }),
+  getDuplicateGroups: () => call<DuplicateGroup[]>("get_duplicate_groups"),
+  mergeDuplicates: (keepId: number, removeIds: number[]) =>
+    call<void>("merge_duplicate_items", { keepId, removeIds }),
   autoPurgeTrash: (retentionDays: number) =>
     call<number>("auto_purge_trash", { retentionDays }),
   listTags: () => call<Tag[]>("list_tags"),
@@ -111,6 +119,12 @@ export const api = {
     call<VideoItem>("set_item_star", { itemId, starred }),
   updateItemNotes: (itemId: number, notes: string) =>
     call<VideoItem>("update_item_notes", { itemId, notes }),
+  /** 读取某条收藏的轻量批注（独立于 Obsidian 笔记，与应用内批注按钮 / 侧边栏批注模式共用）。 */
+  getItemAnnotation: (itemId: number) =>
+    call<string>("get_item_annotation", { itemId }),
+  /** 写入某条收藏的轻量批注，返回刷新后的 item 快照。只落本地，不进 Obsidian。 */
+  updateItemAnnotation: (itemId: number, annotation: string) =>
+    call<VideoItem>("update_item_annotation", { itemId, annotation }),
   importBrowserBookmarks: (request: BrowserImportRequest) =>
     call<ImportResult>("import_browser_bookmarks", {
       htmlContent: request.htmlContent,
@@ -169,6 +183,7 @@ export const api = {
     call<NeteaseSyncReport>("sync_netease", { force }),
   // 速记浮窗（P1）
   nowPlayingCurrent: () => call<NowPlayingState>("now_playing_current"),
+  // nowPlayingProgress 已移除（手动时间轴，不再走后端进度快照）
   nowPlayingResolve: (title: string, artist: string) =>
     call<TrackResolveResult>("now_playing_resolve", { title, artist }),
   nowPlayingCapture: (request: QuickCaptureRequest) =>
@@ -215,6 +230,11 @@ export const api = {
   // 浏览器扩展「快速入库」本地桥
   getBridgeInfo: () => call<BridgeInfo>("get_bridge_info", {}),
   regenerateBridgeToken: () => call<BridgeInfo>("regenerate_bridge_token", {}),
+  // 后台桥「开机自启」：开启后登录时静默拉起 `bili-collector.exe --bridge-only`，
+  // 没开主界面也能收藏（非 Windows 恒为 false）。
+  getBridgeAutostart: () => call<boolean>("get_bridge_autostart", {}),
+  setBridgeAutostart: (enabled: boolean) =>
+    call<boolean>("set_bridge_autostart", { enabled }),
   // Obsidian 单向联动
   getObsidianSettings: () => call<ObsidianSettings>("get_obsidian_settings", {}),
   setObsidianSettings: (settings: ObsidianSettings) =>
@@ -275,6 +295,9 @@ const mockItems: VideoItem[] = [
 ];
 
 const mockTrash: VideoItem[] = [];
+
+// 批注是独立存储（annotations 表），不在 VideoItem 行里，mock 也就单独存一份。
+const mockAnnotations = new Map<number, string>();
 
 const mockCollections: CollectionInfo[] = [
   {
@@ -446,6 +469,36 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
       }
       return 0 as T;
     }
+    case "get_collection_stats":
+      return {
+        total: mockItems.length,
+        starredCount: 1,
+        untaggedCount: 1,
+        bySource: [
+          { source: "bilibili", count: 2 },
+          { source: "netease", count: 2 }
+        ],
+        byTag: [
+          { name: "分区：知识", color: "#3b82f6", count: 2 },
+          { name: "值得再看", color: "#10b981", count: 1 }
+        ],
+        byMonth: [
+          { month: "2025-08", count: 1 },
+          { month: "2025-09", count: 1 },
+          { month: "2025-10", count: 2 }
+        ]
+      } as T;
+    case "get_duplicate_groups":
+      return [
+        {
+          key: "bilibili.com/video/BV1xx",
+          matchType: "url",
+          items: [
+            { id: 1, source: "bilibili", externalId: "BV1xx", sourceUrl: "https://www.bilibili.com/video/BV1xx", title: "示例视频", coverUrl: undefined, favoriteTime: 1700000000 },
+            { id: 2, source: "browser", externalId: "hhttps://www.bilibili.com/video/BV1xx", sourceUrl: "https://www.bilibili.com/video/BV1xx?t=10", title: "示例视频", coverUrl: undefined, favoriteTime: 1705000000 }
+          ]
+        }
+      ] as T;
     case "list_tags":
       return mockTags.map((tag) => ({ ...tag })) as T;
     case "list_tag_categories":
@@ -587,6 +640,16 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
         ...item,
         tags: item.tags.map((tag) => ({ ...tag }))
       } as T;
+    }
+    case "get_item_annotation":
+      return (mockAnnotations.get(Number(args?.itemId)) ?? "") as T;
+    case "update_item_annotation": {
+      const itemId = Number(args?.itemId);
+      mockAnnotations.set(itemId, String(args?.annotation ?? ""));
+      const item = mockItems.find((video) => video.id === itemId);
+      return item
+        ? ({ ...item, tags: item.tags.map((tag) => ({ ...tag })) } as T)
+        : (null as T);
     }
     case "open_url":
       return null as T;
@@ -1058,6 +1121,10 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
     case "get_bridge_info":
     case "regenerate_bridge_token":
       return { port: 0, running: false, token: "mock-bridge-token" } as T;
+    // 开机自启后台桥：mock 环境给不出真实注册表状态
+    case "get_bridge_autostart":
+    case "set_bridge_autostart":
+      return false as T;
     // Obsidian 联动 mock
     case "get_obsidian_settings":
       return { enabled: false, vaultPath: "", vaultName: "", subdir: "收藏" } as T;

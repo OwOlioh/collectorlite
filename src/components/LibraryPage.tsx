@@ -8,12 +8,13 @@ import {
   List,
   Music,
   Search,
+  Sparkles,
   Tags,
   Trash2
 } from "lucide-react";
 import { api, inTauri } from "../lib/api";
 import { getRetentionDays } from "../lib/retention";
-import type { ItemFilters, ObsidianSettings, OpenTarget, Tag, VideoItem } from "../types";
+import type { ItemFilters, OpenTarget, SmartTagCandidate, SmartTagMatch, Tag, VideoItem } from "../types";
 import { TagBadge } from "./TagBadge";
 import { TagManagerPanel } from "./TagManagerPanel";
 import { TagPoolInput } from "./TagPoolInput";
@@ -23,6 +24,7 @@ import { VirtuosoGrid } from "react-virtuoso";
 import { VideoCard } from "./VideoCard";
 import { useToast } from "./Toast";
 import { BatchTagEditorModal } from "./BatchTagEditorModal";
+import { SmartTagModal } from "./SmartTagModal";
 
 type LibrarySection = "search" | "manage";
 
@@ -37,6 +39,11 @@ interface LibraryPageProps {
   isActive?: boolean;
   /** 打开方式偏好变更（设置页改了客户端/浏览器）后由 App 递增，触发重读。 */
   openPrefsVersion?: number;
+  /** 统计页下钻意图：非 null 时应用一次来源/标签筛选并切到检索区。
+   *  `source` 直接对应 filters.sources；`tagId` 对应 filters.tagIds。 */
+  drill?: { source?: string; tagId?: number } | null;
+  /** 应用完下钻筛选后回调，让 App 清空 drill（否则相同来源/标签的后续点击被旧状态吞掉）。 */
+  onDrillConsumed?: () => void;
 }
 
 const initialFilters: ItemFilters = {
@@ -63,7 +70,9 @@ export function LibraryPage({
   onTrashChanged,
   refreshToken,
   isActive = true,
-  openPrefsVersion
+  openPrefsVersion,
+  drill,
+  onDrillConsumed
 }: LibraryPageProps) {
   const [section, setSection] = useState<LibrarySection>("search");
   const [filters, setFilters] = useState<ItemFilters>(initialFilters);
@@ -76,16 +85,7 @@ export function LibraryPage({
   const [deleting, setDeleting] = useState(false);
   const { toast } = useToast();
   const [batchTagging, setBatchTagging] = useState(false);
-  const [obsidianEnabled, setObsidianEnabled] = useState(false);
-
-  // 依赖 refreshToken：设置页开启/配置 Obsidian 联动后（App 递增 libraryVersion），
-  // 这里会重新拉取开关状态，否则导出按钮会停留在旧状态、迟迟不出现。
-  useEffect(() => {
-    void api
-      .getObsidianSettings()
-      .then((s: ObsidianSettings) => setObsidianEnabled(s.enabled))
-      .catch(() => setObsidianEnabled(false));
-  }, [refreshToken]);
+  const [smartTagging, setSmartTagging] = useState(false);
 
   // 各来源的「客户端 / 浏览器」打开偏好。读失败就留空 —— 空会落到客户端优先，
   // 也就是默认值，用户的卡片不会因此变成打不开。
@@ -143,18 +143,20 @@ export function LibraryPage({
     wasActiveRef.current = isActive;
   }, [isActive, section, reloadSilently]);
 
-  const selectedFilterTags = tags.filter((tag) => filters.tagIds.includes(tag.id));
+  // 统计页下钻：收到非零 drill 时，切换到检索区并应用一次来源/标签筛选，随后回调清空。
+  // 用全新的 filters 对象（不残留旧 query/严格匹配），让下钻结果干净可预期。
+  useEffect(() => {
+    if (!drill) return;
+    setSection("search");
+    setFilters({
+      ...initialFilters,
+      sources: drill.source ? [drill.source] : [],
+      tagIds: drill.tagId != null ? [drill.tagId] : []
+    });
+    onDrillConsumed?.();
+  }, [drill, onDrillConsumed]);
 
-  // 单条导出已整合进批注弹窗（VideoNoteEditorModal），这里只保留批量导出
-  const exportSelectedToObsidian = async () => {
-    if (selectedIds.length === 0) return;
-    try {
-      const n = await api.exportItemsToObsidian(selectedIds);
-      toast("success", `已导出 ${n} 条到 Obsidian`);
-    } catch (e) {
-      toast("error", `批量导出失败: ${String(e)}`);
-    }
-  };
+  const selectedFilterTags = tags.filter((tag) => filters.tagIds.includes(tag.id));
 
   useEffect(() => {
     setSelectedIds([]);
@@ -372,6 +374,53 @@ export function LibraryPage({
     } catch (error) {
       toast("error", `批量打标签失败：${String(error)}`);
     }
+  };
+
+  // 从选中项中移除其共有的标签（用户勾选的若干个）。复用 updateItemTags，
+  // 把每条收藏的标签集合减去待删集合后整体回写即可，无需新增后端命令。
+  const removeBatchTags = async (tagIds: number[]) => {
+    if (tagIds.length === 0) return;
+    const targets = items.filter((item) => selectedIds.includes(item.id));
+    if (targets.length === 0) return;
+    try {
+      for (const item of targets) {
+        const remaining = item.tags.filter((tag) => !tagIds.includes(tag.id));
+        await api.updateItemTags(
+          item.id,
+          remaining.map((tag) => ({
+            id: tag.id,
+            namespace: tag.namespace,
+            name: tag.name,
+            color: tag.color
+          }))
+        );
+      }
+      onTagsChanged();
+      await reloadSilently();
+      toast("success", `已从 ${targets.length} 条收藏移除 ${tagIds.length} 个标签`);
+    } catch (error) {
+      toast("error", `批量删除标签失败：${String(error)}`);
+    }
+  };
+
+  // 智能匹配打标签：把候选标签加到各自命中的收藏上（命中的项里已挂载的跳过，保持幂等）。
+  // 智能匹配：按「内容 → 标签」视角逐条应用。只对单条收藏打上用户确认的标签。
+  // 不在此处 toast —— 失败由弹窗捕获并提示，避免双层提示。
+  const applySmartTagsToItem = async (itemId: number, tagIds: number[]) => {
+    if (tagIds.length === 0) return;
+    const item = items.find((it) => it.id === itemId);
+    if (!item) return;
+    const toAdd = tags.filter(
+      (t) => tagIds.includes(t.id) && !item.tags.some((e) => e.id === t.id)
+    );
+    if (toAdd.length === 0) return;
+    const merged = mergeTags(item.tags, toAdd);
+    await api.updateItemTags(
+      item.id,
+      merged.map((t) => ({ id: t.id, namespace: t.namespace, name: t.name, color: t.color }))
+    );
+    onTagsChanged();
+    await reloadSilently();
   };
 
   return (
@@ -649,7 +698,15 @@ export function LibraryPage({
                       onClick={() => setBatchTagging(true)}
                     >
                       <Tags size={16} />
-                      批量打标签（{selectedIds.length}）
+                      批量更改标签（{selectedIds.length}）
+                    </button>
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      onClick={() => setSmartTagging(true)}
+                    >
+                      <Sparkles size={16} />
+                      智能标签（{selectedIds.length}）
                     </button>
                     <button
                       className="secondary-button"
@@ -659,16 +716,6 @@ export function LibraryPage({
                       <Download size={16} />
                       导出（{selectedIds.length}）
                     </button>
-                    {obsidianEnabled && (
-                      <button
-                        className="secondary-button"
-                        type="button"
-                        onClick={exportSelectedToObsidian}
-                      >
-                        <Code2 size={16} />
-                        导出到 Obsidian（{selectedIds.length}）
-                      </button>
-                    )}
                     <button
                       className="secondary-button danger-action"
                       type="button"
@@ -715,9 +762,27 @@ export function LibraryPage({
         <BatchTagEditorModal
           count={selectedIds.length}
           tagPool={tags}
+          commonTags={commonTagsOf(items.filter((item) => selectedIds.includes(item.id)))}
           onClose={() => setBatchTagging(false)}
           onSave={saveBatchTags}
+          onRemove={removeBatchTags}
           onTagsChanged={onTagsChanged}
+        />
+      )}
+
+      {smartTagging && (
+        <SmartTagModal
+          count={selectedIds.length}
+          tagPool={tags}
+          smartCandidates={smartMatchCandidates(
+            items.filter((item) => selectedIds.includes(item.id)),
+            tags
+          )}
+          selectedItems={items
+            .filter((item) => selectedIds.includes(item.id))
+            .map((item) => ({ id: item.id, title: item.title }))}
+          onClose={() => setSmartTagging(false)}
+          onApplySmartItem={applySmartTagsToItem}
         />
       )}
 
@@ -735,8 +800,7 @@ export function LibraryPage({
         <VideoNoteEditorModal
           item={noteVideo}
           onClose={() => setNoteVideo(null)}
-          onSaved={() => { void reloadSilently(); toast("success", "批注已保存"); }}
-          onExported={() => { void reloadSilently(); }}
+          onSaved={() => { void reloadSilently(); }}
         />
       )}
     </section>
@@ -750,4 +814,104 @@ function mergeTags(current: Tag[], additions: Tag[]): Tag[] {
     if (!map.has(tag.id)) map.set(tag.id, tag);
   });
   return [...map.values()];
+}
+
+// 选中项「共有」的标签 = 所有选中收藏标签集合的交集（按 tag id 判定）。
+// 任意一条没有标签，或彼此没有重合，交集即空 → 调用处展示「无共同标签」。
+// 单条选中时交集就是它自身全部标签（语义上仍成立）。
+function commonTagsOf(items: VideoItem[]): Tag[] {
+  if (items.length === 0) return [];
+  const idSets = items.map((item) => new Set(item.tags.map((tag) => tag.id)));
+  const first = idSets[0];
+  const commonIds = [...first].filter((id) => idSets.every((set) => set.has(id)));
+  const byId = new Map<number, Tag>();
+  items[0].tags.forEach((tag) => byId.set(tag.id, tag));
+  return commonIds
+    .map((id) => byId.get(id))
+    .filter((tag): tag is Tag => tag !== undefined);
+}
+
+// 智能匹配标签：扫描选中项的来源文本，从已有标签库检索能匹配的项（不新建标签）。
+// 返回每个候选标签 + 它命中的选中项 id；已挂载该标签的项不计入，保持幂等。
+// 关键优化：一次性构建全部标签名的正则，每条文本只扫一遍（避免 S×T 朴素子串爆炸）。
+function smartMatchCandidates(items: VideoItem[], tagPool: Tag[]): SmartTagCandidate[] {
+  if (items.length === 0 || tagPool.length === 0) return [];
+  const byId = new Map<number, Tag>(tagPool.map((t) => [t.id, t]));
+  const nameToTag = new Map<string, Tag>();
+  for (const t of tagPool) nameToTag.set(t.name.toLowerCase(), t);
+
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // ASCII 标签加词边界（避免 "go" 误中 "google"）；含非 ASCII（如 CJK）直接子串。
+  const pattern = new RegExp(
+    tagPool
+      .map((t) => (/^[A-Za-z0-9]+$/.test(t.normalized) ? `\\b${esc(t.name)}\\b` : esc(t.name)))
+      .join("|"),
+    "gi"
+  );
+
+  // 逐字段扫描，这样才能记录「在哪个字段、哪段文字命中」，供 UI 展开核对。
+  const FIELDS: { key: keyof VideoItem; label: string }[] = [
+    { key: "title", label: "标题" },
+    { key: "description", label: "描述" },
+    { key: "authorName", label: "作者" },
+    { key: "partitionName", label: "分区" },
+    { key: "source", label: "来源" }
+  ];
+
+  // 命中上下文窗口：命中词前后各取 RADIUS 个字符，超出则加 …
+  const RADIUS = 36;
+  const windowSnippet = (text: string, start: number, end: number) => {
+    const s = Math.max(0, start - RADIUS);
+    const e = Math.min(text.length, end + RADIUS);
+    return {
+      before: (s > 0 ? "…" : "") + text.slice(s, start),
+      hit: text.slice(start, end),
+      after: text.slice(end, e) + (e < text.length ? "…" : "")
+    };
+  };
+
+  // 候选：tag.id -> 命中溯源列表
+  const matchesByTag = new Map<number, SmartTagMatch[]>();
+  for (const it of items) {
+    const owned = new Set(it.tags.map((t) => t.id));
+    const itemTitle = it.title ?? "";
+    for (const f of FIELDS) {
+      const raw = it[f.key];
+      if (typeof raw !== "string" || raw.length === 0) continue;
+      const lower = raw.toLowerCase();
+      pattern.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = pattern.exec(lower)) !== null) {
+        const tag = nameToTag.get(m[0].toLowerCase());
+        if (tag && !owned.has(tag.id)) {
+          // lower 与原文字符数一致（仅大小写变化），索引可直接用于原文切片。
+          const start = m.index;
+          const end = m.index + m[0].length;
+          const { before, hit, after } = windowSnippet(raw, start, end);
+          const list = matchesByTag.get(tag.id);
+          const entry: SmartTagMatch = {
+            itemId: it.id,
+            itemTitle,
+            field: f.key,
+            fieldLabel: f.label,
+            before,
+            hit,
+            after
+          };
+          if (list) list.push(entry);
+          else matchesByTag.set(tag.id, [entry]);
+        }
+        if (m.index === pattern.lastIndex) pattern.lastIndex++; // 防零宽死循环
+      }
+    }
+  }
+
+  return [...matchesByTag.entries()]
+    .map(([id, matches]) => ({
+      tag: byId.get(id)!,
+      matchedItemIds: [...new Set(matches.map((mt) => mt.itemId))],
+      matches
+    }))
+    .filter((c) => c.tag !== undefined)
+    .sort((a, b) => b.matchedItemIds.length - a.matchedItemIds.length);
 }
