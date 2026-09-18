@@ -1,5 +1,7 @@
 import {
+  BarChart3,
   Bookmark,
+  Copy,
   Download,
   Library,
   Settings,
@@ -10,17 +12,25 @@ import type { AppView } from "../types";
 interface SidebarProps {
   active: AppView;
   trashCount: number;
+  duplicateCount: number;
   onChange: (view: AppView) => void;
 }
 
 const navItems: Array<{ id: AppView; label: string; icon: typeof Library }> = [
   { id: "library", label: "收藏库", icon: Library },
   { id: "import", label: "导入", icon: Download },
+  { id: "stats", label: "统计", icon: BarChart3 },
+  { id: "duplicates", label: "重复项", icon: Copy },
   { id: "trash", label: "回收站", icon: Trash2 },
   { id: "settings", label: "设置", icon: Settings }
 ];
 
-export function Sidebar({ active, trashCount, onChange }: SidebarProps) {
+export function Sidebar({
+  active,
+  trashCount,
+  duplicateCount,
+  onChange
+}: SidebarProps) {
   return (
     <aside className="sidebar">
       <div className="brand">
@@ -45,6 +55,9 @@ export function Sidebar({ active, trashCount, onChange }: SidebarProps) {
             <span>{label}</span>
             {id === "trash" && trashCount > 0 && (
               <span className="side-nav-badge">{trashCount > 99 ? "99+" : trashCount}</span>
+            )}
+            {id === "duplicates" && duplicateCount > 0 && (
+              <span className="side-nav-badge">{duplicateCount > 99 ? "99+" : duplicateCount}</span>
             )}
           </button>
         ))}

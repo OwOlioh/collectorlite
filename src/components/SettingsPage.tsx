@@ -73,6 +73,7 @@ export function SettingsPage({
   const [retention, setRetention] = useState<number>(getRetentionDays());
   const [recaching, setRecaching] = useState(false);
   const [bridge, setBridge] = useState<BridgeInfo | null>(null);
+  const [bridgeAutostart, setBridgeAutostart] = useState(false);
   const [floatEnabled, setFloatEnabled] = useState(true);
   const [floatHotkey, setFloatHotkey] = useState("Ctrl+Alt+S");
   const [copied, setCopied] = useState(false);
@@ -124,6 +125,10 @@ export function SettingsPage({
       .getBridgeInfo()
       .then(setBridge)
       .catch(() => setBridge(null));
+  }, []);
+
+  useEffect(() => {
+    void api.getBridgeAutostart().then(setBridgeAutostart).catch(() => setBridgeAutostart(false));
   }, []);
 
   const copyToken = async () => {
@@ -638,6 +643,27 @@ export function SettingsPage({
                 ? `桥已启动，监听端口 ${bridge.port}`
                 : "桥未启动（重新启动应用后会自动拉起）"}
             </div>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, margin: "12px 0 4px" }}>
+              <input
+                type="checkbox"
+                checked={bridgeAutostart}
+                onChange={(e) => {
+                  const next = e.target.checked;
+                  setBridgeAutostart(next);
+                  void api
+                    .setBridgeAutostart(next)
+                    .then(setBridgeAutostart)
+                    .catch((error) => {
+                      setBridgeAutostart(!next);
+                      toast("error", `设置开机自启失败：${String(error)}`);
+                    });
+                }}
+              />
+              <span>开机自启后台桥（不打开应用也能用浏览器扩展收藏）</span>
+            </label>
+            <p className="muted">
+              开启后登录系统会自动在后台拉起收藏桥，浏览器扩展随时可用；点托盘图标可「打开主程序」或「退出后台桥」。
+            </p>
             <div className="bridge-token">
               <input
                 className="bridge-token-input"

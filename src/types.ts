@@ -11,6 +11,33 @@ export interface Tag {
   categoryId?: number | null;
 }
 
+/** 智能匹配标签的单条命中溯源：标签在某条收藏的某个字段里命中了哪段文字。 */
+export interface SmartTagMatch {
+  /** 命中项 id */
+  itemId: number;
+  /** 命中项标题，用于在 UI 中标识是哪条收藏 */
+  itemTitle: string;
+  /** 命中的字段 key（title / description / authorName / partitionName / source） */
+  field: string;
+  /** 字段中文名（标题 / 描述 / 作者 / 分区 / 来源） */
+  fieldLabel: string;
+  /** 命中词之前的上下文（已按窗口截断，必要时带前导 …） */
+  before: string;
+  /** 实际命中的子串（原始大小写） */
+  hit: string;
+  /** 命中词之后的上下文（已按窗口截断，必要时带尾随 …） */
+  after: string;
+}
+
+/** 智能匹配标签的候选：一个已有标签 + 它命中的选中项与逐条溯源。 */
+export interface SmartTagCandidate {
+  tag: Tag;
+  /** 命中的选中项 id 集合（仅含尚未挂载该标签的项，保证幂等）。 */
+  matchedItemIds: number[];
+  /** 逐条命中溯源，供 UI 展开核对依据。 */
+  matches: SmartTagMatch[];
+}
+
 export interface TagInput {
   id?: number;
   namespace: TagNamespace;
@@ -160,7 +187,7 @@ export interface ItemFilters {
   trash?: boolean;
 }
 
-export type AppView = "library" | "import" | "trash" | "settings";
+export type AppView = "library" | "import" | "trash" | "settings" | "stats" | "duplicates";
 
 /** 收藏的打开方式：唤起桌面客户端，或打开网页版。 */
 export type OpenTarget = "client" | "browser";
@@ -218,6 +245,9 @@ export interface NowPlayingState {
   hint: string | null;
 }
 
+/** 真实播放进度快照（A 方案后台线程累计）。`elapsedMs` 为该曲真实已播毫秒。 */
+// NowPlayingProgress 已移除：时间戳改手动时间轴（见方案文档），不再走后端进度快照。
+
 /** 曲目反查结果。resolved=false 表示没匹配到正式条目，但仍可记批注。 */
 export interface TrackResolveResult {
   resolved: boolean;
@@ -246,4 +276,49 @@ export interface QuickCaptureResult {
   itemId: number;
   created: boolean;
   unresolved: boolean;
+}
+
+// ── 收藏统计（数据可视化） ──────────────────────────────────────────────
+
+export interface SourceCount {
+  source: string;
+  count: number;
+}
+
+export interface TagCountStat {
+  name: string;
+  color?: string;
+  count: number;
+}
+
+export interface MonthCount {
+  month: string;
+  count: number;
+}
+
+export interface CollectionStats {
+  total: number;
+  starredCount: number;
+  untaggedCount: number;
+  bySource: SourceCount[];
+  byTag: TagCountStat[];
+  byMonth: MonthCount[];
+}
+
+// ── 跨源重复项检测 ──────────────────────────────────────────────────
+
+export interface DuplicateItemPreview {
+  id: number;
+  source: string;
+  externalId: string;
+  sourceUrl: string;
+  title: string;
+  coverUrl?: string;
+  favoriteTime?: number;
+}
+
+export interface DuplicateGroup {
+  key: string;
+  matchType: string;
+  items: DuplicateItemPreview[];
 }
