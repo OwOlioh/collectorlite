@@ -4,6 +4,7 @@
 //! （本地 CSRF 与 DNS rebinding）。请求**直接写库**，不经过前端，因此 app 窗口是否
 //! 存活都不影响入库；写完之后 emit 事件通知前端刷新列表。
 
+use std::fs;
 use std::io::{Cursor, Read};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
@@ -18,6 +19,7 @@ use crate::db;
 use crate::error::AppError;
 use crate::models::{ExternalItem, Tag, TagInput};
 use crate::obsidian;
+use crate::obsidian_sync;
 use crate::source::browser::BrowserBookmarkClient;
 use crate::source::SourceAdapter;
 use crate::state::AppState;
@@ -96,6 +98,8 @@ struct SavedItemSummary {
     source: String,
     title: String,
     notes: String,
+    /// 侧边栏「批注模式」对照的轻量批注（独立于 `items.notes`，绝不进 Obsidian），与应用内批注按钮共用。
+    annotation: String,
     tags: Vec<String>,
     /// 已同步到 vault 的相对路径；未同步为 null（侧边栏据此决定「在 Obsidian 中打开」是否可点）。
     obsidian_path: Option<String>,
@@ -124,6 +128,24 @@ struct NoteResponse {
     obsidian_path: Option<String>,
 }
 
+/// `POST /annotation` —— 侧边栏「批注模式」保存轻量批注（独立于 Obsidian 笔记）。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AnnotationRequest {
+    url: String,
+    #[serde(default)]
+    annotation: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AnnotationResponse {
+    ok: bool,
+    item_id: i64,
+    annotation: String,
+    updated_at: i64,
+}
+
 /// 409 冲突响应：带上服务端当前内容，让侧边栏能展示「哪边更新」。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -146,6 +168,11 @@ struct ObsidianStatusResponse {
     ok: bool,
     enabled: bool,
     vault_path: String,
+    /// vault 名：插件离线自拼 `obsidian://new` 时，`vault` 参数要的是**名**而非路径
+    /// （Rust 侧 `open_in_obsidian` 同样用 `settings.vault_name`，两边必须一致）。
+    vault_name: String,
+    /// vault 内的子目录，插件离线拼 `file` 相对路径时使用。
+    subdir: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -273,8 +300,15 @@ fn handle(
         (Method::Get, "/item") => handle_lookup(pool, request.url()),
         (Method::Post, "/capture") => handle_capture(request, pool, app),
         (Method::Post, "/note") => handle_note(request, pool, app),
+        (Method::Post, "/annotation") => handle_annotation(request, pool),
         (Method::Get, "/obsidian/status") => handle_obsidian_status(app),
+        (Method::Get, "/obsidian/files") => handle_obsidian_files(app, request.url()),
         (Method::Post, "/obsidian/open") => handle_obsidian_open(request, pool, app),
+        (Method::Post, "/obsidian/create") => handle_obsidian_create(request, pool, app),
+        (Method::Post, "/obsidian/claim") => handle_obsidian_claim(request, pool),
+        (Method::Post, "/obsidian/link") => handle_obsidian_link(request, pool, app),
+        (Method::Post, "/obsidian/unlink") => handle_obsidian_unlink(request, pool),
+        (Method::Post, "/obsidian/sync") => handle_obsidian_sync(app),
         _ => json(404, &ErrorResponse::new("未知接口")),
     }
 }
@@ -329,6 +363,10 @@ fn handle_lookup(pool: &SqlitePool, url: &str) -> Response<Cursor<Vec<u8>>> {
         Ok(Some(item)) => {
             let tags = tauri::async_runtime::block_on(db::item_tag_names(pool, item.id))
                 .unwrap_or_default();
+            // handle_lookup 是同步的（外层已 block_on 过），批注查询同样要 block_on 包一层。
+            let annotation =
+                tauri::async_runtime::block_on(db::get_annotation(pool, item.id))
+                    .unwrap_or_default();
             json(
                 200,
                 &ItemLookupResponse {
@@ -339,6 +377,7 @@ fn handle_lookup(pool: &SqlitePool, url: &str) -> Response<Cursor<Vec<u8>>> {
                         source: item.source,
                         title: item.title,
                         notes: item.notes,
+                        annotation,
                         tags,
                         obsidian_path: item.obsidian_path,
                         updated_at: item.updated_at,
@@ -1027,6 +1066,49 @@ fn handle_note(
     }
 }
 
+/// `POST /annotation` —— 侧边栏「批注模式」保存轻量批注。
+///
+/// 批注独立于 `items.notes`（Obsidian 笔记），只落本地 `annotations` 表，**绝不进 Obsidian**。
+/// 与应用内每条收藏下方的「批注按钮」共用同一份数据，因此两端天然同步。
+fn handle_annotation(
+    request: &mut Request,
+    pool: &SqlitePool,
+) -> Response<Cursor<Vec<u8>>> {
+    let body = match read_body(request) {
+        Ok(body) => body,
+        Err(error) => return json(400, &ErrorResponse::new(&error)),
+    };
+    let payload: AnnotationRequest = match serde_json::from_str(&body) {
+        Ok(payload) => payload,
+        Err(error) => return json(400, &ErrorResponse::new(&format!("请求体解析失败：{error}"))),
+    };
+    let url = payload.url.trim().to_string();
+    if url.is_empty() {
+        return json(400, &ErrorResponse::new("url 不能为空"));
+    }
+
+    let found = match tauri::async_runtime::block_on(lookup_item(pool, &url)) {
+        Ok(Some(item)) => item,
+        Ok(None) => {
+            return json(404, &ErrorResponse::new("这一页还没收藏，先在「收藏」里收进来"))
+        }
+        Err(error) => return json(500, &ErrorResponse::new(&error.to_string())),
+    };
+
+    match tauri::async_runtime::block_on(db::set_annotation(pool, found.id, &payload.annotation)) {
+        Ok(updated_at) => json(
+            200,
+            &AnnotationResponse {
+                ok: true,
+                item_id: found.id,
+                annotation: payload.annotation,
+                updated_at,
+            },
+        ),
+        Err(error) => json(500, &ErrorResponse::new(&error.to_string())),
+    }
+}
+
 /// `GET /obsidian/status` —— 侧边栏据此决定是否显示「同步到 Obsidian」相关 UI。
 fn handle_obsidian_status(app: &AppHandle) -> Response<Cursor<Vec<u8>>> {
     let state = &*app.state::<AppState>();
@@ -1037,6 +1119,8 @@ fn handle_obsidian_status(app: &AppHandle) -> Response<Cursor<Vec<u8>>> {
             ok: true,
             enabled: settings.enabled,
             vault_path: settings.vault_path,
+            vault_name: settings.vault_name,
+            subdir: settings.subdir,
         },
     )
 }
@@ -1075,6 +1159,389 @@ fn handle_obsidian_open(
     };
     match obsidian::open_in_obsidian(&settings, &item) {
         Ok(()) => json(200, &OkResponse { ok: true }),
+        Err(error) => json(500, &ErrorResponse::new(&error.to_string())),
+    }
+}
+
+/// `POST /obsidian/claim` —— 侧边栏离线自拼 `obsidian://new` 建好文件后上报路径。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaimRequest {
+    url: String,
+    /// vault 内的相对路径（插件离线 `obsidian://new` 时实际使用的那个 `file` 值）。
+    path: String,
+}
+
+/// `POST /obsidian/claim` —— 认领插件离线时已在 vault 建好的笔记文件。
+///
+/// 离线时插件用 `obsidian://new` 在 vault 建了文件（路径由插件按 `subdir/标题.md` 自算），
+/// 但 Rust 侧 `item.obsidian_path` 仍为空。等 app 同步时会走 `resolve_unique_rel`：
+/// 目标文件已存在、却因不含 `collector_id` frontmatter 被判成「非己建」，于是消歧
+/// **再建一个** → 重复文件。这里先把路径认领下来（仅在为空时写），之后
+/// `write_or_update_note` 就会命中「已有映射优先更新」分支，更新原文件而非新建。
+fn handle_obsidian_claim(request: &mut Request, pool: &SqlitePool) -> Response<Cursor<Vec<u8>>> {
+    let body = match read_body(request) {
+        Ok(body) => body,
+        Err(error) => return json(400, &ErrorResponse::new(&error)),
+    };
+    let payload: ClaimRequest = match serde_json::from_str(&body) {
+        Ok(payload) => payload,
+        Err(error) => return json(400, &ErrorResponse::new(&format!("请求体解析失败：{error}"))),
+    };
+    let path = payload.path.trim().trim_start_matches('/').to_string();
+    if path.is_empty() {
+        return json(400, &ErrorResponse::new("path 不能为空"));
+    }
+    // 挡掉绝对路径与 `..` 逃逸。真正写文件时 obsidian.rs 还有 ensure_within_vault 兜底，
+    // 这里先拒绝明显非法值，避免往库里塞一条越界的相对路径。
+    if path.split('/').any(|part| part == "..") {
+        return json(400, &ErrorResponse::new("path 不允许包含 .."));
+    }
+
+    let found = match tauri::async_runtime::block_on(lookup_item(pool, payload.url.trim())) {
+        Ok(Some(item)) => item,
+        Ok(None) => return json(404, &ErrorResponse::new("这一页还没收藏")),
+        Err(error) => return json(500, &ErrorResponse::new(&error.to_string())),
+    };
+
+    // 已有映射就不动：离线重复点「打开」不必反复覆盖，也不挤掉用户手动改过的路径。
+    match tauri::async_runtime::block_on(db::get_item_obsidian_path(pool, found.id)) {
+        Ok(Some(_)) => return json(200, &OkResponse { ok: true }),
+        Ok(None) => {}
+        Err(error) => return json(500, &ErrorResponse::new(&error.to_string())),
+    }
+
+    match tauri::async_runtime::block_on(db::set_item_obsidian_path(pool, found.id, &path)) {
+        Ok(()) => json(200, &OkResponse { ok: true }),
+        Err(error) => json(500, &ErrorResponse::new(&error.to_string())),
+    }
+}
+
+/// `POST /obsidian/create` —— 在 vault 里为这条收藏新建一个笔记文件并关联。
+///
+/// 与 `open_in_obsidian`（走 `obsidian://new` 让 Obsidian 自己建）不同，这里由 Rust 直接
+/// 落盘一个带托管区的笔记，并回写 `items.obsidian_path`，侧边栏随即解锁编辑器。
+/// 不需要 Obsidian 在线也能建好文件（只是暂时无法在 Obsidian 里看到）。
+fn handle_obsidian_create(
+    request: &mut Request,
+    pool: &SqlitePool,
+    app: &AppHandle,
+) -> Response<Cursor<Vec<u8>>> {
+    let body = match read_body(request) {
+        Ok(body) => body,
+        Err(error) => return json(400, &ErrorResponse::new(&error)),
+    };
+    let payload: NoteRequest = match serde_json::from_str(&body) {
+        Ok(payload) => payload,
+        Err(error) => return json(400, &ErrorResponse::new(&format!("请求体解析失败：{error}"))),
+    };
+    let found = match tauri::async_runtime::block_on(lookup_item(pool, payload.url.trim())) {
+        Ok(Some(item)) => item,
+        Ok(None) => return json(404, &ErrorResponse::new("这一页还没收藏")),
+        Err(error) => return json(500, &ErrorResponse::new(&error.to_string())),
+    };
+    let state = &*app.state::<AppState>();
+    let settings = obsidian::load_settings(&state.data_dir);
+    if !settings.enabled {
+        return json(400, &ErrorResponse::new("Obsidian 联动未开启"));
+    }
+    let item = match tauri::async_runtime::block_on(db::get_item(pool, found.id)) {
+        Ok(item) => item,
+        Err(error) => return json(500, &ErrorResponse::new(&error.to_string())),
+    };
+    match obsidian::write_or_update_note(&settings, &item) {
+        Ok(rel) => match tauri::async_runtime::block_on(db::set_item_obsidian_path(pool, found.id, &rel)) {
+            Ok(()) => json(200, &OkResponse { ok: true }),
+            Err(error) => json(500, &ErrorResponse::new(&error.to_string())),
+        },
+        Err(error) => json(500, &ErrorResponse::new(&error.to_string())),
+    }
+}
+
+/// `GET /obsidian/files?q=` —— 列出 vault 里可供关联的 markdown 笔记。
+///
+/// 浏览器扩展碰不到本地文件系统、也弹不了系统文件对话框，所以「让用户挑一个已有笔记」
+/// 只能由 Rust 侧扫描 vault 后把候选回传。这是自定义关联的唯一可行路径。
+const VAULT_FILES_LIMIT: usize = 30;
+/// 一轮最多扫多少个 md 文件。超大 vault 里全量扫会把这次请求拖死。
+const VAULT_SCAN_CAP: usize = 5000;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultFileNote {
+    /// vault 内相对路径（正斜杠），link 时原样回传
+    path: String,
+    /// 文件名（不含 .md），仅用于展示
+    name: String,
+    /// 这篇笔记里是否已有托管区（已被 collector 接管的会显示成「已关联」）
+    managed: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultFilesResponse {
+    ok: bool,
+    files: Vec<VaultFileNote>,
+    /// 因达到扫描上限，结果可能不完整
+    truncated: bool,
+}
+
+fn handle_obsidian_files(app: &AppHandle, url: &str) -> Response<Cursor<Vec<u8>>> {
+    let state = app.state::<AppState>();
+    let settings = obsidian::load_settings(&state.data_dir);
+    let empty = || json(200, &VaultFilesResponse { ok: true, files: vec![], truncated: false });
+    if !settings.enabled || settings.vault_path.is_empty() {
+        return empty();
+    }
+    let vault = Path::new(&settings.vault_path);
+    if !vault.is_dir() {
+        return empty();
+    }
+    let query = query_param(url, "q")
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
+    let (mut files, truncated) = scan_vault_notes(vault, &query, VAULT_FILES_LIMIT);
+    // `managed` 要读文件内容，只对最终返回的那几十个做，别把整个 vault 读一遍。
+    for file in &mut files {
+        file.managed = fs::read_to_string(vault.join(&file.path))
+            .map(|content| obsidian::has_managed_zone(&content))
+            .unwrap_or(false);
+    }
+    json(200, &VaultFilesResponse { ok: true, files, truncated })
+}
+
+/// 递归收集候选笔记，返回按修改时间倒序的前 `limit` 条。
+///
+/// 最近改过的排前面：用户多半想关联刚动过的那篇。
+fn scan_vault_notes(
+    vault: &Path,
+    query: &str,
+    limit: usize,
+) -> (Vec<VaultFileNote>, bool) {
+    let mut candidates: Vec<(String, String, i64)> = Vec::new();
+    let mut truncated = false;
+    collect_md_files(vault, vault, query, VAULT_SCAN_CAP, &mut candidates, &mut truncated);
+    candidates.sort_by(|a, b| b.2.cmp(&a.2));
+    let files = candidates
+        .into_iter()
+        .take(limit)
+        .map(|(path, name, _)| VaultFileNote { path, name, managed: false })
+        .collect();
+    (files, truncated)
+}
+
+fn collect_md_files(
+    root: &Path,
+    dir: &Path,
+    query: &str,
+    cap: usize,
+    out: &mut Vec<(String, String, i64)>,
+    truncated: &mut bool,
+) {
+    if out.len() >= cap {
+        *truncated = true;
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if out.len() >= cap {
+            *truncated = true;
+            return;
+        }
+        let Ok(file_type) = entry.file_type() else { continue };
+        let name = entry.file_name().to_string_lossy().to_string();
+        if file_type.is_dir() {
+            // 跳过 .obsidian / .trash / .git 等隐藏目录
+            if name.starts_with('.') {
+                continue;
+            }
+            collect_md_files(root, &entry.path(), query, cap, out, truncated);
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let Some(stem) = name
+            .strip_suffix(".md")
+            .or_else(|| name.strip_suffix(".MD"))
+        else {
+            continue;
+        };
+        let Ok(rel) = entry.path().strip_prefix(root).map(|p| p.to_path_buf()) else {
+            continue;
+        };
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if !query.is_empty()
+            && !stem.to_lowercase().contains(query)
+            && !rel_str.to_lowercase().contains(query)
+        {
+            continue;
+        }
+        let mtime = fs::metadata(entry.path())
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        out.push((rel_str, stem.to_string(), mtime));
+    }
+}
+
+/// `POST /obsidian/link` —— 把一条收藏关联到用户自选的笔记文件。
+///
+/// 与 claim 的区别：claim 只登记路径（文件是插件离线建的），link 还要**往用户原有文件里
+/// 追加托管区**，否则三方同步无从下手。用户原有内容一字不动。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LinkRequest {
+    url: String,
+    /// vault 内相对路径（来自 `GET /obsidian/files`）
+    path: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LinkResponse {
+    ok: bool,
+    path: String,
+}
+
+fn handle_obsidian_link(
+    request: &mut Request,
+    pool: &SqlitePool,
+    app: &AppHandle,
+) -> Response<Cursor<Vec<u8>>> {
+    let body = match read_body(request) {
+        Ok(body) => body,
+        Err(error) => return json(400, &ErrorResponse::new(&error)),
+    };
+    let payload: LinkRequest = match serde_json::from_str(&body) {
+        Ok(payload) => payload,
+        Err(error) => return json(400, &ErrorResponse::new(&format!("请求体解析失败：{error}"))),
+    };
+    let rel = payload.path.trim().trim_start_matches('/').to_string();
+    if rel.is_empty() {
+        return json(400, &ErrorResponse::new("path 不能为空"));
+    }
+    if rel.split('/').any(|part| part == "..") {
+        return json(400, &ErrorResponse::new("path 不允许包含 .."));
+    }
+
+    let found = match tauri::async_runtime::block_on(lookup_item(pool, payload.url.trim())) {
+        Ok(Some(item)) => item,
+        Ok(None) => return json(404, &ErrorResponse::new("这一页还没收藏")),
+        Err(error) => return json(500, &ErrorResponse::new(&error.to_string())),
+    };
+
+    let state = app.state::<AppState>();
+    let settings = obsidian::load_settings(&state.data_dir);
+    if !settings.enabled || settings.vault_path.is_empty() {
+        return json(400, &ErrorResponse::new("Obsidian 联动未启用或未配置仓库目录"));
+    }
+    let vault = Path::new(&settings.vault_path);
+
+    // 关联 = **整篇接管**：把文件原文读出来当正文写进 `items.notes`，用户文件一字不改。
+    //
+    // 早期版本会在文件末尾追加一对托管标记，于是 app 只认标记之间的那一小段 ——
+    // 用户关联一篇写了几百字的笔记，侧边栏却只能看到一个空框。现在整篇就是正文。
+    //
+    // 唯一例外：文件本来就有托管标记（关联到了 collector 自己建的笔记）时仍按托管区取，
+    // 否则标记会被当成正文读进来，写回时套娃。
+    let body = match obsidian::link_item_to_note_file(vault, &rel) {
+        Ok(body) => body,
+        Err(error) => return json(500, &ErrorResponse::new(&error.to_string())),
+    };
+    if !body.trim().is_empty() {
+        // 直接写库，**绕过** notes::save_notes：那条路会触发 Obsidian 推送，
+        // 而内容本来就是从文件读来的，推回去相当于原地打转（还会覆盖同步快照）。
+        if let Err(error) =
+            tauri::async_runtime::block_on(db::update_item_notes(pool, found.id, &body))
+        {
+            eprintln!("[obsidian] 回写关联笔记内容失败（继续关联）：{error}");
+        }
+    }
+
+    // 取完整条目（下面的同步快照要用刚写进去的正文）。
+    // 放在导入**之后**取：这样快照与文件内容是一致的。
+    let item = match tauri::async_runtime::block_on(db::get_item(pool, found.id)) {
+        Ok(item) => item,
+        Err(error) => return json(500, &ErrorResponse::new(&error.to_string())),
+    };
+
+    if let Err(error) = tauri::async_runtime::block_on(db::set_item_obsidian_path(pool, found.id, &rel))
+    {
+        return json(500, &ErrorResponse::new(&error.to_string()));
+    }
+
+    // 建立 base 快照：刚写进文件的就是 `item.notes`，三方比对由此起步。
+    // 少了它，下一轮轮询会以为「文件变了」，把用户刚关联的内容又推回去。
+    let abs = vault.join(&rel);
+    let (file_mtime, file_size) = match fs::metadata(&abs) {
+        Ok(meta) => (
+            meta.modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64),
+            Some(meta.len() as i64),
+        ),
+        Err(_) => (None, None),
+    };
+    if let Err(error) = tauri::async_runtime::block_on(db::upsert_obsidian_sync_state(
+        pool,
+        found.id,
+        &rel,
+        &obsidian::hash_notes(item.notes.trim()),
+        file_mtime,
+        file_size,
+    )) {
+        return json(500, &ErrorResponse::new(&error.to_string()));
+    }
+
+    json(200, &LinkResponse { ok: true, path: rel })
+}
+
+/// `POST /obsidian/unlink` —— 取消这条收藏与笔记文件的关联。
+///
+/// 只解除关系，**不删 vault 里的文件**（那是用户的东西）；`obsidian_path` 清空后，
+/// 下次写笔记会按标题重新生成文件。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UnlinkRequest {
+    url: String,
+}
+
+fn handle_obsidian_unlink(request: &mut Request, pool: &SqlitePool) -> Response<Cursor<Vec<u8>>> {
+    let body = match read_body(request) {
+        Ok(body) => body,
+        Err(error) => return json(400, &ErrorResponse::new(&error)),
+    };
+    let payload: UnlinkRequest = match serde_json::from_str(&body) {
+        Ok(payload) => payload,
+        Err(error) => return json(400, &ErrorResponse::new(&format!("请求体解析失败：{error}"))),
+    };
+    let found = match tauri::async_runtime::block_on(lookup_item(pool, payload.url.trim())) {
+        Ok(Some(item)) => item,
+        Ok(None) => return json(404, &ErrorResponse::new("这一页还没收藏")),
+        Err(error) => return json(500, &ErrorResponse::new(&error.to_string())),
+    };
+    match tauri::async_runtime::block_on(db::unlink_obsidian_note(pool, found.id)) {
+        Ok(()) => json(200, &OkResponse { ok: true }),
+        Err(error) => json(500, &ErrorResponse::new(&error.to_string())),
+    }
+}
+
+/// `POST /obsidian/sync` —— 立刻跑一轮双向同步（不等下一轮轮询）。
+///
+/// 轮询默认 30 秒一次，用户在 Obsidian 里改完往往不想干等；侧边栏的「立即同步」
+/// 按钮就打到这里。
+fn handle_obsidian_sync(app: &AppHandle) -> Response<Cursor<Vec<u8>>> {
+    let state = app.state::<AppState>();
+    let report = tauri::async_runtime::block_on(obsidian_sync::sync_once(&state));
+    match report {
+        Ok(report) => json(200, &serde_json::json!({ "ok": true, "report": report })),
         Err(error) => json(500, &ErrorResponse::new(&error.to_string())),
     }
 }

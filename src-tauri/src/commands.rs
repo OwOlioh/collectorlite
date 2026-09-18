@@ -9,7 +9,8 @@ use crate::cover_cache;
 use crate::db;
 use crate::error::AppError;
 use crate::models::{
-    BilibiliProfile, BridgeInfo, CollectionExport, CollectionInfo, CoverCacheStatus, ExportItem,
+    BilibiliProfile, BridgeInfo, CollectionExport, CollectionInfo, CollectionStats, CoverCacheStatus,
+    DuplicateGroup, ExportItem,
     ExportTag, ImportPreview, ImportRequest, ImportResult, ItemFilters, ItemTagAssignment,
     NeteaseSyncReport, PartitionSuggestion, QrSession, QrStatus, QuickCaptureRequest,
     QuickCaptureResult, RecacheResult, Tag, TagCategory, TagInput, TrackResolveResult, VideoItem,
@@ -504,6 +505,41 @@ pub async fn list_trash(state: State<'_, AppState>) -> Result<Vec<VideoItem>, St
 }
 
 #[tauri::command]
+pub async fn get_collection_stats(
+    state: State<'_, AppState>,
+    range_days: i64,
+) -> Result<CollectionStats, String> {
+    db::get_collection_stats(&state.pool, range_days)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn get_duplicate_groups(
+    state: State<'_, AppState>,
+) -> Result<Vec<DuplicateGroup>, String> {
+    db::find_duplicate_groups(&state.pool)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn merge_duplicate_items(
+    state: State<'_, AppState>,
+    keep_id: i64,
+    remove_ids: Vec<i64>,
+) -> Result<(), String> {
+    let merged = db::merge_duplicate_items(&state.pool, keep_id, &remove_ids)
+        .await
+        .map_err(|error| error.to_string())?;
+    // 合并后同步 Obsidian（若启用）：失败不阻塞合并本身
+    if !merged.trim().is_empty() {
+        let _ = crate::notes::save_notes(&state, keep_id, &merged).await;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn get_trash_count(state: State<'_, AppState>) -> Result<i64, String> {
     db::get_trash_count(&state.pool)
         .await
@@ -681,6 +717,37 @@ pub async fn update_item_notes(
         .map_err(|error| error.to_string())
 }
 
+/// 读取某条收藏的轻量批注（独立于 Obsidian 笔记 `items.notes`）。
+///
+/// 批注与应用内每条收藏下方的「批注按钮」、浏览器侧边栏「批注模式」共用同一份数据，
+/// 三者互相同步；批注绝不进 Obsidian。
+#[tauri::command]
+pub async fn get_item_annotation(
+    state: State<'_, AppState>,
+    item_id: i64,
+) -> Result<String, String> {
+    db::get_annotation(&state.pool, item_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// 写入某条收藏的轻量批注，返回刷新后的 item 快照。
+///
+/// 只落本地 `annotations` 表，不触发 Obsidian 同步（那是 `items.notes` 的职责）。
+#[tauri::command]
+pub async fn update_item_annotation(
+    state: State<'_, AppState>,
+    item_id: i64,
+    annotation: String,
+) -> Result<VideoItem, String> {
+    db::set_annotation(&state.pool, item_id, &annotation)
+        .await
+        .map_err(|error| error.to_string())?;
+    db::get_item(&state.pool, item_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub fn open_url(url: String) -> Result<(), String> {
     webbrowser::open(&url).map_err(|error| error.to_string())
@@ -831,14 +898,9 @@ pub async fn export_items_to_obsidian(
             continue;
         }
         match obsidian::write_or_update_note(&settings, &item) {
-            Ok(Some(rel)) => {
+            Ok(rel) => {
                 let _ = db::set_item_obsidian_path(&state.pool, *id, &rel).await;
                 exported += 1;
-            }
-            Ok(None) => {
-                if first_error.is_none() {
-                    first_error = Some("笔记中的托管标记已被手动移除，已跳过".into());
-                }
             }
             Err(e) => {
                 if first_error.is_none() {
@@ -901,6 +963,72 @@ pub fn regenerate_bridge_token(state: State<'_, AppState>) -> Result<BridgeInfo,
         running: port > 0,
         token,
     })
+}
+
+/// 浏览器扩展后台桥是否设为「开机自启」（仅 Windows 有效）。
+///
+/// 开启后 `bili-collector.exe --bridge-only` 会在登录时静默拉起，
+/// 这样即使没打开主界面，浏览器扩展也能照常收藏。非 Windows 恒返回 false。
+#[tauri::command]
+pub fn get_bridge_autostart() -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        Ok(read_bridge_autostart())
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(false)
+    }
+}
+
+/// 设置浏览器扩展后台桥是否「开机自启」。
+///
+/// - 开启：在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 写入
+///   `collectorlite-bridge` = `"<exe 路径>" --bridge-only`。
+/// - 关闭：删除该注册表值。
+/// - 非 Windows 平台不支持，恒返回 false。
+#[tauri::command]
+pub fn set_bridge_autostart(enabled: bool) -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        write_bridge_autostart(enabled).map(|()| enabled)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = enabled;
+        Ok(false)
+    }
+}
+
+#[cfg(windows)]
+fn read_bridge_autostart() -> bool {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
+    let reg_path = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+    let Ok(key) =
+        winreg::RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(reg_path, KEY_READ)
+    else {
+        return false;
+    };
+    key.get_value::<String, _>("collectorlite-bridge").is_ok()
+}
+
+#[cfg(windows)]
+fn write_bridge_autostart(enabled: bool) -> Result<(), String> {
+    use winreg::enums::HKEY_CURRENT_USER;
+    let reg_path = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+    let key = winreg::RegKey::predef(HKEY_CURRENT_USER)
+        .create_subkey(reg_path)
+        .map(|(k, _)| k)
+        .map_err(|e| e.to_string())?;
+    if enabled {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let value = format!("\"{}\" --bridge-only", exe.to_string_lossy());
+        key.set_value("collectorlite-bridge", &value)
+            .map_err(|e| e.to_string())?;
+    } else {
+        let _ = key.delete_value("collectorlite-bridge");
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -2331,3 +2459,5 @@ pub async fn nowplaying_is_playing() -> bool {
         .await
         .unwrap_or(false)
 }
+
+// now_playing_progress 命令已移除（手动时间轴，时间戳不再走后端进度快照）。

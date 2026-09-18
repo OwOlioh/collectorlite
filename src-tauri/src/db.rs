@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha384};
 use sqlx::migrate::Migrator;
@@ -11,8 +11,9 @@ use sqlx::{FromRow, QueryBuilder, Row, Sqlite, SqlitePool};
 
 use crate::error::AppError;
 use crate::models::{
-    CollectionExport, CollectionInfo, ExportItem, ExportTag, ExternalItem, ImportResult,
-    ItemFilters, Tag, TagCategory, TagInput, VideoItem,
+    CollectionExport, CollectionInfo, CollectionStats, DuplicateGroup, DuplicateItemPreview,
+    ExportItem, ExportTag, ExternalItem, ImportResult, ItemFilters, MonthCount, SourceCount, Tag,
+    TagCategory, TagCountStat, TagInput, VideoItem,
 };
 
 pub fn now_seconds() -> i64 {
@@ -132,7 +133,10 @@ pub async fn connect(path: &std::path::Path) -> Result<SqlitePool, AppError> {
     let options = SqliteConnectOptions::from_str(path.to_string_lossy().as_ref())?
         .create_if_missing(true)
         .foreign_keys(true)
-        .journal_mode(SqliteJournalMode::Wal);
+        .journal_mode(SqliteJournalMode::Wal)
+        // 后台桥进程会与 GUI 进程**并发写同一 WAL 库**：给写操作一个重试窗口，
+        // 避免「database is locked (code 5)」直接失败。30s 足够覆盖正常争用。
+        .busy_timeout(Duration::from_secs(30));
     let pool = SqlitePoolOptions::new()
         .max_connections(4)
         .connect_with(options)
@@ -773,6 +777,31 @@ pub async fn get_item_obsidian_path(
             .fetch_optional(pool)
             .await?;
     Ok(row.and_then(|r| r.0))
+}
+
+/// 读取批注（批注模式用，独立于 Obsidian 笔记 `items.notes`，仅存本地 `annotations` 表）。
+/// 侧边栏「批注模式」与应用内每条收藏下方的「批注按钮」共用同一份数据，因此**绝不进 Obsidian**。
+pub async fn get_annotation(pool: &SqlitePool, item_id: i64) -> Result<String, AppError> {
+    let row = sqlx::query_as::<_, (Option<String>,)>("SELECT body FROM annotations WHERE item_id = ?")
+        .bind(item_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.and_then(|r| r.0).unwrap_or_default())
+}
+
+/// 写入 / 更新批注（upsert）。返回新的 `updated_at`，供前端乐观锁比对。
+pub async fn set_annotation(pool: &SqlitePool, item_id: i64, body: &str) -> Result<i64, AppError> {
+    let ts = now_seconds();
+    sqlx::query(
+        "INSERT INTO annotations (item_id, body, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(item_id) DO UPDATE SET body = excluded.body, updated_at = excluded.updated_at",
+    )
+    .bind(item_id)
+    .bind(body)
+    .bind(ts)
+    .execute(pool)
+    .await?;
+    Ok(ts)
 }
 
 /// 快速入库 / 侧边栏笔记面板用：按 `(source, external_id)` 查已有条目。
@@ -1458,6 +1487,708 @@ pub async fn get_trash_count(pool: &SqlitePool) -> Result<i64, AppError> {
             .fetch_one(pool)
             .await?;
     Ok(count)
+}
+
+/// 收藏库统计聚合：总数 / 星标数 / 无标签数 + 来源分布 / 标签 Top10 / 按月时间线。
+/// 全部在 SQL 侧聚合，不把全量 items 拉到前端。
+///
+/// `range_days`：时间窗口（天）。`0` 表示全部；`>0` 时所有聚合只统计
+/// `favorite_time >= now - range_days*86400` 的收藏（统计页「近 30 天 / 近 90 天」筛选用）。
+pub async fn get_collection_stats(
+    pool: &SqlitePool,
+    range_days: i64,
+) -> Result<CollectionStats, AppError> {
+    // 时间窗口条件片段（无别名表用 favorite_time，别名 i 的查询用 i.favorite_time）
+    let tf = if range_days > 0 { " AND favorite_time >= ?" } else { "" };
+    let tf_i = if range_days > 0 { " AND i.favorite_time >= ?" } else { "" };
+    // format! 的结果必须绑到 let，否则临时 String 在语句结束即释放，query 借用会悬空
+    let cutoff: i64 = if range_days > 0 {
+        now_seconds() - range_days * 86400
+    } else {
+        0
+    };
+
+    let total: i64 = {
+        let sql = format!("SELECT COUNT(*) FROM items WHERE deleted_at IS NULL{tf}");
+        let mut q = sqlx::query_scalar(&sql);
+        if range_days > 0 {
+            q = q.bind(cutoff);
+        }
+        q.fetch_one(pool).await?
+    };
+
+    let starred_count: i64 = {
+        let sql = format!(
+            "SELECT COUNT(*) FROM items WHERE deleted_at IS NULL AND starred = 1{tf}"
+        );
+        let mut q = sqlx::query_scalar(&sql);
+        if range_days > 0 {
+            q = q.bind(cutoff);
+        }
+        q.fetch_one(pool).await?
+    };
+
+    let untagged_count: i64 = {
+        let sql = format!(
+            "SELECT COUNT(*) FROM items i \
+             WHERE i.deleted_at IS NULL \
+             AND NOT EXISTS (SELECT 1 FROM item_tags it WHERE it.item_id = i.id){tf_i}"
+        );
+        let mut q = sqlx::query_scalar(&sql);
+        if range_days > 0 {
+            q = q.bind(cutoff);
+        }
+        q.fetch_one(pool).await?
+    };
+
+    let by_source: Vec<SourceCount> = {
+        let sql = format!(
+            "SELECT source, COUNT(*) AS count \
+             FROM items WHERE deleted_at IS NULL{tf} \
+             GROUP BY source ORDER BY count DESC"
+        );
+        let mut q = sqlx::query_as::<_, SourceCount>(&sql);
+        if range_days > 0 {
+            q = q.bind(cutoff);
+        }
+        q.fetch_all(pool).await?
+    };
+
+    let by_tag: Vec<TagCountStat> = {
+        let sql = format!(
+            "SELECT t.name AS name, t.color AS color, COUNT(*) AS count \
+             FROM item_tags it \
+             JOIN tags t ON t.id = it.tag_id \
+             JOIN items i ON i.id = it.item_id \
+             WHERE i.deleted_at IS NULL{tf_i} \
+             GROUP BY t.id ORDER BY count DESC LIMIT 10"
+        );
+        let mut q = sqlx::query_as::<_, TagCountStat>(&sql);
+        if range_days > 0 {
+            q = q.bind(cutoff);
+        }
+        q.fetch_all(pool).await?
+    };
+
+    let by_month: Vec<MonthCount> = {
+        let sql = format!(
+            "SELECT strftime('%Y-%m', datetime(favorite_time, 'unixepoch')) AS month, COUNT(*) AS count \
+             FROM items \
+             WHERE deleted_at IS NULL AND favorite_time IS NOT NULL AND favorite_time > 0{tf} \
+             GROUP BY month ORDER BY month"
+        );
+        let mut q = sqlx::query_as::<_, MonthCount>(&sql);
+        if range_days > 0 {
+            q = q.bind(cutoff);
+        }
+        q.fetch_all(pool).await?
+    };
+
+    Ok(CollectionStats {
+        total,
+        starred_count,
+        untagged_count,
+        by_source,
+        by_tag,
+        by_month,
+    })
+}
+
+/// 归一化 `source_url` 用于跨源重复判定。
+///
+/// 规则（host 感知，避免误判）：
+/// - 忽略 http/https 差异；host 小写、去前导 `www.`
+/// - 丢 fragment（但网易云 `music.163.com/#/song?id=123` 的 id 在 fragment 里，
+///   需还原成 `music.163.com/song?id=123`）
+/// - 网易云（`music.163.com`）保留查询串（其 id 在 `?id=` 里）
+/// - 其余站点丢查询串（去除 utm_*/spm/from/share_* 等跟踪参数，代价是同站仅 query 不同的
+///   两条会判同——对这些站点可接受）；去尾部斜杠（保留根 `/`）
+/// 解析失败 / 空串 → 返回空串（调用方据此跳过，避免把空 URL 聚成一堆假重复）。
+fn normalize_url(raw: &str) -> String {
+    let s = raw.trim();
+    if s.is_empty() {
+        return String::new();
+    }
+    // 去掉 scheme://
+    let body = match s.find("://") {
+        Some(i) => &s[i + 3..],
+        None => s,
+    };
+    // 分离 fragment
+    let (body, fragment) = match body.find('#') {
+        Some(i) => (&body[..i], &body[i + 1..]),
+        None => (body, ""),
+    };
+    // 网易云：fragment 形如 `song?id=123` / `playlist?id=123`，还原为 path?query
+    if let Some(rest) = fragment.strip_prefix('/') {
+        if rest.starts_with("song?id=") || rest.starts_with("playlist?id=") {
+            let host = body.split('/').next().unwrap_or("").to_lowercase();
+            let host = host.strip_prefix("www.").unwrap_or(&host);
+            return format!("{}/{}", host, rest);
+        }
+    }
+    // 分离 host 与 path?query
+    let (host, rest) = match body.find('/') {
+        Some(i) => (&body[..i], &body[i..]),
+        None => (body, ""),
+    };
+    let mut host = host.to_lowercase();
+    if let Some(stripped) = host.strip_prefix("www.") {
+        host = stripped.to_string();
+    }
+    let keep_query = host == "music.163.com";
+    // 仅网易云保留查询串；其余站点丢查询串
+    let path = if keep_query {
+        rest.to_string()
+    } else {
+        match rest.find('?') {
+            Some(i) => rest[..i].to_string(),
+            None => rest.to_string(),
+        }
+    };
+    // 去尾部斜杠（保留根 `/`）
+    let path = if !keep_query && path.len() > 1 {
+        path.strip_suffix('/').unwrap_or(&path).to_string()
+    } else {
+        path
+    };
+    format!("{}{}", host, path)
+}
+
+// ---- Obsidian 双向同步：同步快照与进程租约 ------------------------------------
+
+/// 一条已关联到 vault 笔记的收藏。
+///
+/// ⚠️ 刻意**不用** `ItemRow`：这条查询服务于后台轮询，只需要最小字段集，
+/// 多一列就多一处 `query_as` 漏列风险（见上方 `ITEM_ROW_COLUMNS` 的约定）。
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ObsidianLinkRow {
+    pub id: i64,
+    pub title: String,
+    pub notes: String,
+    pub obsidian_path: Option<String>,
+}
+
+/// `obsidian_sync_state` 的一行：三方合并判定用到的 base 快照。
+///
+/// ⚠️ 这几个字段目前只有 `base_hash` / `file_mtime` / `file_size` 会被读到，
+/// 其余的存在是因为 `query_as` 要按列名解码、且它们本身就是这条记录的身份信息，
+/// 留着便于排查（例如核对同步关系有没有串到别的条目上）。
+#[allow(dead_code)]
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ObsidianSyncRow {
+    pub item_id: i64,
+    pub rel_path: String,
+    pub base_hash: String,
+    pub file_mtime: Option<i64>,
+    pub file_size: Option<i64>,
+    pub synced_at: i64,
+}
+
+/// 取出所有已关联 vault 笔记的收藏（回收站内的不算，避免同步到已删条目）。
+pub async fn list_obsidian_links(pool: &SqlitePool) -> Result<Vec<ObsidianLinkRow>, AppError> {
+    let rows = sqlx::query_as::<_, ObsidianLinkRow>(
+        "SELECT id, title, notes, obsidian_path FROM items
+         WHERE obsidian_path IS NOT NULL AND obsidian_path <> '' AND deleted_at IS NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn get_obsidian_sync_state(
+    pool: &SqlitePool,
+    item_id: i64,
+) -> Result<Option<ObsidianSyncRow>, AppError> {
+    let row = sqlx::query_as::<_, ObsidianSyncRow>(
+        "SELECT item_id, rel_path, base_hash, file_mtime, file_size, synced_at
+         FROM obsidian_sync_state WHERE item_id = ?",
+    )
+    .bind(item_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+/// 写入（或刷新）一次同步后的快照。
+///
+/// 每次成功同步都**必须**更新这里的 `base_hash`：下一轮轮询靠「当前文件 == base」
+/// 判定无事发生，从而在数学上排除「自己写的文件又被自己发现」的死循环。
+pub async fn upsert_obsidian_sync_state(
+    pool: &SqlitePool,
+    item_id: i64,
+    rel_path: &str,
+    base_hash: &str,
+    file_mtime: Option<i64>,
+    file_size: Option<i64>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "INSERT INTO obsidian_sync_state
+             (item_id, rel_path, base_hash, file_mtime, file_size, synced_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(item_id) DO UPDATE SET
+             rel_path = excluded.rel_path,
+             base_hash = excluded.base_hash,
+             file_mtime = excluded.file_mtime,
+             file_size = excluded.file_size,
+             synced_at = excluded.synced_at",
+    )
+    .bind(item_id)
+    .bind(rel_path)
+    .bind(base_hash)
+    .bind(file_mtime)
+    .bind(file_size)
+    .bind(now_seconds())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn delete_obsidian_sync_state(
+    pool: &SqlitePool,
+    item_id: i64,
+) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM obsidian_sync_state WHERE item_id = ?")
+        .bind(item_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 取消关联：清掉 `obsidian_path` 快照记录都删掉。
+///
+/// 用户在 Obsidian 里删了那个 md 文件时走这条路 —— 按约定**不静默重建文件**，
+/// 那很可能是用户有意为之。
+pub async fn unlink_obsidian_note(pool: &SqlitePool, item_id: i64) -> Result<(), AppError> {
+    sqlx::query("UPDATE items SET obsidian_path = NULL, updated_at = ? WHERE id = ?")
+        .bind(now_seconds())
+        .bind(item_id)
+        .execute(pool)
+        .await?;
+    delete_obsidian_sync_state(pool, item_id).await?;
+    Ok(())
+}
+
+/// 写笔记但**不触发 Obsidian 推送** —— 拉取方向专用。
+///
+/// 双向同步的拉取会更新 `items.notes`，若再走 `notes::save_notes` 就会把新内容
+/// 原样推回文件，形成无限往返。这里只落库，绝不经 Obsidian 那套 hooks。
+/// `updated_at` 必须刷新：侧边栏的乐观锁拿它当基准。
+pub async fn set_item_notes_without_push(
+    pool: &SqlitePool,
+    item_id: i64,
+    notes: &str,
+) -> Result<(), AppError> {
+    sqlx::query("UPDATE items SET notes = ?, updated_at = ? WHERE id = ?")
+        .bind(notes)
+        .bind(now_seconds())
+        .bind(item_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 尝试抢占双向同步的执行权（单条 SQL 保证原子性）。
+///
+/// 三种可抢占情形：表空 / 持有者就是自己 / 上次心跳已过期（进程可能崩了）。
+/// 抢占失败返回 false —— 说明另一个进程正在同步，本轮直接跳过即可。
+/// `rows_affected() == 0` 即 `ON CONFLICT` 的 WHERE 没通过，正好当作抢占失败。
+pub async fn try_acquire_obsidian_lease(
+    pool: &SqlitePool,
+    holder: &str,
+    stale_after_secs: i64,
+) -> Result<bool, AppError> {
+    let now = now_seconds();
+    let result = sqlx::query(
+        "INSERT INTO obsidian_sync_lease (id, holder, heartbeat_at)
+             VALUES (1, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+             holder = excluded.holder,
+             heartbeat_at = excluded.heartbeat_at
+         WHERE obsidian_sync_lease.holder = excluded.holder
+            OR obsidian_sync_lease.heartbeat_at <= ?",
+    )
+    .bind(holder)
+    .bind(now)
+    .bind(now - stale_after_secs)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+
+#[cfg(test)]
+mod normalize_url_tests {
+    use super::{bigrams, merge_notes, normalize_title, normalize_url, title_similarity};
+
+    #[test]
+    fn normalizes_cross_source_equivalence() {
+        // B站：带跟踪参数 / http 与 无参数（如浏览器书签）应判为同 key
+        assert_eq!(
+            normalize_url("https://www.bilibili.com/video/BV1xx?t=10&vd_source=abc"),
+            normalize_url("https://bilibili.com/video/BV1xx")
+        );
+        assert_eq!(
+            normalize_url("https://www.bilibili.com/video/BV1xx?t=10"),
+            "bilibili.com/video/BV1xx"
+        );
+        assert_eq!(
+            normalize_url("http://www.bilibili.com/video/BV1xx"),
+            "bilibili.com/video/BV1xx"
+        );
+
+        // 网易云：fragment 形式 / 无 fragment 形式 / 无 scheme 应都归一到同 key
+        assert_eq!(
+            normalize_url("https://music.163.com/#/song?id=123"),
+            normalize_url("https://music.163.com/song?id=123")
+        );
+        assert_eq!(
+            normalize_url("https://music.163.com/#/song?id=123"),
+            "music.163.com/song?id=123"
+        );
+        assert_eq!(
+            normalize_url("music.163.com/song?id=123"),
+            "music.163.com/song?id=123"
+        );
+
+        // 知乎：丢 utm 跟踪参数
+        assert_eq!(
+            normalize_url("https://www.zhihu.com/question/1/answer/2?utm_source=share"),
+            "zhihu.com/question/1/answer/2"
+        );
+
+        // 去尾部斜杠，但根路径不丢
+        assert_eq!(normalize_url("https://example.com/foo/"), "example.com/foo");
+        assert_eq!(normalize_url("https://example.com/"), "example.com/");
+
+        // 空串 / 纯空白 → 空（调用方据此跳过，避免假重复）
+        assert_eq!(normalize_url(""), "");
+        assert_eq!(normalize_url("   "), "");
+    }
+
+    #[test]
+    fn normalize_title_strips_punctuation_and_case() {
+        // 中文表意文字（如「高清」）保留，标点/括号丢弃；4K 与 Hello 间原无空格故相连
+        assert_eq!(normalize_title("【4K】Hello World (高清)"), "4khello world 高清");
+        assert_eq!(normalize_title("  Foo — BAR  "), "foo bar");
+    }
+
+    #[test]
+    fn title_similarity_detects_partial_dupes() {
+        // 同主体、局部追加转存者昵称/画质：containment=1.0，应判为疑似重复
+        let a = "【合集】年度最佳剪辑合辑";
+        let b = "【合集】年度最佳剪辑合辑（转自UP主XX）";
+        assert!(
+            title_similarity(a, b) >= 0.8,
+            "应判为疑似重复，实际={}",
+            title_similarity(a, b)
+        );
+        // 完全不同的标题：相似度低
+        assert!(title_similarity("如何学习 Rust", "今天天气真好") < 0.8);
+        // 完全相同
+        assert_eq!(title_similarity("同一标题", "同一标题"), 1.0);
+        // 任一为空
+        assert_eq!(title_similarity("", "x"), 0.0);
+    }
+
+    #[test]
+    fn merge_notes_keeps_keep_and_appends_unique() {
+        // keep 非空优先；空待删被忽略
+        assert_eq!(merge_notes("我的批注", &["", "别的"]), "我的批注\n---\n别的");
+        // keep 为空则取首个非空 remove
+        assert_eq!(merge_notes("", &["", "第一条"]), "第一条");
+        // 与 keep 相同 / 彼此相同则去重，不产生重复片段
+        assert_eq!(merge_notes("A", &["A", "A"]), "A");
+        assert_eq!(merge_notes("A", &["B", "B"]), "A\n---\nB");
+        // 多个不同待删片段都保留
+        assert_eq!(merge_notes("A", &["B", "C"]), "A\n---\nB\n---\nC");
+    }
+
+    #[test]
+    fn bigrams_handles_short_strings() {
+        let one = bigrams("啊");
+        assert!(one.contains("啊"));
+        let two = bigrams("测试");
+        assert!(two.contains("测试"));
+        assert!(bigrams("").is_empty());
+    }
+}
+
+/// 跨源重复项检测：按归一化 `source_url` 分组，返回 ≥2 条的组。
+/// 全部在 Rust 侧分组（不新增列、不改任何插入路径），调用方负责跳过空 URL。
+/// 模糊匹配阈值：标题 2-gram 重叠系数（containment）达到该值即视为疑似重复。
+/// 调高更保守（少误报），调低更激进（多召回）。仅用于「提示」，不触发任何自动操作。
+const FUZZY_THRESHOLD: f64 = 0.8;
+
+/// 并查集找根（用于模糊匹配的连通分量合并）。
+fn find_root(mut x: i64, parent: &std::collections::HashMap<i64, i64>) -> i64 {
+    while let Some(&p) = parent.get(&x) {
+        if p == x {
+            break;
+        }
+        x = p;
+    }
+    x
+}
+
+/// 标题相似度：字符 2-gram 的**重叠系数（containment）** = |A∩B| / min(|A|,|B|)，范围 [0,1]。
+/// 用 containment 而非 Jaccard：对中文「主体相同、末尾/开头追加转存者或画质标注」的重复更鲁棒
+/// （Jaccard 会被较长的标题稀释，而这类重复恰好是跨源收藏最常见的遗漏）。
+fn title_similarity(a: &str, b: &str) -> f64 {
+    let na = normalize_title(a);
+    let nb = normalize_title(b);
+    if na.is_empty() || nb.is_empty() {
+        return 0.0;
+    }
+    if na == nb {
+        return 1.0;
+    }
+    let grams_a = bigrams(&na);
+    let grams_b = bigrams(&nb);
+    let inter = grams_a.intersection(&grams_b).count();
+    let denom = grams_a.len().min(grams_b.len());
+    if denom == 0 {
+        return 0.0;
+    }
+    inter as f64 / denom as f64
+}
+
+/// 标题归一化：小写、丢标点（仅保留字母/数字/表意文字与空白）、折叠空白。
+/// 让「【4K】xxx (高清)」与「xxx」比较时更聚焦正文。
+fn normalize_title(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    for ch in title.chars() {
+        if ch.is_whitespace() {
+            out.push(' ');
+        } else if ch.is_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// 字符 2-gram 集合（长度 1 时退化为单字符），用于标题相似度比较。
+fn bigrams(s: &str) -> std::collections::HashSet<String> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut set = std::collections::HashSet::new();
+    if chars.is_empty() {
+        return set;
+    }
+    if chars.len() == 1 {
+        set.insert(chars[0].to_string());
+        return set;
+    }
+    for w in chars.windows(2) {
+        set.insert(w.iter().collect());
+    }
+    set
+}
+
+pub async fn find_duplicate_groups(
+    pool: &SqlitePool,
+) -> Result<Vec<DuplicateGroup>, AppError> {
+    #[derive(sqlx::FromRow)]
+    struct DupRow {
+        id: i64,
+        source: String,
+        external_id: String,
+        source_url: String,
+        title: String,
+        cover_url: Option<String>,
+        favorite_time: Option<i64>,
+    }
+
+    let rows: Vec<DupRow> = sqlx::query_as::<_, DupRow>(
+        "SELECT id, source, external_id, source_url, title, cover_url, favorite_time \
+         FROM items WHERE deleted_at IS NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    // 1) URL 精确分组
+    let mut url_groups: std::collections::HashMap<String, Vec<DuplicateItemPreview>> =
+        std::collections::HashMap::new();
+    let mut url_covered: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    for r in &rows {
+        let key = normalize_url(&r.source_url);
+        if key.is_empty() {
+            continue; // 空 URL 不参与查重，避免假重复
+        }
+        url_groups.entry(key).or_default().push(DuplicateItemPreview {
+            id: r.id,
+            source: r.source.clone(),
+            external_id: r.external_id.clone(),
+            source_url: r.source_url.clone(),
+            title: r.title.clone(),
+            cover_url: r.cover_url.clone(),
+            favorite_time: r.favorite_time,
+        });
+        url_covered.insert(r.id);
+    }
+
+    let mut result: Vec<DuplicateGroup> = url_groups
+        .into_iter()
+        .filter(|(_, items)| items.len() >= 2)
+        .map(|(key, mut items)| {
+            // 组内按收藏时间升序（越早的排前面，默认作保留项候选）
+            items.sort_by_key(|it| it.favorite_time.unwrap_or(i64::MAX));
+            DuplicateGroup { key, match_type: "url".to_string(), items }
+        })
+        .collect();
+
+    // 2) 模糊分组：未被 url 组覆盖、标题非空，按标题相似度聚类（并查集）
+    let candidates: Vec<&DupRow> = rows
+        .iter()
+        .filter(|r| !url_covered.contains(&r.id) && !r.title.trim().is_empty())
+        .collect();
+    let mut parent: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    let n = candidates.len();
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if title_similarity(&candidates[i].title, &candidates[j].title) >= FUZZY_THRESHOLD {
+                let ra = find_root(candidates[i].id, &parent);
+                let rb = find_root(candidates[j].id, &parent);
+                if ra != rb {
+                    parent.insert(ra, rb);
+                }
+            }
+        }
+    }
+    let mut fuzzy_map: std::collections::HashMap<i64, Vec<&DupRow>> =
+        std::collections::HashMap::new();
+    for &c in &candidates {
+        fuzzy_map.entry(find_root(c.id, &parent)).or_default().push(c);
+    }
+    for (_, items) in fuzzy_map {
+        if items.len() < 2 {
+            continue;
+        }
+        let mut sorted = items.clone();
+        sorted.sort_by_key(|it| it.favorite_time.unwrap_or(i64::MAX));
+        let key = format!(
+            "fuzzy:{}",
+            sorted.iter().map(|it| it.id.to_string()).collect::<Vec<_>>().join("-")
+        );
+        result.push(DuplicateGroup {
+            key,
+            match_type: "fuzzy".to_string(),
+            items: sorted
+                .into_iter()
+                .map(|r| DuplicateItemPreview {
+                    id: r.id,
+                    source: r.source.clone(),
+                    external_id: r.external_id.clone(),
+                    source_url: r.source_url.clone(),
+                    title: r.title.clone(),
+                    cover_url: r.cover_url.clone(),
+                    favorite_time: r.favorite_time,
+                })
+                .collect(),
+        });
+    }
+
+    // 组按重复条数降序（url 组已先 push，fuzzy 组随后）
+    result.sort_by(|a, b| b.items.len().cmp(&a.items.len()));
+    Ok(result)
+}
+
+/// 合并一组跨源重复项：把待删项的标签并集写进保留项，再把待删项软删进回收站。
+/// - 标签并集用 `INSERT OR IGNORE` 防重
+/// - 软删与标签拷贝在同一事务内（避免逐条 WAL fsync），待删项可在回收站恢复
+/// - 保留项标签集合变了，末尾重建其 FTS
+/// 合并批注：保留项批注优先；待删项非空且不同于保留项的，用分隔线追加（多个待删相同则去重）。
+fn merge_notes(keep: &str, removes: &[&str]) -> String {
+    let keep_t = keep.trim();
+    let mut parts: Vec<&str> = Vec::new();
+    if !keep_t.is_empty() {
+        parts.push(keep_t);
+    }
+    for r in removes {
+        let rt = r.trim();
+        if rt.is_empty() || rt == keep_t || parts.iter().any(|p| *p == rt) {
+            continue;
+        }
+        parts.push(rt);
+    }
+    parts.join("\n---\n")
+}
+
+/// 合并一组跨源重复项：把待删项的标签并集写进保留项、批注重合并写回保留项，再把待删项软删进回收站。
+/// - 标签并集用 `INSERT OR IGNORE` 防重
+/// - 批注重合并在同一事务内写回保留项
+/// - 软删与标签/批注拷贝在同一事务内（避免逐条 WAL fsync），待删项可在回收站恢复
+/// - 返回合并后的保留项批注，供调用方同步 Obsidian 等旁路
+pub async fn merge_duplicate_items(
+    pool: &SqlitePool,
+    keep_id: i64,
+    remove_ids: &[i64],
+) -> Result<String, AppError> {
+    if remove_ids.is_empty() {
+        return Ok(String::new());
+    }
+    if remove_ids.contains(&keep_id) {
+        return Err(AppError::InvalidInput("保留项不能也在待删列表里".into()));
+    }
+
+    let mut tx = pool.begin().await?;
+    // 1) 待删项的标签并集写进保留项
+    for &rid in remove_ids {
+        let tag_ids: Vec<i64> =
+            sqlx::query_scalar("SELECT tag_id FROM item_tags WHERE item_id = ?")
+                .bind(rid)
+                .fetch_all(&mut *tx)
+                .await?;
+        for tid in tag_ids {
+            sqlx::query(
+                "INSERT OR IGNORE INTO item_tags (item_id, tag_id, created_at) VALUES (?, ?, ?)",
+            )
+            .bind(keep_id)
+            .bind(tid)
+            .bind(now_seconds())
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    // 2) 合并批注：读保留项与待删项批注，合并写回保留项
+    let keep_notes: String = sqlx::query_scalar("SELECT notes FROM items WHERE id = ?")
+        .bind(keep_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let mut remove_notes: Vec<String> = Vec::with_capacity(remove_ids.len());
+    for &rid in remove_ids {
+        let rn: String = sqlx::query_scalar("SELECT notes FROM items WHERE id = ?")
+            .bind(rid)
+            .fetch_one(&mut *tx)
+            .await?;
+        remove_notes.push(rn);
+    }
+    let remove_refs: Vec<&str> = remove_notes.iter().map(|s| s.as_str()).collect();
+    let merged_notes = merge_notes(&keep_notes, &remove_refs);
+    // 3) 待删项软删进回收站（同一事务）
+    let now = now_seconds();
+    sqlx::query("UPDATE items SET notes = ?, updated_at = ? WHERE id = ?")
+        .bind(&merged_notes)
+        .bind(now)
+        .bind(keep_id)
+        .execute(&mut *tx)
+        .await?;
+    for &rid in remove_ids {
+        sqlx::query("UPDATE items SET deleted_at = ?, updated_at = ? WHERE id = ?")
+            .bind(now)
+            .bind(now)
+            .bind(rid)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM items_fts WHERE rowid = ?")
+            .bind(rid)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+
+    // 4) 保留项标签集合变了，重建其 FTS
+    rebuild_item_fts(pool, keep_id).await?;
+    Ok(merged_notes)
 }
 
 /// 清理超过保留期的回收站条目，返回被删封面路径（由调用方删文件）。

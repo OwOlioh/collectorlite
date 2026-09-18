@@ -130,7 +130,7 @@ fn build_frontmatter(item: &VideoItem) -> Result<String, AppError> {
 
 fn render_note(item: &VideoItem, notes: &str) -> Result<String, AppError> {
     let fm = build_frontmatter(item)?;
-    Ok(format!("{fm}\n{NOTES_START}\n{notes}\n{NOTES_END}\n"))
+    Ok(format!("{fm}{NOTES_START}\n{notes}\n{NOTES_END}\n"))
 }
 
 fn write_utf8_no_bom(path: &Path, content: &str) -> Result<(), AppError> {
@@ -178,24 +178,168 @@ fn ensure_within_vault(vault: &Path, abs: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-/// 重写已存在笔记：只替换托管区，保留 END 标记之后的用户区。
-/// 返回 None 表示托管标记被用户手动移除，调用方应跳过同步。
-fn update_existing_note(path: &Path, item: &VideoItem, notes: &str) -> Result<Option<()>, AppError> {
+/// 托管区正文的哈希，双向同步用它比对内容是否变化。
+///
+/// 只用于本地变更检测（非安全场景），md5 足够且短。**推送方与拉取方必须共用这一个实现**，
+/// 否则两边算出来的 base 不一致，会永远判定「有变化」。
+pub fn hash_notes(text: &str) -> String {
+    format!("{:x}", md5::compute(text.as_bytes()))
+}
+
+/// 托管区在一篇笔记里的字节位置（下标均落在 UTF-8 字符边界上，切片不会 panic）。
+struct ManagedZone {
+    /// START 标记之前的一切：frontmatter + 用户原文
+    head_end: usize,
+    /// 托管区正文起点（START 标记之后）
+    body_start: usize,
+    /// 托管区正文终点（END 标记的起点）
+    body_end: usize,
+    /// 用户区起点（END 标记之后）
+    user_start: usize,
+}
+
+/// 定位托管区。两个标记缺一、或顺序颠倒（用户手动挪过）都返回 `None`。
+///
+/// 返回 None 一律表示「这篇笔记没被托管 / 已被取消托管」，调用方应跳过而不是重建。
+fn locate_managed_zone(content: &str) -> Option<ManagedZone> {
+    let start_marker = content.find(NOTES_START)?;
+    let end_marker = content.find(NOTES_END)?;
+    if end_marker < start_marker {
+        return None;
+    }
+    Some(ManagedZone {
+        head_end: start_marker,
+        body_start: start_marker + NOTES_START.len(),
+        body_end: end_marker,
+        user_start: end_marker + NOTES_END.len(),
+    })
+}
+
+/// 这篇笔记里是否已有托管区（双向同步 / link 的分岔判据）。
+pub fn has_managed_zone(content: &str) -> bool {
+    locate_managed_zone(content).is_some()
+}
+
+/// 读出这篇笔记里 **app 侧负责的正文**。
+///
+/// - `Managed`：托管区正文（首尾空白已去掉）
+/// - `Full`：整篇原文（含 frontmatter、用户写过的一切）
+///
+/// 这是「关联后侧边栏该显示什么」的唯一答案，也是双向同步拉取方向的取数口径；
+/// 推送方向必须严格按 `apply_note_body` 写回，两者互逆才不会漂移。
+pub fn read_note_body(content: &str) -> String {
+    match read_managed_note(content) {
+        Some(managed) => managed.notes,
+        None => content.to_string(),
+    }
+}
+
+/// 一篇已存在笔记拆出来的三段。head 与 user_zone 都**原样**返回，写入时不得改写。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedNote {
+    /// START 之前的一切（frontmatter、用户原文）
+    pub head: String,
+    /// 托管区正文，已去掉首尾空白
+    pub notes: String,
+    /// END 之后的用户区，app 永不写入这里
+    pub user_zone: String,
+}
+
+/// 读出一篇笔记的托管区正文；没有托管标记时返回 `None`。
+pub fn read_managed_note(content: &str) -> Option<ManagedNote> {
+    let zone = locate_managed_zone(content)?;
+    let head = content.get(..zone.head_end).unwrap_or("").to_string();
+    let body = content.get(zone.body_start..zone.body_end).unwrap_or("");
+    let user_zone = content.get(zone.user_start..).unwrap_or("").to_string();
+    Some(ManagedNote {
+        head,
+        notes: body.trim().to_string(),
+        user_zone,
+    })
+}
+
+/// 判断 head 里的 frontmatter 是不是 collector 自己写的。
+///
+/// 只有自家文件才刷新元数据（标题/标签会变）。用户自选关联的笔记往往带着自己的
+/// frontmatter（dataview、templater 之类），app 一旦重写就可能把用户的东西毁掉，
+/// 所以遇到非自家文件一律原样保留 head。
+fn owns_frontmatter(head: &str, collector_id: &str) -> bool {
+    head.starts_with("---") && head.contains(&format!("collector_id: {collector_id}"))
+}
+
+/// 拼装一篇托管笔记的完整内容（纯函数，便于单测钉死它与 `read_managed_note` 的互逆性）。
+///
+/// ⚠️ 格式铁律：`head` **自带尾换行**，后面直接接 START。绝不能写成 `{head}\n{START}`
+/// ——那样读出来的 head 会包含刚写的那个 `\n`，写回去时又补一个，每轮都多出一个空行，
+/// 文件永远在漂移，轮询也就永远判定「有变化」，进入无限同步。
+fn render_managed_content(head: &str, notes: &str, user_zone: &str) -> String {
+    format!("{head}{NOTES_START}\n{notes}\n{NOTES_END}{user_zone}")
+}
+
+fn write_managed_note_file(
+    path: &Path,
+    head: &str,
+    notes: &str,
+    user_zone: &str,
+) -> Result<(), AppError> {
+    write_utf8_no_bom(path, &render_managed_content(head, notes, user_zone))
+}
+
+/// 把 app 侧的笔记正文写回一篇已存在的笔记文件。
+///
+/// 按文件的接管模式分派，是 `read_note_body` 的严格逆操作：
+/// - `Managed`：只替换托管区，head 与 END 之后的用户区原样保留
+/// - `Full`：整篇覆盖 —— 用户关联的就是整篇，他编辑的也是整篇
+///
+/// 两者**都不再返回「跳过」**。以前「缺标记 → 跳过同步」曾是「用户取消托管」的语义，
+/// 但整篇接管后缺标记恰恰是最常见的合法状态（用户关联的笔记本来就没标记），
+/// 再跳过就等于永远不同步。取消同步请走 `/obsidian/unlink`。
+pub fn apply_note_body(path: &Path, item: &VideoItem, notes: &str) -> Result<(), AppError> {
     let old = fs::read_to_string(path).map_err(AppError::Io)?;
-    let (_, end_idx) = match (old.find(NOTES_START), old.find(NOTES_END)) {
-        (Some(s), Some(e)) => (s, e),
-        _ => return Ok(None),
+    let Some(managed) = read_managed_note(&old) else {
+        // 整篇接管：正文即全文，不注入任何标记（注入了下一轮就会被判成 Managed 模式，行为跳变）。
+        return write_utf8_no_bom(path, notes);
     };
-    let user_zone_start = end_idx + NOTES_END.len();
-    let user_zone = if user_zone_start <= old.len() {
-        old[user_zone_start..].to_string()
+    let collector_id = format!("{}:{}", item.source, item.external_id);
+    let new_head = if owns_frontmatter(&managed.head, &collector_id) {
+        build_frontmatter(item)?
+    } else {
+        managed.head
+    };
+    write_managed_note_file(path, &new_head, notes, &managed.user_zone)
+}
+
+/// 把一条收藏关联到用户自选的笔记文件，返回**应写入 `items.notes` 的正文**。
+///
+/// ## 为什么不再往文件里追加托管区
+///
+/// 早期版本会在文件末尾追加一对托管标记，于是 app 只负责标记之间的那一小段 ——
+/// 用户关联一篇写了几百字的笔记，侧边栏看到的却是一个空框，因为内容全在标记之外。
+/// 用户要的是「关联后看到并编辑整篇内容」，所以关联一律走**整篇接管**：
+/// 文件原文一字不改地读出来当正文，不注入任何标记。
+///
+/// ⚠️ 注入标记还有个更隐蔽的害处：一旦注入，下一轮 `apply_note_body` 就会把这篇
+/// 判成 Managed 模式、只替换托管区，行为凭空跳变 —— 而正文此刻是整篇，写回去
+/// 会让标记套娃。
+///
+/// ## 唯一的例外
+///
+/// 若文件**本来就有**托管标记（比如关联了 collector 自己建的笔记、或别的收藏管过的），
+/// 那就尊重既有模式，正文取托管区 —— 否则会把标记本身当成正文读进来，同样套娃。
+/// 这条分派与 `apply_note_body` 严格互逆。
+///
+/// 关联本身**不写** collector 的 frontmatter：YAML frontmatter 只有位于文件开头才有效，
+/// 塞到文件中间在 Obsidian 里会被渲染成一条分隔线。识别关系靠数据库里的
+/// `items.obsidian_path`，不需要在用户文件里留 collector_id。
+pub fn link_item_to_note_file(vault: &Path, rel: &str) -> Result<String, AppError> {
+    let abs = vault.join(rel);
+    ensure_within_vault(vault, &abs)?;
+    let content = if abs.exists() {
+        fs::read_to_string(&abs).map_err(AppError::Io)?
     } else {
         String::new()
     };
-    let fm = build_frontmatter(item)?;
-    let content = format!("{fm}\n{NOTES_START}\n{notes}\n{NOTES_END}{user_zone}");
-    write_utf8_no_bom(path, &content)?;
-    Ok(Some(()))
+    Ok(read_note_body(&content))
 }
 
 /// 计算不冲突的相对路径；若已存在文件且 `collector_id` 是自己的就复用，否则追加 `[source-id前8]` 消歧。
@@ -228,14 +372,14 @@ fn resolve_unique_rel(
     Ok(normalize_rel(&rel))
 }
 
-/// 把一条收藏同步成 vault 内的 md 笔记。
-/// - `Ok(Some(rel))`：已写入，rel 为 vault 内相对路径
-/// - `Ok(None)`：跳过（托管标记被用户移除）
-/// - `Err`：写入失败
+/// 把一条收藏同步成 vault 内的 md 笔记，返回 vault 内相对路径。
+///
+/// - 已有 `obsidian_path` 且文件还在 → 更新原文件（按模式：托管区 / 整篇）
+/// - 否则 → 在收藏子目录下新建一篇带托管区的笔记
 pub fn write_or_update_note(
     settings: &ObsidianSettings,
     item: &VideoItem,
-) -> Result<Option<String>, AppError> {
+) -> Result<String, AppError> {
     let vault = Path::new(&settings.vault_path);
     if !vault.is_dir() {
         return Err(AppError::InvalidInput(
@@ -254,10 +398,8 @@ pub fn write_or_update_note(
     if let Some(rel) = &item.obsidian_path {
         let target = vault.join(rel);
         if target.exists() {
-            return match update_existing_note(&target, item, &item.notes)? {
-                Some(()) => Ok(Some(rel.clone())),
-                None => Ok(None),
-            };
+            apply_note_body(&target, item, &item.notes)?;
+            return Ok(rel.clone());
         }
     }
 
@@ -270,7 +412,7 @@ pub fn write_or_update_note(
     }
     let content = render_note(item, &item.notes)?;
     write_utf8_no_bom(&abs, &content)?;
-    Ok(Some(rel))
+    Ok(rel)
 }
 
 fn rel_for_new(settings: &ObsidianSettings, item: &VideoItem) -> String {
@@ -338,6 +480,205 @@ pub fn open_in_obsidian(settings: &ObsidianSettings, item: &VideoItem) -> Result
 mod tests {
     use super::*;
 
+    // ---- 托管区读写的互逆性 --------------------------------------------------
+    // 这条是整个双向同步的地基：一旦「读→写」不能稳定到幂等，轮询每轮都认为文件变了，
+    // 就会把同一条笔记反复来回同步（典型的同步死循环）。下面几组用例把它钉死。
+
+    /// 拼一篇笔记。注意 `head` 自带尾换行 —— 这是写入格式的约定。
+    fn sample(head: &str, notes: &str, user_zone: &str) -> String {
+        render_managed_content(head, notes, user_zone)
+    }
+
+    #[test]
+    fn read_managed_note_extracts_three_zones() {
+        let content = sample("---\ncollector_id: bilibili:BV1\n---\n", "第一行\n第二行", "\n自己的话\n");
+        let note = read_managed_note(&content).expect("应识别出托管区");
+        assert_eq!(note.notes, "第一行\n第二行");
+        assert_eq!(note.head, "---\ncollector_id: bilibili:BV1\n---\n");
+        assert_eq!(note.user_zone, "\n自己的话\n");
+    }
+
+    #[test]
+    fn read_managed_note_returns_none_without_markers() {
+        assert!(read_managed_note("随便写点什么，没有标记").is_none());
+        // 只有一半标记同样算「未托管」
+        assert!(read_managed_note(&format!("{NOTES_START}\n孤儿")).is_none());
+        assert!(read_managed_note(&format!("孤儿\n{NOTES_END}")).is_none());
+    }
+
+    #[test]
+    fn read_then_write_is_idempotent() {
+        // 最关键的一条：按同样格式读出来再写回去，必须立刻稳定下来，不能持续漂移。
+        // 曾经这里有个 head 多补一个 \n 的 bug —— 每轮同步给文件加一个空行，
+        // 轮询也就永远认为「文件变了」，直接无限同步。
+        for notes in ["", "单行", "多行\n第二行\n", " 前后带空白 \n"] {
+            let original = sample("HEAD\n", notes, "\nTAIL\n");
+            let parsed = read_managed_note(&original).expect("应识别出托管区");
+            let rebuilt = render_managed_content(&parsed.head, &parsed.notes, &parsed.user_zone);
+            let twice = read_managed_note(&rebuilt).expect("应识别出托管区");
+            assert_eq!(twice, parsed, "notes 为 {notes:?} 时读写不互逆");
+        }
+    }
+
+    #[test]
+    fn write_does_not_drift_on_repeat() {
+        // 连续三轮「读→写」，除了首次会规范化笔记首尾空白外，之后必须字节级稳定。
+        let mut content = sample("# 用户原有笔记\n\n自己的内容\n", "app 侧笔记", "\n");
+        for round in 0..3 {
+            let parsed = read_managed_note(&content).expect("应识别出托管区");
+            let rebuilt = render_managed_content(&parsed.head, &parsed.notes, &parsed.user_zone);
+            if round > 0 {
+                assert_eq!(rebuilt, content, "第 {round} 轮发生了漂移");
+            }
+            // 用户的 head 与 user_zone 必须始终原样保留
+            assert!(parsed.head.contains("# 用户原有笔记"));
+            content = rebuilt;
+        }
+    }
+
+    #[test]
+    fn marks_are_part_of_render_output() {
+        // head 为空（用户自选文件里压根没有 collector frontmatter）时，
+        // 托管区应当被夹在文件中间/末尾，标记本身完整保留。
+        let content = render_managed_content("# 用户笔记\n", "app 笔记", "\n");
+        assert!(content.starts_with("# 用户笔记\n"));
+        assert!(content.contains(NOTES_START));
+        assert!(content.contains(NOTES_END));
+        assert!(content.ends_with("\n"));
+    }
+
+    #[test]
+    fn has_managed_zone_detects_presence() {
+        assert!(has_managed_zone(&sample("", "x", "")));
+        assert!(!has_managed_zone("没有任何标记"));
+        // 标记顺序颠倒（用户手动挪过）→ 视为未托管
+        assert!(!has_managed_zone(&format!("{NOTES_END}\n{NOTES_START}")));
+    }
+
+    // ---- 整篇接管（关联用户已有笔记）----------------------------------------
+    // 用户明确要求「关联后看到并编辑整篇内容」，所以无标记的笔记一律整篇接管：
+    // 读全文、写全文、且绝不往用户文件里注入托管标记（注入了下一轮就会切成托管模式，行为跳变）。
+
+    fn tmp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "collector-obsidian-test-{}-{name}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("建临时目录失败");
+        dir
+    }
+
+    fn test_item() -> VideoItem {
+        VideoItem {
+            id: 1,
+            source: "bilibili".into(),
+            external_id: "BV1".into(),
+            source_url: "https://example.com/BV1".into(),
+            title: "标题".into(),
+            description: String::new(),
+            notes: String::new(),
+            cover_url: None,
+            cover_local_path: None,
+            author_name: None,
+            author_id: None,
+            partition_name: None,
+            published_at: None,
+            duration: None,
+            favorite_time: None,
+            deleted_at: None,
+            starred: false,
+            starred_at: None,
+            obsidian_path: None,
+            tags: vec![],
+        }
+    }
+
+    #[test]
+    fn read_note_body_returns_whole_file_when_unmanaged() {
+        // 一篇普通的 Obsidian 笔记：有自己的 frontmatter、自己的正文
+        let content = "---\ntags: [读书]\n---\n\n# 我的读书笔记\n\n正文第一段\n";
+        assert_eq!(read_note_body(content), content, "整篇接管：正文就是整篇原文");
+        // 首尾空白必须原样保留：在这里 trim 的话，关联一瞬间就会改掉用户的文件
+        // （吃掉文末换行），而「关联不动用户文件」是硬要求。
+        assert_eq!(
+            read_note_body("\n\n带前后空行的笔记\n\n"),
+            "\n\n带前后空行的笔记\n\n"
+        );
+    }
+
+    #[test]
+    fn read_note_body_returns_only_managed_zone_when_marked() {
+        let content = sample("---\ncollector_id: bilibili:BV1\n---\n", "app 笔记", "\n用户区\n");
+        assert_eq!(read_note_body(&content), "app 笔记");
+        // 标记本身绝不能进入正文 —— 否则写回去就是标记套娃
+        assert!(!read_note_body(&content).contains(NOTES_START));
+        assert!(!read_note_body(&content).contains(NOTES_END));
+    }
+
+    #[test]
+    fn link_reads_whole_file_and_leaves_it_untouched() {
+        let vault = tmp_dir("link");
+        let rel = "收藏/我的笔记.md";
+        let abs = vault.join("收藏").join("我的笔记.md");
+        fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        let original = "# 我写了很久的笔记\n\n正文\n";
+        fs::write(&abs, original).unwrap();
+
+        let body = link_item_to_note_file(&vault, rel).expect("关联应成功");
+        assert_eq!(body, original, "关联后的正文应是整篇原文");
+        // 用户的文件一个字节都不能被动过（早期版本会往末尾追加托管标记）
+        assert_eq!(
+            fs::read_to_string(&abs).unwrap(),
+            original,
+            "关联不得修改用户的文件"
+        );
+    }
+
+    #[test]
+    fn apply_note_body_overwrites_whole_file_when_unmanaged() {
+        let vault = tmp_dir("apply-full");
+        let abs = vault.join("note.md");
+        fs::write(&abs, "旧内容\n").unwrap();
+        let mut item = test_item();
+        item.notes = "# 新整篇\n\n包含 frontmatter 在内的一切\n".to_string();
+
+        apply_note_body(&abs, &item, &item.notes).unwrap();
+
+        let after = fs::read_to_string(&abs).unwrap();
+        assert_eq!(after, item.notes, "整篇接管应整篇覆盖");
+        // 写回后读回来必须还是同一份 —— 否则双向同步会永远判定「有变化」而死循环
+        assert_eq!(read_note_body(&after), item.notes, "整篇读写必须互逆");
+        assert!(!after.contains(NOTES_START), "整篇模式不得注入托管标记");
+    }
+
+    #[test]
+    fn apply_note_body_keeps_user_zones_when_managed() {
+        let vault = tmp_dir("apply-managed");
+        let abs = vault.join("note.md");
+        let original = sample("# 用户原文\n\n", "app 旧笔记", "\n用户自己的话\n");
+        fs::write(&abs, &original).unwrap();
+        let mut item = test_item();
+        item.notes = "app 新笔记".to_string();
+
+        apply_note_body(&abs, &item, &item.notes).unwrap();
+
+        let after = fs::read_to_string(&abs).unwrap();
+        assert_eq!(read_note_body(&after), "app 新笔记");
+        assert!(after.contains("# 用户原文"), "托管模式下用户原文必须保留");
+        assert!(after.contains("用户自己的话"), "托管模式下用户区必须保留");
+    }
+
+    // ---- 用户自选笔记的前置内容必须被保留 ------------------------------------
+
+    #[test]
+    fn owns_frontmatter_only_for_collector_files() {
+        let own = format!("---\ncollector_id: bilibili:BV1\ntitle: x\n---");
+        assert!(owns_frontmatter(&own, "bilibili:BV1"));
+        // 别人家的 collector_id → 不是自家文件
+        assert!(!owns_frontmatter(&own, "bilibili:BV9"));
+        // 用户自选的笔记：压根没有 collector frontmatter
+        assert!(!owns_frontmatter("# 我的读书笔记\n\n随便写", "bilibili:BV1"));
+    }
     // Windows 上 canonicalize 会给存在的路径加 \\?\ 前缀，而目标文件首次写入前
     // 父目录可能不存在、canonicalize 失败退回无前缀原始路径 —— 两侧形式不一致导致
     // 前缀比较永远 false（曾让所有导出被误拒）。这里用词法比较钉死行为，不访问磁盘。
