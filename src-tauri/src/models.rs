@@ -340,6 +340,64 @@ pub struct BridgeInfo {
     pub token: String,
 }
 
+/// 收藏库统计聚合（前端「统计」页用）。字段命名与前端 `CollectionStats` 对应。
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionStats {
+    pub total: i64,
+    pub starred_count: i64,
+    pub untagged_count: i64,
+    pub by_source: Vec<SourceCount>,
+    pub by_tag: Vec<TagCountStat>,
+    pub by_month: Vec<MonthCount>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceCount {
+    pub source: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct TagCountStat {
+    pub name: String,
+    pub color: Option<String>,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct MonthCount {
+    pub month: String,
+    pub count: i64,
+}
+
+/// 重复项视图里的单条预览（不暴露全部字段）。字段命名对应前端 `DuplicateItemPreview`。
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicateItemPreview {
+    pub id: i64,
+    pub source: String,
+    pub external_id: String,
+    pub source_url: String,
+    pub title: String,
+    pub cover_url: Option<String>,
+    pub favorite_time: Option<i64>,
+}
+
+/// 一组跨源重复项：同一归一化 `source_url`（match_type="url"）或标题高度相似（match_type="fuzzy"）的多条 item。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicateGroup {
+    /// 归一化后的 URL key（url 组）或 `fuzzy:{id_a}-{id_b}`（fuzzy 组），用于分组与调试。
+    pub key: String,
+    /// 匹配方式：`url` = 归一化链接相同；`fuzzy` = 标题相似度达到阈值（疑似，需用户手动确认）。
+    pub match_type: String,
+    pub items: Vec<DuplicateItemPreview>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QrStatus {
