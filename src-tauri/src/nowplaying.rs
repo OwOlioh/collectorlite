@@ -267,6 +267,7 @@ fn find_netease_main_hwnds() -> Vec<isize> {
 
 /// 某个 pid 的进程镜像名是否以指定后缀结尾（不区分大小写）。
 #[cfg(windows)]
+#[allow(dead_code)]
 fn process_image_ends_with(pid: u32, suffix: &str) -> bool {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
@@ -304,6 +305,7 @@ fn process_image_ends_with(pid: u32, suffix: &str) -> bool {
 /// 音频会话状态：会话 Active = 该进程正在渲染音频，一暂停就变 Inactive。
 /// 按进程**镜像名**匹配会话（网易云有多个 cloudmusic.exe 子进程，
 /// 音频会话挂在哪个上面不去赌）。找不到任何匹配一律 false —— 宁可让计时器停走。
+#[allow(dead_code)]
 pub fn netease_is_playing() -> bool {
     #[cfg(windows)]
     {
@@ -377,6 +379,7 @@ fn netease_is_playing_windows() -> Option<bool> {
         Some(result.unwrap_or(false))
     }
 }
+
 
 // ── 浮窗（按需创建 / 用完销毁） ──────────────────────────────────────────────
 

@@ -4,9 +4,13 @@ import type { NowPlayingState, NowPlayingTrack, TrackResolveResult, Tag } from "
 import { TagPoolInput } from "../components/TagPoolInput";
 
 /**
- * 速记面板。**按需打开、用完即销毁**：窗口活着的时候每秒问一次后端
- * 「网易云在不在出声 + 曲目标题变没变」，销毁后零开销 —— 这点轮询只在
- * 面板存续的几十秒里发生，不违背按需形态。
+ * 速记面板。按需打开、用完即销毁。
+ *
+ * 时间戳为**手动时间轴**：用户用面板内的 播放/暂停/重置/滑块 控制累计秒数，
+ * 完全不依赖网易云是否暴露播放信号——网易云不注册 SMTC、窗口标题不含进度、
+ * 暂停时音频会话仍 Active，外部探测拿不到「当前位置」与可靠「暂停」。
+ * 曲目标题仍自动识别切歌（切歌自动归零 + 停表）。这样时间戳能 100% 跟随
+ * 用户的暂停与拖动，代价是需用户边听边操作控件。
  *
  * 定位是「随手记」而不是第二个收藏入口：红心的歌由 P2 同步自动进库，
  * 这里只做同步做不到的两件事 —— 即时，以及批注 / 时间戳。
@@ -24,10 +28,9 @@ export function NowPlayingApp() {
   /** 已选标签（沿用主窗口 TagPoolInput 的形态：池子里挑 / 输错就新建）。 */
   const [tagPool, setTagPool] = useState<Tag[]>([]);
   const [selectedTags, setSelectedTags] = useState<Tag[]>([]);
-  /** 已累计的「播放中」秒数。暂停不走、切歌归零 —— 窗口标题里没有播放进度，
-   *  只能这样估：面板打开 / 切歌那一刻开始，只数真正出声的时间。 */
+  /** 手动时间轴的累计秒数：由播放/暂停/重置/滑块控制，不依赖网易云信号。 */
   const [elapsedSec, setElapsedSec] = useState(0);
-  /** 网易云是否正在出声（WASAPI 会话状态），控制计时与 UI 提示 */
+  /** 用户是否按下了「播放」（驱动计时器走）；初始 false，由面板按钮 toggle。 */
   const [playing, setPlaying] = useState(false);
   /** 当前曲目标识，用来检测「面板开着的时候切歌了」 */
   const trackKeyRef = useRef("");
@@ -47,6 +50,7 @@ export function NowPlayingApp() {
           : "";
         setTrack(state.track);
         setHint(state.hint);
+        // 手动时间轴：elapsedSec 从 0 起，由面板内 播放/暂停/滑块 控制
       })
       .catch(() => undefined)
       .finally(() => {
@@ -57,33 +61,36 @@ export function NowPlayingApp() {
     };
   }, []);
 
-  // 每秒一次：① 网易云在出声吗 → 在出声计时 +1；② 切歌了吗 → 换曲目、计时归零。
-  // 两个都是「读本机状态」的轻调用，面板存活期间可接受。
+  // 每秒一次：检测切歌（曲目标题变化 → 自动归零并停表）。计时本身由下面的 playing 驱动。
   useEffect(() => {
     if (!inTauri()) return;
-    const id = window.setInterval(() => {
-      void (async () => {
-        try {
-          const state: NowPlayingState = await api.nowPlayingCurrent();
-          const key = state.track
-            ? `${state.track.title}|${state.track.artist}`
-            : "";
-          if (key !== trackKeyRef.current) {
-            trackKeyRef.current = key;
-            setTrack(state.track);
-            setHint(state.hint);
-            setElapsedSec(0);
-          }
-          const isPlaying = await api.neteaseIsPlaying();
-          setPlaying(isPlaying);
-          if (isPlaying) setElapsedSec((s) => s + 1);
-        } catch {
-          // 单次轮询失败忽略，下一秒重试
+    const id = window.setInterval(async () => {
+      try {
+        const state: NowPlayingState = await api.nowPlayingCurrent();
+        const key = state.track
+          ? `${state.track.title}|${state.track.artist}`
+          : "";
+        if (key !== trackKeyRef.current) {
+          trackKeyRef.current = key;
+          setTrack(state.track);
+          setHint(state.hint);
+          setElapsedSec(0);
+          setPlaying(false); // 新歌从头记，停表
         }
-      })();
+      } catch {
+        // 单次轮询失败忽略，下一秒重试
+      }
     }, 1000);
     return () => window.clearInterval(id);
   }, []);
+
+  // 计时由用户控制的 playing 驱动：playing=true 时每秒 +1；暂停/重置由按钮处理。
+  // 依赖 playing，故 playing 变化时重建 interval（暂停即清、播放即启）。
+  useEffect(() => {
+    if (!inTauri() || !playing) return;
+    const id = window.setInterval(() => setElapsedSec((s) => s + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [playing]);
 
   // 标签池：面板打开时拉一次就够。已选是局部状态，关掉面板就丢 —— 用户重新唤起从零开始。
   useEffect(() => {
@@ -212,19 +219,50 @@ export function NowPlayingApp() {
           {!resolving && resolved && !resolved.resolved && (
             <span className="np-warn">没匹配上，仍可记批注（会用标题作兜底 id）</span>
           )}
-          {!loading && track && !playing && (
-            <span className="np-warn">已暂停 · 计时停走</span>
-          )}
         </div>
 
-        <button
-          className="np-elapsed"
-          type="button"
-          disabled={!track}
-          onClick={insertElapsed}
-        >
-          插入时间 {elapsedLabel}（约）
-        </button>
+        <div className="np-timeline">
+          <div className="np-time">{elapsedLabel}</div>
+          <input
+            type="range"
+            className="np-range"
+            min={0}
+            max={resolved?.duration && resolved.duration > 0 ? resolved.duration : 3600}
+            step={1}
+            value={elapsedSec}
+            disabled={!track}
+            onChange={(e) => setElapsedSec(Math.max(0, Number(e.target.value)))}
+          />
+          <div className="np-tl-controls">
+            <button
+              type="button"
+              className="np-btn"
+              disabled={!track}
+              onClick={() => setPlaying((p) => !p)}
+            >
+              {playing ? "⏸ 暂停" : "▶ 播放"}
+            </button>
+            <button
+              type="button"
+              className="np-btn"
+              disabled={!track}
+              onClick={() => setElapsedSec(0)}
+            >
+              ⟲ 重置
+            </button>
+            <button
+              type="button"
+              className="np-btn np-btn-primary"
+              disabled={!track}
+              onClick={insertElapsed}
+            >
+              插入 {elapsedLabel}
+            </button>
+          </div>
+          <div className="np-tl-hint">
+            手动计时：播放/暂停随你操作，拖动滑块可跳到任意位置（非网易云进度同步）
+          </div>
+        </div>
 
         <TagPoolInput
           pool={tagPool}

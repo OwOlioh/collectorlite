@@ -180,3 +180,63 @@ body {
 .np-panel .tag-pool-menu {
   max-height: 140px;
 }
+
+/* ── 手动时间轴控件 ─────────────────────────────────────────────── */
+.np-timeline {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--surface-2, rgba(127, 127, 127, 0.12));
+}
+
+.np-time {
+  font-size: 22px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  text-align: center;
+}
+
+.np-range {
+  width: 100%;
+  box-sizing: border-box;
+  accent-color: var(--accent, #534ab7);
+  cursor: pointer;
+}
+
+.np-tl-controls {
+  display: flex;
+  gap: 8px;
+}
+
+.np-btn {
+  flex: 1 1 auto;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.35));
+  background: var(--input-bg, transparent);
+  color: var(--text, #1b1b1f);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.np-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.np-btn-primary {
+  border: none;
+  background: var(--accent, #534ab7);
+  color: #fff;
+}
+
+.np-tl-hint {
+  font-size: 11px;
+  color: var(--text-tertiary, #9ca3af);
+  line-height: 1.4;
+}
