@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>collectorlite · 软件答辩展示</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700;900&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --bg:#070b16;
+    --bg2:#0c1322;
+    --surface:#121b30;
+    --surface2:#18233d;
+    --line:rgba(120,150,210,.16);
+    --text:#e9eefb;
+    --muted:#93a0bd;
+    --blue:#4f8cff;
+    --purple:#a974ff;
+    --orange:#ff8a4c;
+    --green:#3ad6a0;
+    --pink:#ff6f9c;
+    --grad:linear-gradient(120deg,#4f8cff 0%,#a974ff 55%,#ff8a4c 100%);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:radial-gradient(1200px 700px at 75% -10%,rgba(79,140,255,.16),transparent 60%),
+               radial-gradient(900px 600px at 10% 110%,rgba(169,116,255,.14),transparent 55%),
+               var(--bg);
+    color:var(--text);
+    font-family:"Noto Sans SC","Segoe UI",system-ui,sans-serif;
+    overflow:hidden;
+    -webkit-font-smoothing:antialiased;
+  }
+  .stage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  .deck{position:relative;width:min(100vw,177.78vh);height:min(56.25vw,100vh);}
+  .slide{
+    position:absolute;inset:0;padding:5.2vh 6vw;
+    display:flex;flex-direction:column;justify-content:center;
+    opacity:0;visibility:hidden;transform:scale(1.02);
+    transition:opacity .5s ease,transform .5s ease,visibility .5s;
+    overflow:hidden;
+  }
+  .slide.active{opacity:1;visibility:visible;transform:none}
+  .slide::before{content:"";position:absolute;inset:0;background:
+     linear-gradient(180deg,rgba(255,255,255,.02),transparent 30%);pointer-events:none}
+  .grid-bg{position:absolute;inset:0;background-image:
+     linear-gradient(rgba(120,150,210,.05) 1px,transparent 1px),
+     linear-gradient(90deg,rgba(120,150,210,.05) 1px,transparent 1px);
+     background-size:46px 46px;mask-image:radial-gradient(circle at 50% 40%,#000,transparent 80%);pointer-events:none}
+
+  /* section tag */
+  .sec{display:inline-flex;align-items:center;gap:.6em;font-weight:700;letter-spacing:.04em;
+    font-size:clamp(13px,1.7vh,20px);color:var(--blue);margin-bottom:1.4vh}
+  .sec .num{display:inline-grid;place-items:center;width:2em;height:2em;border-radius:50%;
+    background:var(--grad);color:#06101f;font-weight:900;font-family:"JetBrains Mono",monospace}
+  h1{font-size:clamp(30px,6vh,64px);font-weight:900;line-height:1.08;letter-spacing:.01em}
+  h2{font-size:clamp(24px,4.4vh,46px);font-weight:900;line-height:1.12}
+  .lead{color:var(--muted);font-size:clamp(14px,2.2vh,22px);line-height:1.6;max-width:62ch}
+  .accent{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .hl{color:var(--orange);font-weight:700}
+  .hl-b{color:var(--blue);font-weight:700}
+  .hl-g{color:var(--green);font-weight:700}
+  .hl-p{color:var(--purple);font-weight:700}
+
+  .anim{opacity:0;transform:translateY(22px);transition:opacity .6s ease,transform .6s ease;transition-delay:var(--d,0s)}
+  .slide.active .anim{opacity:1;transform:none}
+
+  /* cards */
+  .row{display:flex;gap:2vw;flex-wrap:wrap}
+  .card{background:linear-gradient(180deg,var(--surface),var(--bg2));border:1px solid var(--line);
+    border-radius:16px;padding:2.2vh 1.6vw;flex:1 1 0;min-width:0;position:relative;overflow:hidden}
+  .card .ico{width:46px;height:46px;border-radius:12px;display:grid;place-items:center;
+    background:rgba(79,140,255,.12);margin-bottom:1.2vh;font-size:24px}
+  .card h3{font-size:clamp(15px,2.3vh,24px);font-weight:700;margin-bottom:.6vh}
+  .card p{color:var(--muted);font-size:clamp(12px,1.9vh,18px);line-height:1.55}
+
+  .badge{display:inline-flex;align-items:center;gap:.4em;padding:.35em .8em;border-radius:999px;
+    font-size:clamp(11px,1.6vh,15px);font-weight:700;background:rgba(79,140,255,.14);color:var(--blue);
+    border:1px solid rgba(79,140,255,.3)}
+  .badge.o{background:rgba(255,138,76,.14);color:var(--orange);border-color:rgba(255,138,76,.3)}
+  .badge.p{background:rgba(169,116,255,.14);color:var(--purple);border-color:rgba(169,116,255,.3)}
+  .badge.g{background:rgba(58,214,160,.14);color:var(--green);border-color:rgba(58,214,160,.3)}
+
+  .pill{font-family:"JetBrains Mono",monospace;font-size:clamp(11px,1.7vh,16px);
+    padding:.3em .7em;border-radius:8px;background:var(--surface2);border:1px solid var(--line);color:var(--text)}
+
+  /* progress + nav */
+  .progress{position:absolute;top:0;left:0;height:4px;width:0;background:var(--grad);transition:width .4s ease;z-index:50}
+  .pagenum{position:absolute;right:2.4vw;bottom:2.2vh;font-family:"JetBrains Mono",monospace;
+    color:var(--muted);font-size:clamp(12px,1.8vh,16px);z-index:50}
+  .hint{position:absolute;left:2.4vw;bottom:2.2vh;color:var(--muted);font-size:clamp(11px,1.6vh,15px);z-index:50;opacity:.7}
+  .navzone{position:absolute;top:0;bottom:0;width:22%;z-index:40;cursor:pointer}
+  .nav-l{left:0}.nav-r{right:0}
+
+  /* cover */
+  .cover-title{font-size:clamp(44px,10vh,120px);font-weight:900;letter-spacing:.02em;line-height:.98}
+  .stack{display:flex;gap:.8vw;flex-wrap:wrap;margin-top:2.4vh}
+  .stack .pill{font-size:clamp(12px,1.9vh,18px);padding:.5em 1em}
+
+  /* diagram helpers */
+  .arch{display:flex;flex-direction:column;gap:1.4vh;margin-top:1.6vh}
+  .layer{border:1px solid var(--line);border-radius:14px;padding:1.6vh 1.4vw;display:flex;align-items:center;gap:1.2vw;
+    background:linear-gradient(90deg,rgba(79,140,255,.06),transparent)}
+  .layer .tag{font-family:"JetBrains Mono",monospace;font-size:clamp(11px,1.7vh,15px);color:var(--blue);
+    border:1px solid rgba(79,140,255,.35);border-radius:8px;padding:.3em .7em;white-space:nowrap}
+  .layer .body{color:var(--text);font-size:clamp(13px,2vh,19px)}
+  .layer .sub{color:var(--muted);font-size:clamp(11px,1.7vh,15px)}
+  .arrow{text-align:center;color:var(--purple);font-size:clamp(18px,3vh,30px);line-height:1}
+
+  .src-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1.4vh 1.4vw;margin-top:1.4vh}
+  .src{border:1px solid var(--line);border-radius:14px;padding:1.6vh 1.1vw;background:var(--surface);
+    display:flex;flex-direction:column;gap:.7vh;position:relative}
+  .src .name{font-weight:700;font-size:clamp(14px,2.2vh,21px);display:flex;align-items:center;gap:.5em}
+  .src .em{font-size:22px}
+  .src .ways{display:flex;gap:.5em;flex-wrap:wrap}
+
+  .bridge{display:flex;align-items:stretch;gap:1.4vw;margin-top:1.6vh}
+  .bridge .end{flex:1;border:1px dashed var(--line);border-radius:14px;padding:2vh 1.4vw;text-align:center;background:var(--bg2)}
+  .bridge .mid{flex:1.3;border:1px solid rgba(169,116,255,.4);border-radius:16px;padding:2.4vh 1.4vw;text-align:center;
+    background:linear-gradient(180deg,rgba(169,116,255,.14),rgba(79,140,255,.06))}
+  .bridge .end h3,.bridge .mid h3{font-size:clamp(15px,2.4vh,22px);margin-bottom:.6vh}
+  .bridge .end p,.bridge .mid p{color:var(--muted);font-size:clamp(12px,1.8vh,16px);line-height:1.5}
+
+  .bars{display:flex;flex-direction:column;gap:1.4vh;margin-top:1.6vh}
+  .bar{display:flex;align-items:center;gap:1.2vw}
+  .bar .lab{width:13em;font-size:clamp(12px,1.9vh,17px);color:var(--muted);text-align:right;flex-shrink:0}
+  .bar .track{flex:1;height:clamp(22px,3.4vh,34px);background:var(--surface2);border-radius:8px;overflow:hidden;border:1px solid var(--line)}
+  .bar .fill{height:100%;width:0;border-radius:8px;background:var(--grad);transition:width 1.1s cubic-bezier(.2,.7,.2,1);transition-delay:var(--d,0s)}
+  .slide.active .bar .fill{width:var(--w)}
+  .bar .val{font-family:"JetBrains Mono",monospace;font-weight:700;font-size:clamp(13px,2vh,19px);color:var(--text);min-width:5.5em}
+
+  .twocol{display:grid;grid-template-columns:1fr 1fr;gap:2vw;align-items:center}
+  .note-callout{border-left:3px solid var(--orange);padding:.6vh 1vw;background:rgba(255,138,76,.07);border-radius:0 10px 10px 0;
+    color:var(--text);font-size:clamp(13px,2vh,18px);line-height:1.55}
+
+  .github{display:inline-flex;align-items:center;gap:.6em;font-family:"JetBrains Mono",monospace;
+    color:var(--blue);font-size:clamp(15px,2.4vh,24px);text-decoration:none;border:1px solid var(--line);
+    padding:.7em 1.2em;border-radius:12px;background:var(--surface)}
+  .ai-note{display:flex;align-items:center;gap:.8em;margin-top:1.6vh;color:var(--muted);font-size:clamp(12px,1.9vh,17px)}
+  .ai-note .chip{background:rgba(169,116,255,.14);color:var(--purple);border:1px solid rgba(169,116,255,.35);
+    padding:.3em .8em;border-radius:999px;font-weight:700;font-size:clamp(11px,1.7vh,15px)}
+
+  svg{display:block}
+  .fade-svg{opacity:.9}
+
+  .ref-card{display:flex;align-items:center;gap:1.2vw;text-decoration:none;
+    background:var(--surface);border:1px solid var(--line);border-radius:12px;
+    padding:1.2vh 1.4vw;transition:transform .18s ease,border-color .18s ease,box-shadow .18s ease}
+  .ref-card:hover{transform:translateY(-2px);border-color:var(--blue);
+    box-shadow:0 8px 28px rgba(56,189,248,.16)}
+  .ref-card .ref-body{flex:1 1 auto;min-width:0}
+  .ref-card .ref-body h3{font-size:clamp(13px,1.9vh,18px);margin:0 0 .2vh;color:var(--text)}
+  .ref-card .ref-body p{margin:0;color:var(--muted);font-size:clamp(10px,1.5vh,14px);line-height:1.45;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ref-card .ref-go{flex:0 0 auto;color:var(--blue);font-size:clamp(16px,2.5vh,22px);font-weight:700;transition:transform .18s ease}
+  .ref-card:hover .ref-go{transform:translate(3px,-3px)}
+
+  .card.lim{padding:1.8vh 2vw;flex:0 0 auto;width:100%;box-sizing:border-box}
+  .lim-h{display:flex;align-items:center;gap:.7em;margin-bottom:.4vh}
+  .lim-n{flex:0 0 auto;width:1.9em;height:1.9em;border-radius:50%;display:grid;place-items:center;
+    background:rgba(169,116,255,.16);color:var(--purple);font-weight:800;font-size:clamp(13px,2vh,18px)}
+  .lim-h h3{margin:0;font-size:clamp(15px,2.3vh,21px);color:var(--text)}
+  .card.lim p{margin:.3vh 0 0}
+  .lim-go{color:var(--muted);font-size:clamp(12px,1.85vh,17px);line-height:1.5}
+  .bad{color:var(--orange);font-weight:700}
+  .good{color:var(--green);font-weight:700}
+  .vs-head{display:flex;align-items:center;gap:.5em;font-size:clamp(15px,2.4vh,22px);font-weight:800;margin-bottom:1.1vh}
+  .vs-side{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:2vh 1.6vw;height:100%;box-sizing:border-box}
+  .vs-side.old{border-color:rgba(255,138,76,.28)}
+  .vs-side.new{border-color:rgba(56,189,248,.34);box-shadow:0 0 0 1px rgba(56,189,248,.1)}
+  .vs-side.old .vs-head{color:var(--orange)}
+  .vs-side.new .vs-head{color:var(--blue)}
+  .folder-tree{font-size:clamp(12px,1.9vh,17px);line-height:1.7;color:var(--muted);
+    background:rgba(255,138,76,.05);border:1px dashed rgba(255,138,76,.32);border-radius:12px;padding:1.1vh 1.1vw;margin-bottom:1.2vh}
+  .folder-tree .f{display:block}
+  .folder-tree .f.lv1{padding-left:1.4em}
+  .folder-tree .f.lv2{padding-left:2.8em;color:var(--text);opacity:.78}
+  .folder-tree .leaf{display:block;padding-left:4.2em;color:var(--text);opacity:.6}
+  .tag-cloud{display:flex;flex-wrap:wrap;gap:.5em;background:rgba(56,189,248,.05);
+    border:1px dashed rgba(56,189,248,.32);border-radius:12px;padding:1.3vh 1.1vw;margin-bottom:1.2vh}
+  .vs-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:.7vh}
+  .vs-list li{position:relative;padding-left:1.5em;font-size:clamp(11px,1.85vh,16px);line-height:1.45;color:var(--muted)}
+  .vs-list li::before{position:absolute;left:0;top:0}
+  .vs-side.old .vs-list li::before{content:"✗";color:var(--orange)}
+  .vs-side.new .vs-list li::before{content:"✓";color:var(--green);font-weight:700}
+  .vs-side.new .vs-list li{color:var(--text)}
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="progress" id="progress"></div>
+  <div class="deck" id="deck">
+
+    <!-- ================= PAGE 1 · 封面 ================= -->
+    <section class="slide" data-i="0">
+      <div class="grid-bg"></div>
+      <div class="sec anim" style="--d:.05s"><span class="num">★</span> 软件答辩展示</div>
+      <h1 class="cover-title anim" style="--d:.2s">collector<span class="accent">lite</span></h1>
+      <p class="lead anim" style="--d:.45s;margin-top:1.4vh">从多平台收集收藏内容，并进行<span class="hl">分类</span>、<span class="hl-b">整理</span>、<span class="hl-p">批注</span>的本地桌面应用——做收藏夹与笔记之间的桥梁。</p>
+      <div class="stack anim" style="--d:.7s">
+        <span class="pill">Tauri 2</span>
+        <span class="pill">Rust</span>
+        <span class="pill">React + TypeScript</span>
+        <span class="pill">Vite</span>
+        <span class="pill">SQLite</span>
+      </div>
+      <div class="ai-note anim" style="--d:.95s"><span class="chip">AI 生成</span> 本项目全部代码由 AI 辅助编写（详见第三节）</div>
+    </section>
+
+    <!-- ================= PAGE 2 · （一）遇到问题 ================= -->
+    <section class="slide" data-i="1">
+      <div class="grid-bg"></div>
+      <div class="sec anim" style="--d:.05s">遇到的问题</div>
+      <h2 class="anim" style="--d:.2s">收藏越积越多，<span class="accent">管理却越来越难</span></h2>
+      <div class="row" style="margin-top:2.4vh">
+        <div class="card anim" style="--d:.4s">
+          <div class="ico">🌐</div>
+          <h3>① 收藏散落在多个平台</h3>
+          <p>B站、知乎、CSDN、GitHub、网易云……同一类内容分处各处，想起要看却找不到入口。</p>
+        </div>
+        <div class="card anim" style="--d:.6s">
+          <div class="ico">🗂️</div>
+          <h3>② 分类整理变困难</h3>
+          <p>收藏一多，原生收藏夹缺乏有效的组织手段，逐渐变成无从翻找的「黑洞」。</p>
+        </div>
+        <div class="card anim" style="--d:.8s">
+          <div class="ico">⏱️</div>
+          <h3>③ 无法批注、也跳不到重点</h3>
+          <p>收藏时写不出「为什么收」；长视频里真正要的那一小段，过后没法快速跳回去。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= PAGE 3 · （二）软件定位 ================= -->
+    <section class="slide" data-i="2">
+      <div class="grid-bg"></div>
+      <div class="sec anim" style="--d:.05s">软件定位</div>
+      <h2 class="anim" style="--d:.2s">多平台收藏的<span class="accent">收集 · 分类 · 整理 · 批注</span>中枢</h2>
+      <div class="bridge">
+        <div class="end anim" style="--d:.4s">
+          <h3>📑 各平台收藏夹</h3>
+          <p>散落、难以整理、无法批注</p>
+        </div>
+        <div class="mid anim" style="--d:.6s">
+          <h3>🌉 collectorlite</h3>
+          <p>统一收集 · 标签化 · 批注 · 检索 · 可恢复</p>
+        </div>
+        <div class="end anim" style="--d:.8s">
+          <h3>📝 笔记软件</h3>
+          <p>承接沉淀下来的思考与索引</p>
+        </div>
+      </div>
+      <div class="row" style="margin-top:2.2vh">
+        <div class="card anim" style="--d:1s"><div class="ico">🔗</div><h3>桥梁</h3><p>成为收藏与笔记之间的一环，把「存下来」接上「想明白」。</p></div>
+        <div class="card anim" style="--d:1.15s"><div class="ico">🧠</div><h3>辅助消化</h3><p>帮未看但已收藏的内容进入可被复习、可被定位的状态。</p></div>
+        <div class="card anim" style="--d:1.3s"><div class="ico">📌</div><h3>参考索引</h3><p>管理值得反复看、或能作为长期参考索引的内容。</p></div>
+      </div>
+    </section>
+
+    <!-- ================= PAGE 4 · （三）软件架构 ================= -->
+    <section class="slide" data-i="3">
+      <div class="grid-bg"></div>
+      <div class="sec anim" style="--d:.05s">软件的架构</div>
+      <h2 class="anim" style="--d:.2s">三层结构 · <span class="accent">代码完全由 AI 生成</span></h2>
+      <div class="arch">
+        <div class="layer anim" style="--d:.4s">
+          <span class="tag">FRONTEND</span>
+          <div><div class="body">React + TypeScript + Vite</div><div class="sub">收藏库 / 导入向导 / 标签管理 / 回收站 / 速记浮窗</div></div>
+        </div>
+        <div class="arrow anim" style="--d:.5s">↓</div>
+        <div class="layer anim" style="--d:.6s">
+          <span class="tag">BACKEND</span>
+          <div><div class="body">Rust + Tauri 2 命令层</div><div class="sub">统一 <span class="hl-p">SourceAdapter</span> 接口 · weapi 加密 · 协议唤起 · 增量同步</div></div>
+        </div>
+        <div class="arrow anim" style="--d:.7s">↓</div>
+        <div class="layer anim" style="--d:.8s">
+          <span class="tag">STORAGE</span>
+          <div><div class="body">本地 SQLite（sqlx）</div><div class="sub">只存元数据与链接，不下载内容 · 单文件 + FTS5 全文索引</div></div>
+        </div>
+      </div>
+      <div class="ai-note anim" style="--d:1s"><span class="chip">AI 编写</span> 架构设计、Rust 后端、前端与脚本均由 AI 辅助生成并迭代，开发者负责需求与校验。</div>
+    </section>
+
+    <!-- ================= PAGE 5 · （四）多平台收藏 ================= -->
+    <section class="slide" data-i="4">
+      <div class="grid-bg"></div>
+      <div class="sec anim" style="--d:.05s">多平台收藏</div>
+      <h2 class="anim" style="--d:.2s">三种导入方式，覆盖 <span class="accent">6 类来源</span></h2>
+      <div class="src-grid">
+        <div class="src anim" style="--d:.35s"><div class="name"><span class="em">📺</span> 哔哩哔哩</div><div class="ways"><span class="badge">登录账号</span><span class="badge o">链接</span></div></div>
+        <div class="src anim" style="--d:.45s"><div class="name"><span class="em">💡</span> 知乎</div><div class="ways"><span class="badge">登录账号</span><span class="badge o">链接</span></div></div>
+        <div class="src anim" style="--d:.55s"><div class="name"><span class="em">📝</span> CSDN</div><div class="ways"><span class="badge">平台检索</span><span class="badge o">链接</span></div></div>
+        <div class="src anim" style="--d:.65s"><div class="name"><span class="em">🐙</span> GitHub</div><div class="ways"><span class="badge">登录账号</span><span class="badge p">平台检索</span></div></div>
+        <div class="src anim" style="--d:.75s"><div class="name"><span class="em">🔖</span> 浏览器书签</div><div class="ways"><span class="badge p">平台检索</span></div></div>
+        <div class="src anim" style="--d:.85s"><div class="name"><span class="em">🎵</span> 网易云音乐</div><div class="ways"><span class="badge">登录账号</span><span class="badge o">链接</span></div></div>
+      </div>
+      <div class="row" style="margin-top:2vh">
+        <div class="card anim" style="--d:1s"><div class="ico">🔐</div><h3>登录账号导入</h3><p>B站扫码 / 知乎·网易云 Cookie / GitHub Token，拉取已收藏内容。</p></div>
+        <div class="card anim" style="--d:1.12s"><div class="ico">🔗</div><h3>链接导入</h3><p>粘贴单个视频、文章、歌单链接，直接入库。</p></div>
+        <div class="card anim" style="--d:1.24s"><div class="ico">🔍</div><h3>平台检索</h3><p>按用户名 / Stars / 书签文件检索并批量收集。</p></div>
+      </div>
+    </section>
+
+    <!-- ================= PAGE 6 · （五）标签化分类 ================= -->
+    <section class="slide" data-i="5">
+      <div class="grid-bg"></div>
+      <div class="sec anim" style="--d:.05s">标签化分类与检索</div>
+      <h2 class="anim" style="--d:.2s">传统文件夹式 <span class="bad">vs</span> 标签化收藏</h2>
+      <div class="twocol" style="align-items:stretch;margin-top:1.6vh">
+        <div class="vs-side old anim" style="--d:.4s">
+          <div class="vs-head">📁 传统文件夹式</div>
+          <div class="folder-tree">
+            <span class="f">📂 收藏夹</span>
+            <span class="f lv1">📂 技术</span>
+            <span class="f lv2">📂 编程</span>
+            <span class="leaf">· Rust 教程.mp4</span>
+            <span class="leaf">· 异步笔记.md</span>
+            <span class="f lv1">📂 音乐</span>
+          </div>
+          <ul class="vs-list">
+            <li>一条收藏只能放进<strong>一个</strong>文件夹，维度单一</li>
+            <li>跨主题内容被迫二选一，找不到合适归属</li>
+            <li>换平台 / 重命名要重建整套结构</li>
+            <li>平台原生收藏夹，数据不归自己</li>
+          </ul>
+        </div>
+        <div class="vs-side new anim" style="--d:.6s">
+          <div class="vs-head">🏷️ 标签化收藏</div>
+          <div class="tag-cloud">
+            <span class="badge">教程</span><span class="badge o">待看</span><span class="badge p">参考</span><span class="badge g">已消化</span><span class="badge">音乐</span><span class="badge">Rust</span>
+          </div>
+          <ul class="vs-list">
+            <li>一条收藏可打<strong>多个</strong>标签，跨维度自由重叠</li>
+            <li>共享标签池，导入 / 浏览随时追加，支持批量编辑</li>
+            <li>标签检索秒筛 + FTS5 全文检索（标题 / 描述 / 作者）</li>
+            <li>本地 SQLite，分类完全掌握在自己手里</li>
+          </ul>
+        </div>
+      </div>
+      <p class="lead anim" style="--d:.8s;margin-top:2vh">同一个「Rust 教程」既能归到<span class="hl-b">教程</span>、也能归到<span class="hl">待看</span>——不再为一棵树纠结。</p>
+    </section>
+
+    <!-- ================= PAGE 7 · （六）浏览器侧边栏插件 + 时间戳 ================= -->
+    <section class="slide" data-i="6">
+      <div class="grid-bg"></div>
+      <div class="sec anim" style="--d:.05s">浏览器侧边栏插件 · 时间戳</div>
+      <h2 class="anim" style="--d:.2s">看到即<span class="accent">收藏</span>，看到即<span class="hl">批注</span></h2>
+      <div class="twocol">
+        <div class="anim" style="--d:.4s">
+          <div class="card" style="height:100%">
+            <div class="ico">🧩</div>
+            <h3>侧边栏快速入库</h3>
+            <p>Chrome MV3 插件「collectorlite · 快速入库」：一键把当前网页收藏进本地应用，在侧边栏里直接<span class="hl-b">打标签、写批注</span>。</p>
+            <div style="margin-top:1.2vh;display:flex;gap:.5em;flex-wrap:wrap">
+              <span class="badge">一键收藏</span><span class="badge p">侧边栏</span><span class="badge g">即时批注</span>
+            </div>
+          </div>
+        </div>
+        <div class="anim" style="--d:.6s">
+          <div class="card" style="height:100%">
+            <div class="ico">⏱️</div>
+            <h3>时间戳功能</h3>
+            <p>速记浮窗读取正在播放的曲目 / 视频，记录<span class="hl">估算时间戳</span>，把「长内容里要的那一段」记下来，日后可快速跳回定位。</p>
+            <div class="note-callout" style="margin-top:1.2vh">直接回应「问题③」：收藏时写不清重点、长视频跳不回去。</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= PAGE 8 · （七）联动 Obsidian ================= -->
+    <section class="slide" data-i="7">
+      <div class="grid-bg"></div>
+      <div class="sec anim" style="--d:.05s">联动 Obsidian 笔记</div>
+      <h2 class="anim" style="--d:.2s">批注自动<span class="accent">沉淀进笔记库</span></h2>
+      <div class="bridge">
+        <div class="end anim" style="--d:.4s">
+          <h3>🌉 collectorlite</h3>
+          <p>对收藏内容写的批注 / 笔记</p>
+        </div>
+        <div class="mid anim" style="--d:.6s">
+          <h3>🔄 同步</h3>
+          <p><span class="pill">notes::save_notes</span> · <span class="pill">obsidian://</span> 协议唤起</p>
+        </div>
+        <div class="end anim" style="--d:.8s">
+          <h3>📝 Obsidian</h3>
+          <p>双链笔记库，承接长期思考</p>
+        </div>
+      </div>
+      <p class="lead anim" style="--d:1s;margin-top:2vh">在收藏里写的批注，经由本地同步进入 Obsidian，让「收藏 → 批注 → 笔记」形成闭环——这正是软件作为<span class="hl-p">桥梁</span>定位的落地。</p>
+    </section>
+
+    <!-- ================= PAGE 9 · （八）数据的可恢复性 ================= -->
+    <section class="slide" data-i="8">
+      <div class="grid-bg"></div>
+      <div class="sec anim" style="--d:.05s">数据的可恢复性</div>
+      <h2 class="anim" style="--d:.2s">删错不怕，<span class="accent">丢不了也回得去</span></h2>
+      <div class="twocol">
+        <div class="anim" style="--d:.4s">
+          <div class="card" style="height:100%">
+            <div class="ico">♻️</div>
+            <h3>回收站</h3>
+            <p>删除先进入回收站（软删除），保留期内可单条 / 批量<span class="hl-g">恢复</span>；超期自动清除，彻底删除才清封面与库。</p>
+            <div style="margin-top:1.2vh"><span class="badge g">默认保留 7 天</span></div>
+          </div>
+        </div>
+        <div class="anim" style="--d:.6s">
+          <div class="card" style="height:100%">
+            <div class="ico">💾</div>
+            <h3>定时备份</h3>
+            <p>一键 / 定时把整库（含标签与分类）导出为 <span class="hl-b">JSON</span> 写入指定备份文件夹，迁移与恢复都有据可依。</p>
+            <div class="pill" style="margin-top:1.2vh;display:inline-block">backup_now → 备份文件夹</div>
+          </div>
+        </div>
+      </div>
+      <p class="lead anim" style="--d:.8s;margin-top:2vh">本地优先、单文件存储，让数据既「随手可备份」又「误删可挽回」。</p>
+    </section>
+
+    <!-- ================= PAGE 10 · （九）性能测试与优化 ================= -->
+    <section class="slide" data-i="9">
+      <div class="grid-bg"></div>
+      <div class="sec anim" style="--d:.05s">性能测试与优化</div>
+      <h2 class="anim" style="--d:.2s">导入<span class="accent">更快</span>，占用<span class="hl-g">更轻</span></h2>
+      <div class="twocol" style="margin-top:1.4vh;align-items:flex-start;gap:2.4vw">
+        <div class="anim" style="--d:.4s">
+          <h3 style="font-size:clamp(15px,2.3vh,21px);margin-bottom:1vh">⏱️ 导入速度</h3>
+          <div class="bars">
+            <div class="bar anim" style="--d:.5s">
+              <span class="lab" style="width:6.5em;text-align:left">1000 条端到端</span>
+              <div class="track"><div class="fill" style="--w:100%"></div></div>
+              <span class="val">30–60 s</span>
+            </div>
+            <div class="bar anim" style="--d:.62s">
+              <span class="lab" style="width:6.5em;text-align:left">本地写入</span>
+              <div class="track"><div class="fill" style="--w:1%"></div></div>
+              <span class="val hl-g">0.2 s</span>
+            </div>
+          </div>
+          <div class="note-callout" style="margin-top:1.2vh">
+            B站 1000 条端到端 <span class="hl">30–60 s</span>，主瓶颈是 <span class="hl">封面 8 并发下载 + 网络往返</span>，本地写入那 0.2 s 几乎可忽略。
+          </div>
+          <div style="margin-top:1vh;color:var(--muted);font-size:clamp(11px,1.7vh,15px);line-height:1.55">
+            写入天花板已优化：批量写 <span class="hl">48.6 s → 0.6 s</span>（单事务，~80×）。
+          </div>
+        </div>
+        <div class="anim" style="--d:.6s">
+          <h3 style="font-size:clamp(15px,2.3vh,21px);margin-bottom:1vh">💽 空间占用</h3>
+          <div class="card" style="margin-bottom:1.1vh">
+            <h3 style="font-size:clamp(14px,2.1vh,19px)">库里 3000 条 ≈ 7 MB</h3>
+            <p>SQLite 主库（含标签 + 全文索引）。每条元数据 ≈ 124 字节，只存链接、不下载正文。</p>
+          </div>
+          <div class="card" style="margin-bottom:1.1vh">
+            <h3 style="font-size:clamp(14px,2.1vh,19px)">封面另算、按需缓存</h3>
+            <p>封面后台拉取、<span class="hl-b">不计入主库</span>；当前 9 张 ≈ 2.5 MB。优化方向：请求缩略图 + 落地转 WebP。</p>
+          </div>
+          <div class="card">
+            <h3 style="font-size:clamp(14px,2.1vh,19px)">原图 vs 优化</h3>
+            <p>3000 张原图封面可达 <span class="hl">~800 MB+</span>，缩略图 + WebP 后约 <span class="hl-g">50–90 MB</span>。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= PAGE 10 · 不足与展望 ================= -->
+    <section class="slide" data-i="10">
+      <div class="grid-bg"></div>
+      <div class="sec anim" style="--d:.05s">不足与展望</div>
+      <h2 class="anim" style="--d:.2s">现在的<span class="accent">短板</span>，下一步的<span class="hl-g">方向</span></h2>
+      <div class="row" style="margin-top:2.2vh;flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:1.5vh">
+        <div class="card lim anim" style="--d:.4s">
+          <div class="lim-h"><span class="lim-n">1</span><h3>移动端缺位</h3></div>
+          <p><span class="bad">现状</span> 目前仅桌面端（Windows / macOS），无法覆盖手机、iPad 等移动设备。</p>
+          <p class="lim-go">→ <span class="good">展望</span> 推出移动端 / 网页版或打通跨端同步，让收藏随时随地可读、可记。</p>
+        </div>
+        <div class="card lim anim" style="--d:.55s">
+          <div class="lim-h"><span class="lim-n">2</span><h3>标签靠人工维护</h3></div>
+          <p><span class="bad">现状</span> 标签需手动创建与归类，收藏一多维护成本随之上升。</p>
+          <p class="lim-go">→ <span class="good">展望</span> 自动识别提取导入内容标题中的关键字，辅助生成标签、降低人工负担。</p>
+        </div>
+        <div class="card lim anim" style="--d:.7s">
+          <div class="lim-h"><span class="lim-n">3</span><h3>「辅助消化」不明显</h3></div>
+          <p><span class="bad">现状</span> 辅助消化收藏的功能体现不突出，仍可能「进了收藏夹吃灰」。</p>
+          <p class="lim-go">→ <span class="good">展望</span> 强化消化机制：待看队列、回顾提醒、进度标记，把「存」真正变成「看」。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= PAGE 11 · 参考的内容 ================= -->
+    <section class="slide" data-i="11">
+      <div class="grid-bg"></div>
+      <div class="sec anim" style="--d:.05s">参考的内容</div>
+      <h2 class="anim" style="--d:.2s">项目<span class="accent">参考</span>与<span class="hl-g">灵感来源</span></h2>
+      <div class="row" style="margin-top:2vh;flex-direction:column;align-items:stretch;gap:1.1vh">
+        <a class="ref-card anim" style="--d:.4s" href="https://www.bilibili.com/video/BV1Su411r7qp/?spm_id_from=333.337.search-card.all.click&vd_source=8886d87fa5f363b3db03d4f89021b0a0" target="_blank" rel="noopener">
+          <div class="ref-body">
+            <h3>B站视频：收藏管理思路参考（一）</h3>
+            <p>BV1Su411r7qp · 产品思路与交互参考</p>
+          </div>
+          <span class="ref-go">↗</span>
+        </a>
+        <a class="ref-card anim" style="--d:.48s" href="https://www.bilibili.com/video/BV1ji4y1R7Sf/?spm_id_from=333.337.search-card.all.click&vd_source=8886d87fa5f363b3db03d4f89021b0a0" target="_blank" rel="noopener">
+          <div class="ref-body">
+            <h3>B站视频：收藏管理思路参考（二）</h3>
+            <p>BV1ji4y1R7Sf · 产品思路与交互参考</p>
+          </div>
+          <span class="ref-go">↗</span>
+        </a>
+        <a class="ref-card anim" style="--d:.56s" href="https://cubox.pro/" target="_blank" rel="noopener">
+          <div class="ref-body">
+            <h3>Cubox · 稍后读 / 剪藏工具</h3>
+            <p>收藏与稍后读产品，收藏管理思路参考</p>
+          </div>
+          <span class="ref-go">↗</span>
+        </a>
+        <a class="ref-card anim" style="--d:.64s" href="https://www.notion.com/" target="_blank" rel="noopener">
+          <div class="ref-body">
+            <h3>Notion · 笔记与知识库</h3>
+            <p>结构化整理与知识管理思路参考</p>
+          </div>
+          <span class="ref-go">↗</span>
+        </a>
+        <a class="ref-card anim" style="--d:.72s" href="https://github.com/TLRKFXE/BiliShelf" target="_blank" rel="noopener">
+          <div class="ref-body">
+            <h3>BiliShelf · GitHub 开源项目</h3>
+            <p>同类收藏管理项目，架构与功能借鉴参考</p>
+          </div>
+          <span class="ref-go">↗</span>
+        </a>
+      </div>
+    </section>
+
+    <!-- ================= PAGE 12 · （十）感谢 ================= -->
+    <section class="slide" data-i="12">
+      <div class="grid-bg"></div>
+      <div class="sec anim" style="--d:.05s">感谢</div>
+      <h1 class="anim" style="--d:.2s">谢谢观看 · <span class="accent">恳请批评指正</span></h1>
+      <p class="lead anim" style="--d:.45s;margin-top:1.6vh">collectorlite 仍在迭代：浏览器插件、更多来源、数据可视化都在路上。欢迎到仓库交流。</p>
+      <div class="anim" style="--d:.7s;margin-top:3vh">
+        <a class="github" href="https://github.com/OwOlioh/collectorlite" target="_blank" rel="noopener">🔗 github.com/OwOlioh/collectorlite</a>
+      </div>
+      <div class="ai-note anim" style="--d:.9s"><span class="chip">AI 生成</span> 本展示与项目代码均由 AI 辅助完成。</div>
+    </section>
+
+  </div>
+  <div class="navzone nav-l" id="navL"></div>
+  <div class="navzone nav-r" id="navR"></div>
+  <div class="pagenum" id="pagenum"></div>
+  <div class="hint">← → 翻页 · 滚轮 · 点击左右 · 触屏滑动</div>
+</div>
+
+<script>
+  const deck = document.getElementById('deck');
+  const slides = Array.from(deck.querySelectorAll('.slide'));
+  const progress = document.getElementById('progress');
+  const pagenum = document.getElementById('pagenum');
+  let idx = 0;
+  const total = slides.length;
+
+  function render(){
+    slides.forEach((s,i)=>s.classList.toggle('active', i===idx));
+    progress.style.width = ((idx)/(total-1)*100)+'%';
+    pagenum.textContent = (idx+1) + ' / ' + total;
+  }
+  function go(n){
+    idx = Math.max(0, Math.min(total-1, n));
+    render();
+  }
+  document.addEventListener('keydown', e=>{
+    if(e.key==='ArrowRight'||e.key==='PageDown'){go(idx+1);e.preventDefault();}
+    if(e.key==='ArrowLeft'||e.key==='PageUp'){go(idx-1);e.preventDefault();}
+    if(e.key==='Home'){go(0);}
+    if(e.key==='End'){go(total-1);}
+  });
+  let wheelLock=false;
+  window.addEventListener('wheel', e=>{
+    if(wheelLock) return;
+    if(Math.abs(e.deltaY)<8) return;
+    wheelLock=true; go(idx + (e.deltaY>0?1:-1));
+    setTimeout(()=>wheelLock=false, 650);
+  }, {passive:true});
+  document.getElementById('navL').addEventListener('click', ()=>go(idx-1));
+  document.getElementById('navR').addEventListener('click', ()=>go(idx+1));
+  let tx=null;
+  window.addEventListener('touchstart', e=>{tx=e.touches[0].clientX;}, {passive:true});
+  window.addEventListener('touchend', e=>{
+    if(tx===null) return;
+    const dx = e.changedTouches[0].clientX - tx;
+    if(Math.abs(dx)>50) go(idx + (dx<0?1:-1));
+    tx=null;
+  }, {passive:true});
+
+  render();
+</script>
+</body>
+</html>
