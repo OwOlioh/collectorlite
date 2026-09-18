@@ -1502,4 +1502,274 @@ Shell 说的不算，注册表说了算。已用单测钉死 + 变异验证通�
 - [ ] **真机验证**：`npm run dev` + `cargo run` → `Ctrl+Alt+S`；或设置页 → 速记浮窗 → 打开面板。
       需确认：面板弹出 / 读到曲目 / 插入时间戳 / 保存后能在收藏库搜到。
 - [ ] 托盘图标（用户 2026-09-12 暂未决定要不要，先搁置）。
+
+---
+
+## 十、浏览器扩展脱离 GUI 独立使用（A 后台桥 + C 离线队列，2026-09-16 已落地）
+
+### 10.1 需求背景
+
+浏览器扩展（MV3 `sidepanel.js` + `sw.js`）原本依赖 `capture.rs` 的本地桥实时写库。桥由 **GUI 进程** 拉起
+（`capture::start` 在 `setup` 里无条件启动），所以**应用不开，桥就不在，插件就收藏不了**。
+
+目标：让插件在**应用完全没打开（甚至 GUI 进程没起）**时也能收藏网页；并且桥暂时不可达时还能把
+收藏/笔记攒着，等桥恢复后自动补录。
+
+### 10.2 设计决策（已拍板 2026-09-16；A+C）
+
+- **A. 独立后台桥 `--bridge-only`**：新增一个启动模式——不建主窗口、只跑 `capture` 桥 +
+  系统托盘常驻，并支持「开机自启」（写注册表）。GUI 完全没启动也能收藏。
+- **C. 插件离线缓存队列**：桥不可达时把收藏/笔记攒进 `chrome.storage.local`，恢复后自动回放。
+
+**为什么选 A 而不是「常驻一个隐藏窗口」**：`capture.rs` 的桥逻辑（`handle_capture` / `route_capture`）
+完全独立于窗口，只用 `AppHandle` 取 `AppState`、读写同一 SQLite 库，刷新只靠 `app.emit`（无 GUI 时
+no-op 无害）。因此后台桥进程复用同一份写库路径，几乎不碰桥逻辑，最小侵入、零重复实现。
+
+### 10.3 数据契约 / 通信方式
+
+- 桥监听 `127.0.0.1:17820–17829` + 请求头 `X-Bridge-Token`（值来自 `data_dir/bridge_token.txt`）。
+- **鉴权门禁**：无 token → `401`；带 token → 正常路由。后台桥进程与 GUI 进程**共用同一 SQLite 库（WAL）**。
+- `capture::start` 端口被占满时只告警、不阻断启动（后台桥与 GUI 同时跑也安全）。
+
+### 10.4 实施清单（改动文件）
+
+| 文件 | 改动 |
+|---|---|
+| `src-tauri/src/lib.rs` | `run()` 顶部解析 `--bridge-only`；`setup` 内条件建窗口/封面缓存/网易云同步/快捷键；后台桥模式改建系统托盘；`run` 闭包里 `ExitRequested`→`prevent_exit`；新增 `create_main_window` / `build_bridge_tray` 辅助函数 |
+| `src-tauri/tauri.conf.json` | `app.windows` 置空，主窗口改由 `create_main_window` 在 `setup` 里条件创建（否则后台桥会误建 GUI） |
+| `src-tauri/Cargo.toml` | `tauri` features 加 `tray-icon`（托盘类型来自 `tauri::tray`） |
+| `src-tauri/src/db.rs` | `connect()` 加 `.busy_timeout(Duration::from_secs(30))`：GUI 与后台桥并发写同一 WAL 库时重试而非 `database is locked` |
+| `src-tauri/src/commands.rs` | 新增 `get_bridge_autostart` / `set_bridge_autostart`（Windows 写 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `collectorlite-bridge` = `"<exe>" --bridge-only`） |
+| `src/lib/api.ts` + `src/components/SettingsPage.tsx` | 设置页「开机自启后台桥」开关，切换调 `api.setBridgeAutostart(next)` |
+| `extension/sidepanel.js` + `extension/sidepanel.css` | 离线缓存队列（`bridgeFetchOrNull` + `pendingCaptures` + `flushOffline` + 30s 定时回放） |
+
+### 10.5 核心流程（后台桥启动）
+
+```
+bili-collector.exe --bridge-only
+  └─ run() 解析 bridge_only=true
+       ├─ AppState::new(handle)        // 仅取 data_dir，不依赖窗口
+       ├─ capture::start(handle)       // 桥照常起，监听 17820–17829
+       └─ bridge_only 分支：
+            ├─ build_bridge_tray(app)   // 系统托盘：打开主程序 / 退出后台桥
+            └─ run 闭包里 ExitRequested → api.prevent_exit()  // 进程靠托盘常驻
+```
+
+托盘菜单「打开 collectorlite」= 不带 `--bridge-only` 地再起一个进程（正常 GUI）；
+「退出后台桥」= `app.exit(0)`。
+
+### 10.6 ⚠️ 必须避开的坑
+
+#### 10.6.1 Tauri 2 无窗口启动会秒退（必踩）
+
+**只建托盘不够**。Tauri 2 在「没有任何窗口」的进程启动时，会触发 `RunEvent::ExitRequested` 并按默认行为
+直接退出——托盘拦不住。表现：日志里 `[capture] 桥已启动：http://127.0.0.1:17820` 之后进程立刻消失。
+
+**修复**：把 `.run(ctx)` 改成 `.build(ctx).run(闭包)`，在闭包里对后台桥模式 `ExitRequested` 调
+`api.prevent_exit()`（Tauri 托盘常驻的标准写法）；正常 GUI 模式保持「最后窗口关闭即退出」不变：
+
+```rust
+.run(move |_app, event| {
+    // 后台桥模式没有主窗口，Tauri 启动时会因「无窗口」触发 ExitRequested 而直接退出；
+    // 这里阻止默认退出，让进程靠系统托盘常驻，直到用户在托盘选「退出后台桥」(app.exit)。
+    if bridge_only {
+        if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            api.prevent_exit();
+        }
+    }
+});
+```
+
+#### 10.6.2 LNK1104：调试实例占用产物导致链接失败
+
+见第九章的构建调试惯例——本仓库可执行文件名为 **`bili-collector.exe`（连字符）**，debug 产物是
+`target/debug/bili-collector.exe`（deps 下那份是硬链接）。**有上一次 debug 实例还在跑就会锁住 exe**，
+`cargo build` 在最后 link 阶段报 `LINK : fatal error LNK1104: 无法打开文件 "...\bili_collector.exe"`。
+这不是代码错误：先 `tasklist /FI "IMAGENAME eq bili-collector.exe"` 查出占用者，`taskkill /F /IM bili-collector.exe`
+释放后再 `cargo build` 一次过。
+
+#### 10.6.3 验证常驻进程时，后台 shell 用 `&` 挂起的子进程会被回收
+
+本环境的后台任务在「前台命令结束」时会把整个进程组一起清掉。所以验证常驻要把 exe 直接作为后台任务的
+**前台进程**来跑（不要挂 `&`）：
+
+```bash
+# ✅ 正确：exe 是后台任务的前台进程，任务存活期间才真常驻
+exec /path/to/bili-collector.exe --bridge-only > /tmp/smoke.log 2>&1
+# ❌ 错误：& 挂起后，外层 shell 一退出子进程就被回收，看起来像「秒退」
+bili-collector.exe --bridge-only & echo launched
+```
+
+### 10.7 验证记录（2026-09-16 冒烟）
+
+`exec bili-collector.exe --bridge-only`（不加 `&`）直跑：
+
+- 进程 `RUNNING`，托盘创建无报错；
+- `/ping` 无 token → **401**（鉴权门禁 OK），带 token → `200 {"ok":true,"app":"bili-collector","port":17820}`；
+- `/tags` → **200**（证明桥直接读写同一 SQLite 库、无 GUI 也能用）；
+- 测试进程已 `taskkill` 清理，未留尾巴。
+
+写入路径（`handle_capture` / `route_capture`）与 GUI 模式完全共用、未改动，生产环境已验证。
+
+### 10.8 待办 / 备注
+
+- 开机自启目前仅 Windows（注册表），非 Windows 平台命令返回 `false`（托盘「退出后台桥」在桌面平台外不可用，但桥仍能跑）。
+- 后端 `winreg` 已在依赖中，无需新增 crate。
+- 未做成 skill（用户 2026-09-16 决定：只入开发日志）。
+
 - [ ] 快捷键被占用时用户看不到告警（只有 eprintln），设置页目前只有兜底按钮、没有状态提示。
+## 十一、A2：离线也能用笔记 / 时间戳 / Obsidian（2026-09-16 已落地）
+
+### 11.1 需求背景
+
+第十章落地后离线补录已经能用，但用户反馈：**笔记功能要等补录完成（也就是启动应用之后）才「开放」**。
+期望是离线状态下也能正常写笔记、插时间戳、用 Obsidian 打开。
+
+### 11.2 根因诊断
+
+不是「存不进」，而是 **UI 被 `state.item` 卡死**，外加后端一条 404 依赖：
+
+| 位置 | 现象 |
+|---|---|
+| `sidepanel.js` `markDirty()` | 开头 `if (!state.item) return;` —— 离线打字根本不触发草稿/自动保存/入队 |
+| `sidepanel.js` `renderNoteChrome()` | `open = Boolean(state.item)` —— 显示「笔记已锁定」徽标 |
+| `capture.rs` `POST /note` | `lookup_item` 找不到条目直接 **404**「这一页还没收藏」—— 离线笔记必须等 capture 先建出条目 |
+
+时间戳本身是纯本地文本插入（`insertTimestamp` 只读写 `state.page`，不碰桥），所以**编辑器一解锁就自动可用**；
+Obsidian 打开走桥的 `ShellExecute`，离线不可用，需要另外补。
+
+### 11.3 实施清单
+
+| 文件 | 改动 |
+|---|---|
+| `extension/sidepanel.js` | `renderNoteChrome` 改为 `Boolean(state.item) \|\| !state.online`（离线视为已开放）；`markDirty` 只在「在线且无 item」时短路；`saveNote` 离线分支入队且 payload 带 `title`（供 flush 建条目用） |
+| `extension/sidepanel.js` | 新增 `captureFromNote`：`flushOffline` 回放 note 遇 404 时，先用标题调 `/capture` **不带 note** 把条目建出来再回放，让「只写笔记没点收藏」也能完整落库 |
+| `extension/sidepanel.js` | `openInObsidianOffline`：JS 复刻 Rust 的 `sanitize_filename` / `rel_for_new` / `urlencode` 算出相对路径，拼 `obsidian://new?vault=&file=&content=` 用 `chrome.tabs.create` 唤起 |
+| `src-tauri/src/capture.rs` | `/obsidian/status` 补 `vaultName` + `subdir`（URI 的 `vault` 参数是**名**不是路径，与 Rust `settings.vault_name` 同源）；新增 `POST /obsidian/claim` |
+
+### 11.4 根治「离线 Obsidian 多建一个文件」
+
+这一步是用户追问后读代码才定位到精确成因的：
+
+1. 离线点「打开」→ 插件用 `obsidian://new` 在 vault 建了文件（路径 P），内容是插件自己拼的，**不含 Rust 的 `collector_id` frontmatter**。
+2. 启动 app，`write_or_update_note` 同步该 item，`item.obsidian_path` 仍为空 → 走 `resolve_unique_rel`。
+3. 它发现 P 已存在 → 读内容找 `collector_id` → 找不到 → 判定「不是我建的」 → 用 `[source-id前8]` 消歧**又建一个**。
+
+解法是**认领而不是重建**：`write_or_update_note` 本来就有「已有映射优先更新」分支，只要 `obsidian_path` 被正确设置且文件存在，就会只改托管区、不新建。所以补一个 `POST /obsidian/claim`：
+按 url 找 item，`get_item_obsidian_path` 判空后才 `set_item_obsidian_path` 写入（已有映射不动，不挤掉用户手动改过的路径），并拒绝空 path 与含 `..` 的路径。
+
+### 11.5 验证记录
+
+bridge-only 冒烟：`/obsidian/status` 返回 `vaultName:"lioh"` / `subdir:"收藏"`；claim 端点——不存在 url → **404**、`..` 路径 → **400**、无 token → **401**。
+
+> ⚠️ 待用户实测：`chrome.tabs.create({ url: 'obsidian://...' })` 能否唤起 Obsidian 客户端，无头环境验证不了。
+> Rust 里 `handle_obsidian_open` 的注释说「浏览器会拦截外部协议导航」，但那说的是页面内 `<a href>` /
+> `location.href` 导航，扩展的 `tabs.create` 行为不同（Obsidian Web Clipper 正是这么做的）。
+
+---
+
+## 十二、A3：Obsidian 双向同步 + 自定义关联笔记（2026-09-17 已落地）
+
+### 12.1 需求与决策（用户拍板）
+
+用户要的是：**侧边栏能关联自己挑选的笔记文件**（不再固定在 `收藏/标题.md` 自动生成），并且
+**批注内容与笔记内容双向同步**。暂时按 **1 条收藏 ↔ 1 个笔记文件** 建模。
+
+| 决策项 | 结论 |
+|---|---|
+| 冲突策略 | **Obsidian 优先 + 留痕**（文件版本胜出拉回 app，app 侧版本存留痕副本不丢） |
+| 文件被删 | **取消关联**并给提示，不静默重建 |
+| 变更检测 | **轮询**（默认 30s）+ 关键时刻触发一次 + 手动「立即同步」 |
+| 数据模型 | 1 条收藏 ↔ 1 个笔记文件 |
+
+### 12.2 为什么双向是可行的：托管区模型
+
+`NOTES_START` / `NOTES_END` 之间是 app 的地盘，END 之后是用户区、app 永不触碰。这条边界让双向天然安全：
+**双向只在托管区内进行**，用户在 Obsidian 里自由写的内容不会被吞掉。
+
+缺的只有一块：判断「谁改过」需要一个上次同步的快照。原 `0008_obsidian_sync.sql` 只有一列 `obsidian_path`，
+没有任何 base / hash 记录，所以答不出「这是你在 Obsidian 改的，还是 app 改的」。
+
+### 12.3 数据模型（`0012_obsidian_sync_state.sql`）
+
+新增两张表（**不往 `items` 加列**：base_hash 只在已关联的收藏上有意义，加进 `items` 会放大
+`ITEM_ROW_COLUMNS` 的漏列风险，见第三章的头号坑）：
+
+- `obsidian_sync_state(item_id PK, rel_path, base_hash, file_mtime, file_size, synced_at)`
+- `obsidian_sync_lease(id=1, holder, heartbeat_at)` —— 单行租约
+
+`base_hash` 是托管区正文的哈希，**唯一可靠判据**；`file_mtime` / `file_size` 只用于廉价跳过，
+因为编辑器可能在内容没变的情况下重写文件（mtime 照样刷新）。
+
+### 12.4 三方合并判定
+
+对每个已关联的 item 取三个值：`base`（上次同步快照）、`file`（vault 里现在的）、`db`（库里现在的）。
+
+| base vs file | base vs db | 判定 | 动作 |
+|---|---|---|---|
+| 同 | 同 | 无变化 | 跳过 |
+| 同 | 变 | 只有库变了 | 推送到文件 |
+| 变 | 同 | 只有文件变了 | 拉回库 |
+| 变 | 变 | **两边都改了** | 冲突：Obsidian 优先 + 留痕 |
+| — | — | 文件不存在 | 取消关联 + 提示 |
+
+留痕落在 vault 根的 `.collector-conflicts/`，文件名带 item id 与时间戳，内容是被覆盖掉的 app 侧版本。
+
+### 12.5 为什么选轮询而不是 `notify` 监听
+
+只 stat **已建立映射的那几十到几百个文件**（不是扫整个 vault），一次几十次 stat，开销可忽略。
+代价是最多等一个轮询间隔，用两招补：**打开侧边栏 / 点开某条收藏时额外触发一次**，
+以及侧边栏的手动「立即同步」按钮。
+
+引 `notify` 则要处理 Obsidian 保存时「写临时文件再 rename」的事件序列与抖动去重，复杂度不值。
+
+**不会自触发死循环**：每轮结束把 `base_hash` 更新成刚写入的内容，下一轮比对发现「文件与 base 一致」
+判定无变化直接跳过。不需要任何「忽略自己写入」的标志，天然收敛。
+
+### 12.6 必须避开的坑（本次实际踩到 / 主动规避）
+
+1. **托管区读写必须严格互逆**（本次真踩到）：初版 `read_managed_note` 用 `.trim()` 去掉了一对首尾换行，
+   写回时却没补回去 —— 每同步一次就多吞一格空白，内容持续漂移，**轮询会永远认为有改动 → 死循环**。
+   已用单测 `read_then_write_is_idempotent` 钉死（连续三轮读写字节不变）。
+2. **双向死循环**：拉取方向更新 `items.notes` 会触发 `save_notes` → 推送 → 再拉取。
+   所以拉取必须绕过推送链路直接写库。
+3. **双进程竞态**：GUI 与 `--bridge-only` 可能同时在跑，两边同时写同一批文件会互相覆盖 —— 用上面那张租约表
+   （holder + 心跳，`LEASE_STALE_SECS = 120` 超时可抢占）。轮询循环在两种启动模式下都会拉起，靠租约只让一个真正干活。
+4. **关联用户已有笔记**：用户自己的笔记里当然没有 collector 标记，直接关联会导致同步被跳过
+   （`update_existing_note` 找不到标记返回 `None`）。所以 `/obsidian/link` 在目标文件无标记时
+   **往文件末尾追加托管区**，原有内容一字不动。
+5. **删标记的语义升级**：单向时代是「跳过同步」，双向下应理解为「取消托管」（清 base + 断开）。
+
+### 12.7 实施清单
+
+| 文件 | 改动 |
+|---|---|
+| `src-tauri/migrations/0012_obsidian_sync_state.sql` | 状态表 + 租约表 |
+| `src-tauri/src/obsidian_sync.rs`（新） | `sync_once` 三方合并、`start_obsidian_sync_loop` 轮询循环（启动延迟 15s）、租约获取/续约、冲突留痕 |
+| `src-tauri/src/obsidian.rs` | 抽出 `ManagedNote` / `read_managed_note` / `write_managed_note` / `hash_text` 等原语，与 `update_existing_note` 行为一致（缺标记返回 `None`）；补 11 个单测 |
+| `src-tauri/src/notes.rs` | `save_notes` 推送成功后 `record_sync_snapshot` 写 base；提供绕过推送的写库入口供拉取方向使用 |
+| `src-tauri/src/db.rs` | `get/upsert/delete_obsidian_sync_state`、租约获取/续约 |
+| `src-tauri/src/capture.rs` | 新增 `GET /obsidian/files?q=`（递归扫 vault 的 md，排除点开头目录，模糊匹配限条数，响应带 `managed` 标记）、`POST /obsidian/link`、`POST /obsidian/unlink`、`POST /obsidian/sync`（立即同步） |
+| `extension/sidepanel.html/js/css` | 「关联笔记」入口 + 搜索面板（列出候选 md，已关联的显示文件名并可取消关联）+「立即同步」按钮 |
+
+### 12.8 端到端验证记录（真库真 vault，测试后已清理复原）
+
+| 项 | 结果 |
+|---|---|
+| 关联用户已有笔记 | ✅ 用户原有内容一字未动，托管区干净追加在末尾 |
+| 拉取（用户在 Obsidian 改托管区 → 同步） | ✅ 数据库 notes 已更新 |
+| **幂等**（连跑 3 轮） | ✅ 零操作，文件 md5 完全一致，无漂移 |
+| 推送（库里改 → 同步到文件） | ✅ 文件更新且用户区完整保留 |
+| 冲突（两边同时改） | ✅ Obsidian 版本胜出写入库，app 侧版本留在 `.collector-conflicts/` |
+| 文件被删 | ✅ `obsidian_path` 清空、快照记录清除 |
+
+端点鉴权/校验：`files` 无 token → 401；`link` 未知 url → 404、path 含 `..` → 400。
+
+### 12.9 已知遗留
+
+- **迁移 0011 在全新库会失败**（`ALTER TABLE item_tags DROP COLUMN auto_assigned` ——
+  该列从未被任何迁移创建过，是实验性自动打标功能回滚时留下的）。**与本次改动无关**：
+  失败发生在版本 11，我的 0012 根本没跑到；用户的真实库 0011 已 applied 所以无感。
+  但**全新安装会起不来**，需要单独修（改 0011 内容会破坏 checksum，须先在真实库
+  `DELETE FROM _sqlx_migrations WHERE version=11`，见第三章迁移 checksum 坑）。
+- 侧边栏 `chrome.tabs.create` 唤起 Obsidian 客户端仍需真机实测（同 11.5）。
